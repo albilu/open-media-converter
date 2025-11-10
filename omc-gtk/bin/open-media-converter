@@ -1,0 +1,343 @@
+#!/usr/bin/env bash
+###############################################################################
+# Open Media Converter Launcher Script
+# 
+# This script launches the Open Media Converter application with proper
+# environment configuration for GTK 4, java-gi, and embedded tool binaries.
+#
+# Usage: open-media-converter [OPTIONS] [FILES...]
+#
+# Options:
+#   --help          Show usage information
+#   --version       Show version information
+#   --debug         Enable debug logging
+#   --config-dir    Override default config directory
+#
+# Environment Variables:
+#   JAVA_HOME       Path to Java installation (optional)
+#   OMC_DEBUG       Enable debug mode if set to 1
+#   GTK_THEME       Override GTK theme (optional)
+###############################################################################
+
+set -e
+
+# Script directory and application root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Application metadata
+APP_NAME="Open Media Converter"
+APP_VERSION="1.0.0-SNAPSHOT"
+APP_JAR="open-media-converter-${APP_VERSION}.jar"
+
+# Color output for terminal
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Logging functions
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1" >&2
+}
+
+log_debug() {
+    if [[ "${OMC_DEBUG}" == "1" ]] || [[ "${DEBUG_MODE}" == "1" ]]; then
+        echo -e "${BLUE}[DEBUG]${NC} $1"
+    fi
+}
+
+# Show usage information
+show_usage() {
+    cat <<EOF
+${APP_NAME} v${APP_VERSION}
+
+Usage: open-media-converter [OPTIONS] [FILES...]
+
+OPTIONS:
+    --help          Show this help message
+    --version       Show version information
+    --debug         Enable debug logging
+    --config-dir DIR
+                    Override default config directory
+    -h              Same as --help
+    -v              Same as --version
+
+EXAMPLES:
+    open-media-converter
+                    Launch the application
+    
+    open-media-converter video.mp4 audio.flac
+                    Launch with files pre-loaded
+    
+    open-media-converter --debug
+                    Launch with debug logging enabled
+
+ENVIRONMENT VARIABLES:
+    JAVA_HOME       Path to Java installation
+    OMC_DEBUG       Set to 1 to enable debug mode
+    GTK_THEME       Override GTK theme (e.g., "Adwaita:dark")
+    GDK_BACKEND     Force GDK backend (x11 or wayland)
+
+For more information, visit:
+https://github.com/albilu/open-media-converter
+
+EOF
+}
+
+# Show version information
+show_version() {
+    echo "${APP_NAME} v${APP_VERSION}"
+    echo "Copyright © 2025 Open Media Converter Team"
+    echo "Licensed under the MIT License"
+}
+
+# Detect Java installation
+detect_java() {
+    local java_cmd=""
+    
+    # Try JAVA_HOME first
+    if [[ -n "${JAVA_HOME}" ]] && [[ -x "${JAVA_HOME}/bin/java" ]]; then
+        java_cmd="${JAVA_HOME}/bin/java"
+        log_debug "Found Java at JAVA_HOME: ${JAVA_HOME}"
+    # Try common installation paths
+    elif [[ -x "/usr/lib/jvm/java-23-openjdk-amd64/bin/java" ]]; then
+        java_cmd="/usr/lib/jvm/java-23-openjdk-amd64/bin/java"
+        export JAVA_HOME="/usr/lib/jvm/java-23-openjdk-amd64"
+        log_debug "Found Java 23 at: ${JAVA_HOME}"
+    elif command -v java &>/dev/null; then
+        java_cmd="java"
+        log_debug "Using system Java from PATH"
+    else
+        log_error "Java not found. Please install OpenJDK 23 or newer."
+        log_error "On Debian/Ubuntu: sudo apt install openjdk-23-jdk"
+        log_error "On Fedora: sudo dnf install java-23-openjdk"
+        log_error "On Arch: sudo pacman -S jdk-openjdk"
+        exit 1
+    fi
+    
+    # Verify Java version
+    local java_version=$("${java_cmd}" -version 2>&1 | head -n 1 | cut -d'"' -f2 | cut -d'.' -f1)
+    log_debug "Detected Java version: ${java_version}"
+    
+    if [[ ${java_version} -lt 17 ]]; then
+        log_warn "Java ${java_version} detected, but Java 23+ is recommended"
+        log_warn "Some features may not work correctly"
+    fi
+    
+    echo "${java_cmd}"
+}
+
+# Detect GTK 4 availability
+check_gtk4() {
+    if ! command -v pkg-config &>/dev/null; then
+        log_warn "pkg-config not found, skipping GTK check"
+        return 0
+    fi
+    
+    if pkg-config --exists gtk4 2>/dev/null; then
+        local gtk_version=$(pkg-config --modversion gtk4)
+        log_debug "Found GTK 4 version: ${gtk_version}"
+        return 0
+    else
+        log_error "GTK 4 not found. Please install GTK 4 libraries."
+        log_error "On Debian/Ubuntu: sudo apt install libgtk-4-1"
+        log_error "On Fedora: sudo dnf install gtk4"
+        log_error "On Arch: sudo pacman -S gtk4"
+        exit 1
+    fi
+}
+
+# Find application JAR
+find_jar() {
+    local jar_path=""
+    
+    # Check in lib directory (installed package)
+    if [[ -f "${APP_ROOT}/lib/${APP_JAR}" ]]; then
+        jar_path="${APP_ROOT}/lib/${APP_JAR}"
+    # Check in target directory (development build)
+    elif [[ -f "${APP_ROOT}/target/${APP_JAR}" ]]; then
+        jar_path="${APP_ROOT}/target/${APP_JAR}"
+    # Check in current directory
+    elif [[ -f "${APP_ROOT}/${APP_JAR}" ]]; then
+        jar_path="${APP_ROOT}/${APP_JAR}"
+    else
+        log_error "Application JAR not found: ${APP_JAR}"
+        log_error "Searched in:"
+        log_error "  - ${APP_ROOT}/lib/"
+        log_error "  - ${APP_ROOT}/target/"
+        log_error "  - ${APP_ROOT}/"
+        log_error "Please build the application with: mvn package"
+        exit 1
+    fi
+    
+    log_debug "Found JAR: ${jar_path}"
+    echo "${jar_path}"
+}
+
+# Set up library paths for java-gi native bindings
+setup_library_path() {
+    local lib_paths=()
+    
+    # Add common system library paths
+    lib_paths+=("/usr/lib/x86_64-linux-gnu")
+    lib_paths+=("/usr/lib64")
+    lib_paths+=("/usr/lib")
+    lib_paths+=("/lib/x86_64-linux-gnu")
+    
+    # Add application lib directory if exists
+    if [[ -d "${APP_ROOT}/lib" ]]; then
+        lib_paths+=("${APP_ROOT}/lib")
+    fi
+    
+    # Construct LD_LIBRARY_PATH
+    local ld_path=$(IFS=:; echo "${lib_paths[*]}")
+    
+    if [[ -n "${LD_LIBRARY_PATH}" ]]; then
+        export LD_LIBRARY_PATH="${ld_path}:${LD_LIBRARY_PATH}"
+    else
+        export LD_LIBRARY_PATH="${ld_path}"
+    fi
+    
+    log_debug "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
+}
+
+# Set up GTK theme and styling
+setup_gtk_theme() {
+    # Use dark theme preference from desktop environment
+    if [[ -z "${GTK_THEME}" ]]; then
+        # Check if dark theme is preferred
+        if command -v gsettings &>/dev/null; then
+            local prefer_dark=$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || echo "")
+            if [[ "${prefer_dark}" == *"dark"* ]]; then
+                export GTK_THEME="Adwaita:dark"
+                log_debug "Using dark theme: ${GTK_THEME}"
+            fi
+        fi
+    else
+        log_debug "Using custom GTK theme: ${GTK_THEME}"
+    fi
+    
+    # Enable GTK 4 debug rendering if in debug mode
+    if [[ "${OMC_DEBUG}" == "1" ]] || [[ "${DEBUG_MODE}" == "1" ]]; then
+        export GSK_RENDERER="cairo"  # More stable renderer for debugging
+        log_debug "Using Cairo renderer for debugging"
+    fi
+}
+
+# Build Java command-line arguments
+build_java_args() {
+    local java_args=()
+    
+    # Memory settings
+    java_args+=("-Xms256m")
+    java_args+=("-Xmx2g")
+    
+    # Enable experimental features for Mockito/ByteBuddy
+    java_args+=("-Dnet.bytebuddy.experimental=true")
+    
+    # GTK/GLib debugging (if debug mode enabled)
+    if [[ "${OMC_DEBUG}" == "1" ]] || [[ "${DEBUG_MODE}" == "1" ]]; then
+        java_args+=("-Djava.util.logging.config.file=${APP_ROOT}/logging.properties")
+        export G_MESSAGES_DEBUG=all
+        log_debug "Enabled GLib debug messages"
+    fi
+    
+    # Better font rendering on Linux
+    java_args+=("-Dawt.useSystemAAFontSettings=on")
+    java_args+=("-Dswing.aatext=true")
+    
+    # File encoding
+    java_args+=("-Dfile.encoding=UTF-8")
+    
+    # Application-specific properties
+    java_args+=("-Dapp.name=${APP_NAME}")
+    java_args+=("-Dapp.version=${APP_VERSION}")
+    java_args+=("-Dapp.root=${APP_ROOT}")
+    
+    echo "${java_args[@]}"
+}
+
+# Main execution
+main() {
+    local DEBUG_MODE=0
+    local app_args=()
+    
+    # Parse command-line arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h)
+                show_usage
+                exit 0
+                ;;
+            --version|-v)
+                show_version
+                exit 0
+                ;;
+            --debug)
+                DEBUG_MODE=1
+                export OMC_DEBUG=1
+                app_args+=("$1")
+                shift
+                ;;
+            --config-dir)
+                if [[ -n "$2" ]] && [[ ! "$2" =~ ^-- ]]; then
+                    app_args+=("$1" "$2")
+                    shift 2
+                else
+                    log_error "--config-dir requires a directory argument"
+                    exit 1
+                fi
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                echo "Use --help for usage information"
+                exit 1
+                ;;
+            *)
+                # File argument
+                app_args+=("$1")
+                shift
+                ;;
+        esac
+    done
+    
+    log_info "Starting ${APP_NAME}..."
+    
+    # Detect and verify environment
+    local java_cmd=$(detect_java)
+    check_gtk4
+    local jar_path=$(find_jar)
+    
+    # Set up environment
+    setup_library_path
+    setup_gtk_theme
+    
+    # Build Java arguments
+    local java_args=($(build_java_args))
+    
+    # Log startup information
+    log_debug "Java command: ${java_cmd}"
+    log_debug "JAR path: ${jar_path}"
+    log_debug "Java args: ${java_args[*]}"
+    log_debug "App args: ${app_args[*]}"
+    
+    # Launch application
+    log_info "Launching application..."
+    exec "${java_cmd}" \
+        "${java_args[@]}" \
+        -jar "${jar_path}" \
+        "${app_args[@]}"
+}
+
+# Run main function
+main "$@"

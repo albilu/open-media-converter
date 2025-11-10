@@ -1,0 +1,349 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  
+  <!-- Main Application Window -->
+  <object class="GtkApplicationWindow" id="mainWindow">
+    <property name="title">Open Media Converter</property>
+    <property name="default-width">1000</property>
+    <property name="default-height">700</property>
+    
+    <!-- Header Bar -->
+    <child type="titlebar">
+      <object class="GtkHeaderBar" id="headerBar">
+        <property name="show-title-buttons">true</property>
+        
+        <!-- Start of header bar - Add Files and Add Folder buttons -->
+        <child type="start">
+          <object class="GtkBox">
+            <property name="spacing">6</property>
+            <property name="orientation">horizontal</property>
+            
+            <child>
+              <object class="GtkButton" id="addFilesButton">
+                <property name="label">Add Files</property>
+                <property name="icon-name">document-open-symbolic</property>
+                <property name="tooltip-text">Add files to convert</property>
+              </object>
+            </child>
+            
+            <child>
+              <object class="GtkButton" id="addFolderButton">
+                <property name="label">Add Folder</property>
+                <property name="icon-name">folder-open-symbolic</property>
+                <property name="tooltip-text">Add folder with files to convert</property>
+              </object>
+            </child>
+          </object>
+        </child>
+        
+        <!-- End of header bar - Settings and Menu button -->
+        <child type="end">
+          <object class="GtkMenuButton" id="menuButton">
+            <property name="icon-name">open-menu-symbolic</property>
+            <property name="tooltip-text">Main menu</property>
+            <property name="menu-model">appMenu</property>
+          </object>
+        </child>
+        
+        <child type="end">
+          <object class="GtkButton" id="settingsButton">
+            <property name="icon-name">preferences-system-symbolic</property>
+            <property name="tooltip-text">Open settings</property>
+          </object>
+        </child>
+      </object>
+    </child>
+    
+    <!-- Main Content Area -->
+    <child>
+      <object class="GtkBox" id="mainBox">
+        <property name="orientation">vertical</property>
+        <property name="spacing">0</property>
+        
+        <!-- File List View (Scrolled Window) -->
+        <child>
+          <object class="GtkScrolledWindow" id="fileListScrolledWindow">
+            <property name="vexpand">true</property>
+            <property name="hexpand">true</property>
+            <property name="has-frame">true</property>
+            
+            <child>
+              <object class="GtkColumnView" id="fileListColumnView">
+                <property name="show-row-separators">true</property>
+                <property name="show-column-separators">false</property>
+                <property name="enable-rubberband">true</property>
+                
+                <!-- Column: File Name -->
+                <child>
+                  <object class="GtkColumnViewColumn" id="nameColumn">
+                    <property name="title">Name</property>
+                    <property name="expand">true</property>
+                    <property name="resizable">true</property>
+                    <property name="fixed-width">400</property>
+                  </object>
+                </child>
+                
+                <!-- Column: File Size -->
+                <child>
+                  <object class="GtkColumnViewColumn" id="sizeColumn">
+                    <property name="title">Size</property>
+                    <property name="resizable">true</property>
+                  </object>
+                </child>
+                
+                <!-- Column: Format -->
+                <child>
+                  <object class="GtkColumnViewColumn" id="formatColumn">
+                    <property name="title">Format</property>
+                    <property name="resizable">true</property>
+                  </object>
+                </child>
+                
+                <!-- Column: Output Format -->
+                <child>
+                  <object class="GtkColumnViewColumn" id="outputFormatColumn">
+                    <property name="title">Output Format</property>
+                    <property name="resizable">true</property>
+                    <property name="fixed-width">120</property>
+                  </object>
+                </child>
+                
+                <!-- Column: Status -->
+                <child>
+                  <object class="GtkColumnViewColumn" id="statusColumn">
+                    <property name="title">Status</property>
+                    <property name="resizable">true</property>
+                    <property name="fixed-width">100</property>
+                  </object>
+                </child>
+                
+                <!-- Column: Progress -->
+                <child>
+                  <object class="GtkColumnViewColumn" id="progressColumn">
+                    <property name="title">Progress</property>
+                    <property name="resizable">true</property>
+                    <property name="fixed-width">200</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+        
+        <!-- Progress View (Revealer) -->
+        <child>
+          <object class="GtkRevealer" id="progressRevealer">
+            <property name="reveal-child">false</property>
+            <property name="transition-type">slide-down</property>
+            <property name="transition-duration">250</property>
+            
+            <child>
+              <object class="GtkBox" id="progressBox">
+                <property name="orientation">vertical</property>
+                <property name="spacing">12</property>
+                <property name="margin-top">12</property>
+                <property name="margin-bottom">12</property>
+                <property name="margin-start">12</property>
+                <property name="margin-end">12</property>
+                
+                <!-- Progress Bar -->
+                <child>
+                  <object class="GtkProgressBar" id="overallProgressBar">
+                    <property name="show-text">false</property>
+                  </object>
+                </child>
+                
+                <!-- Progress Information Box -->
+                <child>
+                  <object class="GtkBox">
+                    <property name="orientation">horizontal</property>
+                    <property name="spacing">12</property>
+                    
+                    <!-- Left side: Status and time labels -->
+                    <child>
+                      <object class="GtkBox">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">6</property>
+                        <property name="hexpand">true</property>
+                        
+                        <child>
+                          <object class="GtkLabel" id="statusLabel">
+                            <property name="label">Ready</property>
+                            <property name="xalign">0</property>
+                          </object>
+                        </child>
+                        
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">horizontal</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel" id="timeRemainingLabel">
+                                <property name="label">Time remaining: --</property>
+                                <property name="xalign">0</property>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkLabel" id="conversionSpeedLabel">
+                                <property name="label">Speed: --</property>
+                                <property name="xalign">0</property>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    
+                    <!-- Right side: Pause and Cancel buttons -->
+                    <child>
+                      <object class="GtkBox">
+                        <property name="orientation">horizontal</property>
+                        <property name="spacing">6</property>
+                        <property name="halign">end</property>
+                        
+                        <child>
+                          <object class="GtkButton" id="pauseButton">
+                            <property name="label">Pause</property>
+                            <property name="icon-name">media-playback-pause-symbolic</property>
+                            <property name="tooltip-text">Pause conversions</property>
+                          </object>
+                        </child>
+                        
+                        <child>
+                          <object class="GtkButton" id="resumeButton">
+                            <property name="label">Resume</property>
+                            <property name="icon-name">media-playback-start-symbolic</property>
+                            <property name="visible">false</property>
+                            <property name="tooltip-text">Resume conversions</property>
+                          </object>
+                        </child>
+                        
+                        <child>
+                          <object class="GtkButton" id="cancelButton">
+                            <property name="label">Cancel</property>
+                            <property name="icon-name">process-stop-symbolic</property>
+                            <property name="tooltip-text">Cancel all conversion processes</property>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+        
+        <!-- Bottom Action Bar -->
+        <child>
+          <object class="GtkBox" id="actionBar">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">12</property>
+            <property name="margin-top">12</property>
+            <property name="margin-bottom">12</property>
+            <property name="margin-start">12</property>
+            <property name="margin-end">12</property>
+            
+            <!-- Left side: Remove and Clear buttons -->
+            <child>
+              <object class="GtkButton" id="removeSelectedButton">
+                <property name="label">Remove Selected</property>
+                <property name="icon-name">list-remove-symbolic</property>
+                <property name="tooltip-text">Remove selected files from the list</property>
+              </object>
+            </child>
+            
+            <child>
+              <object class="GtkButton" id="clearAllButton">
+                <property name="label">Clear All</property>
+                <property name="icon-name">edit-clear-all-symbolic</property>
+                <property name="tooltip-text">Clear all files from the list</property>
+              </object>
+            </child>
+            
+            <!-- Center spacer to push content to left and right -->
+            <child>
+              <object class="GtkBox">
+                <property name="hexpand">true</property>
+              </object>
+            </child>
+            
+            <!-- Right side: File count, size labels and Convert button -->
+            <child>
+              <object class="GtkBox">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">12</property>
+                
+                <child>
+                  <object class="GtkLabel" id="fileCountLabel">
+                    <property name="label">0 files selected</property>
+                  </object>
+                </child>
+                
+                <child>
+                  <object class="GtkLabel" id="totalSizeLabel">
+                    <property name="label">0 B</property>
+                  </object>
+                </child>
+                
+                <child>
+                  <object class="GtkButton" id="convertButton">
+                    <property name="label">Convert</property>
+                    <property name="icon-name">system-run-symbolic</property>
+                    <property name="tooltip-text">Start the conversion process</property>
+                    <style>
+                      <class name="suggested-action"/>
+                    </style>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+        
+        <!-- Status Bar -->
+        <child>
+          <object class="GtkBox" id="statusBarBox">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">6</property>
+            <property name="margin-start">12</property>
+            <property name="margin-end">12</property>
+            <property name="margin-top">6</property>
+            <property name="margin-bottom">6</property>
+            
+            <child>
+              <object class="GtkLabel" id="statusBarLabel">
+                <property name="label">Ready</property>
+                <property name="xalign">0</property>
+                <property name="hexpand">true</property>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+  
+  <!-- Application Menu Model -->
+  <menu id="appMenu">
+    <section>
+      <item>
+        <attribute name="label">About</attribute>
+        <attribute name="action">app.about</attribute>
+      </item>
+      <item>
+        <attribute name="label">Help</attribute>
+        <attribute name="action">app.help</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label">Quit</attribute>
+        <attribute name="action">app.quit</attribute>
+      </item>
+    </section>
+  </menu>
+</interface>

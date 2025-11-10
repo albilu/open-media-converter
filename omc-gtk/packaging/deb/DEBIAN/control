@@ -1,0 +1,32 @@
+Package: open-media-converter
+Version: 1.0.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Depends: openjdk-23-jre | openjdk-21-jre | openjdk-17-jre, libgtk-4-1 (>= 4.0.0), libglib2.0-0 (>= 2.66.0), libgirepository-1.0-1 (>= 1.66.0), ffmpeg, imagemagick, pandoc, libreoffice
+Recommends: libreoffice-writer, libreoffice-calc, libreoffice-impress
+Suggests: ffmpeg-doc, imagemagick-doc
+Installed-Size: 50000
+Maintainer: Open Media Converter Team <maintainer@openmediaconverter.org>
+Homepage: https://github.com/albilu/open-media-converter
+Description: Native Linux media and document converter
+ Open Media Converter is a comprehensive media and document conversion tool
+ for Linux desktop environments. It provides an integrated GTK 4-based
+ user interface and leverages powerful conversion tools (FFmpeg, Pandoc,
+ LibreOffice) to deliver reliable single-file and batch conversions.
+ .
+ Features:
+  - Multi-format conversion: video, audio, image, and document formats
+  - Batch processing with parallel conversions and per-file progress
+  - Native GTK 4 UI with file list, presets, and settings dialog
+  - Embedded and system binary support for conversion tools
+  - Conversion presets and advanced format-specific options
+  - State persistence: window geometry, file lists, and settings
+  - Progress parsing and detailed logs with error reporting
+  - Pause/Resume/Cancel controls and configurable parallelism
+ .
+ Supported formats include:
+  - Video: MP4, MKV, AVI, MOV, WebM, FLV, WMV, MPEG, M4V
+  - Audio: MP3, AAC, FLAC, WAV, OGG, Opus, M4A, WMA
+  - Image: JPEG, PNG, GIF, WebP, BMP, TIFF, SVG, ICO
+  - Document: PDF, DOCX, ODT, HTML, Markdown, RTF, TXT, EPUB

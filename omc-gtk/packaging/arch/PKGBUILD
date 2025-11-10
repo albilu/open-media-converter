@@ -1,0 +1,92 @@
+# Maintainer: Open Media Converter Team <maintainer@openmediaconverter.org>
+pkgname=open-media-converter
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Native Linux media and document converter with GTK 4 UI"
+arch=('x86_64' 'aarch64')
+url="https://github.com/albilu/open-media-converter"
+license=('MIT')
+depends=('java-runtime>=23' 'gtk4>=4.0.0' 'glib2>=2.66.0' 'gobject-introspection>=1.66.0' 'ffmpeg' 'imagemagick' 'pandoc' 'libreoffice-fresh')
+optdepends=(
+    'libreoffice-writer: Enhanced word processing support'
+    'libreoffice-calc: Enhanced spreadsheet support'
+    'libreoffice-impress: Enhanced presentation support'
+)
+makedepends=('java-environment=23' 'maven')
+source=("${pkgname}-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "${srcdir}/${pkgname}-${pkgver}"
+    
+    # Build is handled by the build script
+    # JAR is pre-built and included in the source tarball
+    true
+}
+
+package() {
+    cd "${srcdir}/${pkgname}-${pkgver}"
+    
+    # Install application directory
+    install -d "${pkgdir}/opt/${pkgname}/bin"
+    install -d "${pkgdir}/opt/${pkgname}/lib"
+    
+    # Install JAR
+    install -Dm644 "lib/${pkgname}-${pkgver}.jar" \
+        "${pkgdir}/opt/${pkgname}/lib/${pkgname}-${pkgver}.jar"
+    
+    # Install launcher script
+    install -Dm755 "bin/${pkgname}" \
+        "${pkgdir}/opt/${pkgname}/bin/${pkgname}"
+    
+    # Create symlink in /usr/bin
+    install -d "${pkgdir}/usr/bin"
+    ln -sf "/opt/${pkgname}/bin/${pkgname}" \
+        "${pkgdir}/usr/bin/${pkgname}"
+    
+    # Install desktop entry
+    install -Dm644 "share/applications/${pkgname}.desktop" \
+        "${pkgdir}/usr/share/applications/${pkgname}.desktop"
+    
+    # Install icons
+    for size in 16x16 32x32 48x48 64x64 128x128 256x256; do
+        if [ -f "share/icons/hicolor/${size}/apps/${pkgname}.png" ]; then
+            install -Dm644 "share/icons/hicolor/${size}/apps/${pkgname}.png" \
+                "${pkgdir}/usr/share/icons/hicolor/${size}/apps/${pkgname}.png"
+        fi
+    done
+    
+    # Install scalable icon
+    if [ -f "share/icons/hicolor/scalable/apps/${pkgname}.svg" ]; then
+        install -Dm644 "share/icons/hicolor/scalable/apps/${pkgname}.svg" \
+            "${pkgdir}/usr/share/icons/hicolor/scalable/apps/${pkgname}.svg"
+    fi
+    
+    # Install documentation
+    install -d "${pkgdir}/usr/share/doc/${pkgname}"
+    for doc in README.md CHANGELOG.md; do
+        if [ -f "share/doc/${pkgname}/$doc" ]; then
+            install -Dm644 "share/doc/${pkgname}/$doc" \
+                "${pkgdir}/usr/share/doc/${pkgname}/$doc"
+        fi
+    done
+    
+    # Install license
+    if [ -f "share/doc/${pkgname}/LICENSE" ]; then
+        install -Dm644 "share/doc/${pkgname}/LICENSE" \
+            "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+    fi
+    
+    # Install embedded binaries if present
+    if [ -d "bin/embedded/ffmpeg" ]; then
+        install -d "${pkgdir}/opt/${pkgname}/bin/embedded/ffmpeg"
+        install -Dm755 "bin/embedded/ffmpeg/ffmpeg" \
+            "${pkgdir}/opt/${pkgname}/bin/embedded/ffmpeg/ffmpeg"
+    fi
+    
+    if [ -d "bin/embedded/pandoc" ]; then
+        install -d "${pkgdir}/opt/${pkgname}/bin/embedded/pandoc"
+        install -Dm755 "bin/embedded/pandoc/pandoc" \
+            "${pkgdir}/opt/${pkgname}/bin/embedded/pandoc/pandoc"
+    fi
+}

@@ -1,0 +1,2053 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  
+  <!-- Settings Dialog -->
+  <object class="GtkDialog" id="settingsDialog">
+    <property name="title">Settings</property>
+    <property name="modal">true</property>
+    <property name="default-width">700</property>
+    <property name="default-height">600</property>
+    <property name="resizable">true</property>
+    
+    <!-- Header Bar -->
+    <child type="titlebar">
+      <object class="GtkHeaderBar" id="settingsHeaderBar">
+        <property name="show-title-buttons">false</property>
+        
+        <!-- Cancel Button -->
+        <child type="start">
+          <object class="GtkButton" id="cancelButton">
+            <property name="label">Cancel</property>
+          </object>
+        </child>
+        
+        <!-- Save Button -->
+        <child type="end">
+          <object class="GtkButton" id="saveButton">
+            <property name="label">Save</property>
+            <style>
+              <class name="suggested-action"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+    
+    <!-- Dialog Content -->
+    <child>
+      <object class="GtkBox" id="dialogContentBox">
+        <property name="orientation">vertical</property>
+        <property name="spacing">0</property>
+        
+        <!-- Tabbed Settings Notebook -->
+        <child>
+          <object class="GtkNotebook" id="settingsNotebook">
+            <property name="vexpand">true</property>
+            <property name="hexpand">true</property>
+            
+            <!-- ============================================ -->
+            <!-- GENERAL SETTINGS TAB -->
+            <!-- ============================================ -->
+            <child>
+              <object class="GtkNotebookPage">
+                <property name="child">
+                  <object class="GtkScrolledWindow">
+                    <property name="hscrollbar-policy">never</property>
+                    <property name="vscrollbar-policy">automatic</property>
+                    
+                    <child>
+                      <object class="GtkBox">
+                        <property name="orientation">vertical</property>
+                        <property name="margin-top">24</property>
+                        <property name="margin-bottom">24</property>
+                        <property name="margin-start">24</property>
+                        <property name="margin-end">24</property>
+                        <property name="spacing">18</property>
+                        
+
+                        <!-- Output Directory Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Output Directory</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Directory:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkEntry" id="outputDirectoryEntry">
+                                    <property name="hexpand">true</property>
+                                    <property name="editable">false</property>
+                                    <property name="placeholder-text">Choose output directory...</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="outputDirectoryButton">
+                                    <property name="icon-name">folder-open-symbolic</property>
+                                    <property name="tooltip-text">Choose output directory</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Output Options Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Output Options</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkCheckButton" id="overwriteExistingCheckbox">
+                                <property name="label">Overwrite existing files</property>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkCheckButton" id="createSubdirectoryCheckbox">
+                                <property name="label">Create subdirectory for each format</property>
+                              </object>
+                            </child>
+                            
+                            <!-- Delete Original File Checkbox (Requirement REQ-GEN-1.1) -->
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">6</property>
+                                
+                                <child>
+                                  <object class="GtkCheckButton" id="deleteOriginalFileCheckbox">
+                                    <property name="label">Delete original file after successful conversion</property>
+                                    <property name="tooltip-text">⚠️ Warning: This will permanently delete source files. Use with caution!</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkImage">
+                                    <property name="icon-name">dialog-warning-symbolic</property>
+                                    <property name="tooltip-text">⚠️ Warning: This will permanently delete source files. Use with caution!</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Parallel Conversions Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Performance</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Parallel conversions:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkSpinButton" id="parallelConversionsSpinButton">
+                                    <property name="adjustment">
+                                      <object class="GtkAdjustment" id="parallelConversionsAdjustment">
+                                        <property name="lower">1</property>
+                                        <property name="upper">16</property>
+                                        <property name="value">2</property>
+                                        <property name="step-increment">1</property>
+                                        <property name="page-increment">2</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">  (1-16)</property>
+                                    <property name="xalign">0</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </property>
+                <property name="tab">
+                  <object class="GtkLabel">
+                    <property name="label">General</property>
+                  </object>
+                </property>
+              </object>
+            </child>
+            
+            <!-- ============================================ -->
+            <!-- VIDEO SETTINGS TAB -->
+            <!-- ============================================ -->
+            <child>
+              <object class="GtkNotebookPage">
+                <property name="child">
+                  <object class="GtkScrolledWindow">
+                    <property name="hscrollbar-policy">never</property>
+                    <property name="vscrollbar-policy">automatic</property>
+                    
+                    <child>
+                      <object class="GtkBox">
+                        <property name="orientation">vertical</property>
+                        <property name="margin-top">24</property>
+                        <property name="margin-bottom">24</property>
+                        <property name="margin-start">24</property>
+                        <property name="margin-end">24</property>
+                        <property name="spacing">18</property>
+                        
+                        <!-- Preset Management Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Preset Management</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Saved Presets:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="videoPresetCombo">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="videoSavePresetButton">
+                                    <property name="label">Save</property>
+                                    <property name="tooltip-text">Save current settings as a preset</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="videoDeletePresetButton">
+                                    <property name="label">Delete</property>
+                                    <property name="tooltip-text">Delete selected preset</property>
+                                    <style>
+                                      <class name="destructive-action"/>
+                                    </style>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Output Format Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Output Format</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Format:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="videoFormatDropdown">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Video Codec Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Video Codec</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Codec:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="videoCodecDropdown">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Video Resolution Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Resolution</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Resolution:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="videoResolutionDropdown">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            
+                            <!-- Custom Resolution Entry -->
+                            <child>
+                              <object class="GtkBox" id="customResolutionBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                <property name="visible">false</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Custom:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkEntry" id="videoWidthEntry">
+                                    <property name="placeholder-text">Width</property>
+                                    <property name="width-chars">8</property>
+                                    <property name="input-purpose">number</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">×</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkEntry" id="videoHeightEntry">
+                                    <property name="placeholder-text">Height</property>
+                                    <property name="width-chars">8</property>
+                                    <property name="input-purpose">number</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                         </child>
+                         
+                         <!-- Video Aspect Ratio Section -->
+                         <child>
+                           <object class="GtkBox">
+                             <property name="orientation">vertical</property>
+                             <property name="spacing">12</property>
+                             
+                             <child>
+                               <object class="GtkLabel">
+                                 <property name="label">Aspect Ratio</property>
+                                 <property name="xalign">0</property>
+                                 <style>
+                                   <class name="heading"/>
+                                 </style>
+                               </object>
+                             </child>
+                             
+                             <child>
+                               <object class="GtkBox">
+                                 <property name="orientation">horizontal</property>
+                                 <property name="spacing">12</property>
+                                 
+                                 <child>
+                                   <object class="GtkLabel">
+                                     <property name="label">Aspect ratio:</property>
+                                     <property name="xalign">0</property>
+                                     <property name="width-chars">20</property>
+                                   </object>
+                                 </child>
+                                 
+                                 <child>
+                                   <object class="GtkDropDown" id="videoAspectRatioDropdown">
+                                     <property name="hexpand">true</property>
+                                   </object>
+                                 </child>
+                               </object>
+                             </child>
+                           </object>
+                         </child>
+                         
+                         <!-- Video Bitrate Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Bitrate</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Bitrate:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkSpinButton" id="videoBitrateSpinButton">
+                                    <property name="adjustment">
+                                      <object class="GtkAdjustment" id="videoBitrateAdjustment">
+                                        <property name="lower">500</property>
+                                        <property name="upper">50000</property>
+                                        <property name="value">5000</property>
+                                        <property name="step-increment">100</property>
+                                        <property name="page-increment">1000</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">kbps</property>
+                                    <property name="xalign">0</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Video Frame Rate Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Frame Rate</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Frame rate:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="videoFrameRateDropdown">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Video Preset Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Encoding Preset</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Preset:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="videoPresetDropdown">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- CRF Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Constant Rate Factor (CRF)</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">CRF:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkScale" id="videoCrfScale">
+                                    <property name="hexpand">true</property>
+                                    <property name="draw-value">true</property>
+                                    <property name="value-pos">right</property>
+                                    <property name="adjustment">
+                                      <object class="GtkAdjustment" id="videoCrfAdjustment">
+                                        <property name="lower">0</property>
+                                        <property name="upper">51</property>
+                                        <property name="value">23</property>
+                                        <property name="step-increment">1</property>
+                                        <property name="page-increment">5</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Lower values = higher quality, larger file size</property>
+                                <property name="xalign">0</property>
+                                <property name="margin-start">20</property>
+                                <style>
+                                  <class name="dim-label"/>
+                                </style>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Quality Presets Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Quality Presets</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                <property name="homogeneous">true</property>
+                                
+                                <child>
+                                  <object class="GtkButton" id="videoHighQualityButton">
+                                    <property name="label">High Quality</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="videoBalancedButton">
+                                    <property name="label">Balanced</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="videoSmallSizeButton">
+                                    <property name="label">Small Size</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </property>
+                <property name="tab">
+                  <object class="GtkLabel">
+                    <property name="label">Video</property>
+                  </object>
+                </property>
+              </object>
+            </child>
+            
+            <!-- ============================================ -->
+            <!-- AUDIO SETTINGS TAB -->
+            <!-- ============================================ -->
+            <child>
+              <object class="GtkNotebookPage">
+                <property name="child">
+                  <object class="GtkScrolledWindow">
+                    <property name="hscrollbar-policy">never</property>
+                    <property name="vscrollbar-policy">automatic</property>
+                    
+                    <child>
+                      <object class="GtkBox">
+                        <property name="orientation">vertical</property>
+                        <property name="margin-top">24</property>
+                        <property name="margin-bottom">24</property>
+                        <property name="margin-start">24</property>
+                        <property name="margin-end">24</property>
+                        <property name="spacing">18</property>
+                        
+                        <!-- Preset Management Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Preset Management</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Saved Presets:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="audioPresetCombo">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="audioSavePresetButton">
+                                    <property name="label">Save</property>
+                                    <property name="tooltip-text">Save current settings as a preset</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="audioDeletePresetButton">
+                                    <property name="label">Delete</property>
+                                    <property name="tooltip-text">Delete selected preset</property>
+                                    <style>
+                                      <class name="destructive-action"/>
+                                    </style>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Output Format Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Output Format</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Format:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="audioFormatDropdown">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Audio Codec Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Audio Codec</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Codec:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="audioCodecDropdown">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Audio Bitrate Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Bitrate</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Bitrate:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkSpinButton" id="audioBitrateSpinButton">
+                                    <property name="adjustment">
+                                      <object class="GtkAdjustment" id="audioBitrateAdjustment">
+                                        <property name="lower">64</property>
+                                        <property name="upper">320</property>
+                                        <property name="value">192</property>
+                                        <property name="step-increment">8</property>
+                                        <property name="page-increment">32</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">kbps</property>
+                                    <property name="xalign">0</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Audio Sample Rate Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Sample Rate</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Sample rate:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="audioSampleRateDropdown">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Audio Channels Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Channels</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Channels:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="audioChannelsDropdown">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Audio Quality Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Quality</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Quality:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkScale" id="audioQualityScale">
+                                    <property name="hexpand">true</property>
+                                    <property name="draw-value">true</property>
+                                    <property name="value-pos">right</property>
+                                    <property name="adjustment">
+                                      <object class="GtkAdjustment" id="audioQualityAdjustment">
+                                        <property name="lower">0</property>
+                                        <property name="upper">9</property>
+                                        <property name="value">5</property>
+                                        <property name="step-increment">1</property>
+                                        <property name="page-increment">2</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Codec-specific quality setting (0-9)</property>
+                                <property name="xalign">0</property>
+                                <property name="margin-start">20</property>
+                                <style>
+                                  <class name="dim-label"/>
+                                </style>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Audio Presets Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Quality Presets</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                <property name="homogeneous">true</property>
+                                
+                                <child>
+                                  <object class="GtkButton" id="audioHighQualityButton">
+                                    <property name="label">High Quality</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="audioBalancedButton">
+                                    <property name="label">Balanced</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="audioSmallSizeButton">
+                                    <property name="label">Small Size</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </property>
+                <property name="tab">
+                  <object class="GtkLabel">
+                    <property name="label">Audio</property>
+                  </object>
+                </property>
+              </object>
+            </child>
+            
+            <!-- ============================================ -->
+            <!-- IMAGE SETTINGS TAB -->
+            <!-- ============================================ -->
+            <child>
+              <object class="GtkNotebookPage">
+                <property name="child">
+                  <object class="GtkScrolledWindow">
+                    <property name="hscrollbar-policy">never</property>
+                    <property name="vscrollbar-policy">automatic</property>
+                    
+                    <child>
+                      <object class="GtkBox">
+                        <property name="orientation">vertical</property>
+                        <property name="margin-top">24</property>
+                        <property name="margin-bottom">24</property>
+                        <property name="margin-start">24</property>
+                        <property name="margin-end">24</property>
+                        <property name="spacing">18</property>
+                        
+                        <!-- Preset Management Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Preset Management</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Saved Presets:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+
+                                <child>
+                                  <object class="GtkComboBoxText" id="imagePresetCombo">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="imageSavePresetButton">
+                                    <property name="label">Save</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="imageDeletePresetButton">
+                                    <property name="label">Delete</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Output Format Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Output Format</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Format:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="imageFormatDropdown">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Image Rotation Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Rotation</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Rotation:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="imageRotationDropdown">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Image Flip Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Flip</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Flip:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="imageFlipDropdown">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Image Quality Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Quality</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Quality:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkScale" id="imageQualityScale">
+                                    <property name="hexpand">true</property>
+                                    <property name="draw-value">true</property>
+                                    <property name="value-pos">right</property>
+                                    <property name="adjustment">
+                                      <object class="GtkAdjustment" id="imageQualityAdjustment">
+                                        <property name="lower">0</property>
+                                        <property name="upper">100</property>
+                                        <property name="value">90</property>
+                                        <property name="step-increment">1</property>
+                                        <property name="page-increment">10</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">For JPEG and WebP (0-100)</property>
+                                <property name="xalign">0</property>
+                                <property name="margin-start">20</property>
+                                <style>
+                                  <class name="dim-label"/>
+                                </style>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Image Resolution Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Resolution</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Width:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkSpinButton" id="imageWidthSpinButton">
+                                    <property name="adjustment">
+                                      <object class="GtkAdjustment" id="imageWidthAdjustment">
+                                        <property name="lower">0</property>
+                                        <property name="upper">10000</property>
+                                        <property name="value">0</property>
+                                        <property name="step-increment">10</property>
+                                        <property name="page-increment">100</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">px</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Height:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkSpinButton" id="imageHeightSpinButton">
+                                    <property name="adjustment">
+                                      <object class="GtkAdjustment" id="imageHeightAdjustment">
+                                        <property name="lower">0</property>
+                                        <property name="upper">10000</property>
+                                        <property name="value">0</property>
+                                        <property name="step-increment">10</property>
+                                        <property name="page-increment">100</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">px</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkCheckButton" id="maintainAspectRatioCheckbox">
+                                <property name="label">Maintain aspect ratio</property>
+                                <property name="active">true</property>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Set to 0 to keep original dimension</property>
+                                <property name="xalign">0</property>
+                                <property name="margin-start">20</property>
+                                <style>
+                                  <class name="dim-label"/>
+                                </style>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- PNG Compression Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">PNG Compression</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Compression level:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkScale" id="compressionLevelScale">
+                                    <property name="hexpand">true</property>
+                                    <property name="draw-value">true</property>
+                                    <property name="value-pos">right</property>
+                                    <property name="adjustment">
+                                      <object class="GtkAdjustment" id="compressionLevelAdjustment">
+                                        <property name="lower">0</property>
+                                        <property name="upper">9</property>
+                                        <property name="value">6</property>
+                                        <property name="step-increment">1</property>
+                                        <property name="page-increment">2</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">For PNG format (0=fastest, 9=best compression)</property>
+                                <property name="xalign">0</property>
+                                <property name="margin-start">20</property>
+                                <style>
+                                  <class name="dim-label"/>
+                                </style>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Resize Mode Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Resize Mode</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Resize mode:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="resizeModeDropdown">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Image Presets Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Quality Presets</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                <property name="homogeneous">true</property>
+                                
+                                <child>
+                                  <object class="GtkButton" id="imageHighQualityButton">
+                                    <property name="label">High Quality</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="imageBalancedButton">
+                                    <property name="label">Balanced</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="imageSmallSizeButton">
+                                    <property name="label">Small Size</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </property>
+                <property name="tab">
+                  <object class="GtkLabel">
+                    <property name="label">Image</property>
+                  </object>
+                </property>
+              </object>
+            </child>
+            
+            <!-- ============================================ -->
+            <!-- DOCUMENT SETTINGS TAB -->
+            <!-- ============================================ -->
+            <child>
+              <object class="GtkNotebookPage">
+                <property name="child">
+                  <object class="GtkScrolledWindow">
+                    <property name="hscrollbar-policy">never</property>
+                    <property name="vscrollbar-policy">automatic</property>
+                    
+                    <child>
+                      <object class="GtkBox">
+                        <property name="orientation">vertical</property>
+                        <property name="margin-top">24</property>
+                        <property name="margin-bottom">24</property>
+                        <property name="margin-start">24</property>
+                        <property name="margin-end">24</property>
+                        <property name="spacing">18</property>
+                        
+                        <!-- Preset Management Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Preset Management</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Saved Presets:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+
+                                <child>
+                                  <object class="GtkComboBoxText" id="docPresetCombo">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="docSavePresetButton">
+                                    <property name="label">Save</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="docDeletePresetButton">
+                                    <property name="label">Delete</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Document Output Format Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Output Format</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Format:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkDropDown" id="documentFormatDropdown">
+                                    <property name="hexpand">true</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Template Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Template</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Template file:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkEntry" id="templateFileEntry">
+                                    <property name="hexpand">true</property>
+                                    <property name="editable">false</property>
+                                    <property name="placeholder-text">No template (optional)</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="templateFileButton">
+                                    <property name="icon-name">document-open-symbolic</property>
+                                    <property name="tooltip-text">Choose template file</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkButton" id="clearTemplateButton">
+                                    <property name="icon-name">edit-clear-symbolic</property>
+                                    <property name="tooltip-text">Clear template</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Optional template for document formatting</property>
+                                <property name="xalign">0</property>
+                                <property name="margin-start">20</property>
+                                <style>
+                                  <class name="dim-label"/>
+                                </style>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Formatting Options Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Formatting Options</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkCheckButton" id="preserveFormattingCheckbox">
+                                <property name="label">Preserve formatting</property>
+                                <property name="active">true</property>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkCheckButton" id="embedFontsCheckbox">
+                                <property name="label">Embed fonts (PDF output)</property>
+                                <property name="active">false</property>
+                              </object>
+                            </child>
+                            
+                            <child>
+                              <object class="GtkCheckButton" id="generateTocCheckbox">
+                                <property name="label">Generate table of contents</property>
+                                <property name="active">false</property>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        
+                        <!-- Page Margins Section -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">12</property>
+                            
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Page Margins</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="heading"/>
+                                </style>
+                              </object>
+                            </child>
+                            
+                            <!-- Top Margin -->
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Top:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkSpinButton" id="marginTopSpinButton">
+                                    <property name="adjustment">
+                                      <object class="GtkAdjustment" id="marginTopAdjustment">
+                                        <property name="lower">0</property>
+                                        <property name="upper">100</property>
+                                        <property name="value">25</property>
+                                        <property name="step-increment">1</property>
+                                        <property name="page-increment">5</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">mm</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            
+                            <!-- Bottom Margin -->
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Bottom:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkSpinButton" id="marginBottomSpinButton">
+                                    <property name="adjustment">
+                                      <object class="GtkAdjustment" id="marginBottomAdjustment">
+                                        <property name="lower">0</property>
+                                        <property name="upper">100</property>
+                                        <property name="value">25</property>
+                                        <property name="step-increment">1</property>
+                                        <property name="page-increment">5</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">mm</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            
+                            <!-- Left Margin -->
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Left:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkSpinButton" id="marginLeftSpinButton">
+                                    <property name="adjustment">
+                                      <object class="GtkAdjustment" id="marginLeftAdjustment">
+                                        <property name="lower">0</property>
+                                        <property name="upper">100</property>
+                                        <property name="value">25</property>
+                                        <property name="step-increment">1</property>
+                                        <property name="page-increment">5</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">mm</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            
+                            <!-- Right Margin -->
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">12</property>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Right:</property>
+                                    <property name="xalign">0</property>
+                                    <property name="width-chars">20</property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkSpinButton" id="marginRightSpinButton">
+                                    <property name="adjustment">
+                                      <object class="GtkAdjustment" id="marginRightAdjustment">
+                                        <property name="lower">0</property>
+                                        <property name="upper">100</property>
+                                        <property name="value">25</property>
+                                        <property name="step-increment">1</property>
+                                        <property name="page-increment">5</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                                
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">mm</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </property>
+                <property name="tab">
+                  <object class="GtkLabel">
+                    <property name="label">Document</property>
+                  </object>
+                </property>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

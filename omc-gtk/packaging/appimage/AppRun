@@ -1,0 +1,291 @@
+#!/bin/bash
+# AppRun - Entry point for Open Media Converter AppImage
+# This script sets up the portable environment and launches the application
+
+set -e
+
+# ============================================================================
+# APPIMAGE ENVIRONMENT SETUP
+# ============================================================================
+
+# Get the AppImage mount point (automatically set by AppImage runtime)
+APPDIR="${APPDIR:-$(dirname "$(readlink -f "$0")")}"
+
+# Detect if running from AppImage or extracted directory
+if [ -z "$APPIMAGE" ]; then
+    echo "Note: Running from extracted AppDir at: $APPDIR"
+fi
+
+# ============================================================================
+# ENVIRONMENT VARIABLES
+# ============================================================================
+
+# Java Environment
+export JAVA_HOME="$APPDIR/usr/lib/jre"
+export PATH="$JAVA_HOME/bin:$PATH"
+
+# GTK 4 and GLib Environment
+export LD_LIBRARY_PATH="$APPDIR/usr/lib:$APPDIR/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export GI_TYPELIB_PATH="$APPDIR/usr/lib/girepository-1.0:$APPDIR/usr/lib/x86_64-linux-gnu/girepository-1.0:${GI_TYPELIB_PATH:+:$GI_TYPELIB_PATH}"
+export GDK_PIXBUF_MODULEDIR="$APPDIR/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders"
+export GDK_PIXBUF_MODULE_FILE="$APPDIR/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+
+# XDG Environment
+export XDG_DATA_DIRS="$APPDIR/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+export XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS:-/etc/xdg}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+
+# GTK Theme and Settings
+export GTK_THEME="${GTK_THEME:-Adwaita}"
+export GTK_DATA_PREFIX="$APPDIR/usr"
+export GTK_EXE_PREFIX="$APPDIR/usr"
+
+# Application-specific paths
+export OMC_APP_DIR="$APPDIR"
+export OMC_EMBEDDED_TOOLS="$APPDIR/embedded"
+
+# ============================================================================
+# VALIDATION CHECKS
+# ============================================================================
+
+# Function to print colored messages
+print_error() {
+    echo -e "\033[1;31m[ERROR]\033[0m $*" >&2
+}
+
+print_warning() {
+    echo -e "\033[1;33m[WARNING]\033[0m $*" >&2
+}
+
+print_info() {
+    echo -e "\033[1;34m[INFO]\033[0m $*"
+}
+
+# Check if Java runtime is available
+if [ ! -d "$JAVA_HOME" ]; then
+    print_error "Java runtime not found at: $JAVA_HOME"
+    print_error "This AppImage may be corrupted or incomplete."
+    exit 1
+fi
+
+if [ ! -x "$JAVA_HOME/bin/java" ]; then
+    print_error "Java executable not found at: $JAVA_HOME/bin/java"
+    exit 1
+fi
+
+# Verify Java version (should be Java 17+)
+JAVA_VERSION=$("$JAVA_HOME/bin/java" -version 2>&1 | head -n 1 | sed 's/.*version "\(.*\)".*/\1/' | cut -d'.' -f1)
+if [ "$JAVA_VERSION" -lt 17 ]; then
+    print_error "Java version $JAVA_VERSION is too old. Java 17 or newer is required."
+    exit 1
+fi
+
+# Check if application JAR exists
+APP_JAR="$APPDIR/usr/lib/open-media-converter.jar"
+if [ ! -f "$APP_JAR" ]; then
+    print_error "Application JAR not found at: $APP_JAR"
+    print_error "This AppImage may be corrupted."
+    exit 1
+fi
+
+# Check GTK libraries (warn if missing, but don't fail - may use system libs)
+GTK_LIB="$APPDIR/usr/lib/x86_64-linux-gnu/libgtk-4.so.1"
+if [ ! -f "$GTK_LIB" ]; then
+    print_warning "Bundled GTK 4 library not found, will attempt to use system libraries."
+    print_warning "If the application fails to start, ensure GTK 4 is installed on your system."
+fi
+
+# ============================================================================
+# SYSTEM DEPENDENCIES CHECK
+# ============================================================================
+
+# Function to check system dependencies
+check_system_dependencies() {
+    local missing_deps=()
+    local missing_optional=()
+    
+    # Check FUSE for AppImage mounting (critical for AppImage)
+    if ! command -v fusermount &>/dev/null && ! command -v fusermount3 &>/dev/null; then
+        if [ -n "$APPIMAGE" ]; then
+            print_warning "FUSE not found. AppImage may not mount properly."
+            print_warning "Install with: sudo apt install fuse3  (Debian/Ubuntu)"
+            print_warning "              sudo dnf install fuse3  (Fedora)"
+            print_warning "              sudo pacman -S fuse3   (Arch)"
+        fi
+    fi
+    
+    # Check optional conversion tools (warn only, don't fail)
+    if ! command -v ffmpeg &>/dev/null && [ ! -f "$OMC_EMBEDDED_TOOLS/ffmpeg/ffmpeg" ]; then
+        missing_optional+=("ffmpeg")
+    fi
+    
+    if ! command -v pandoc &>/dev/null && [ ! -f "$OMC_EMBEDDED_TOOLS/pandoc/pandoc" ]; then
+        missing_optional+=("pandoc")
+    fi
+    
+    if ! command -v libreoffice &>/dev/null && ! command -v soffice &>/dev/null; then
+        missing_optional+=("libreoffice")
+    fi
+    
+    if ! command -v convert &>/dev/null && ! command -v magick &>/dev/null; then
+        missing_optional+=("imagemagick")
+    fi
+    
+    # Display warnings for missing optional dependencies
+    if [ ${#missing_optional[@]} -gt 0 ]; then
+        print_warning "Optional conversion tools not found:"
+        for tool in "${missing_optional[@]}"; do
+            case "$tool" in
+                ffmpeg)
+                    print_warning "  • ffmpeg: Required for video/audio conversion"
+                    ;;
+                pandoc)
+                    print_warning "  • pandoc: Required for document conversion"
+                    ;;
+                libreoffice)
+                    print_warning "  • libreoffice: Required for office document conversion"
+                    ;;
+                imagemagick)
+                    print_warning "  • imagemagick: Required for image conversion and manipulation"
+                    ;;
+            esac
+        done
+        print_warning ""
+        print_warning "Install missing tools with:"
+        print_warning "  Debian/Ubuntu: sudo apt install ${missing_optional[*]}"
+        print_warning "  Fedora:        sudo dnf install ${missing_optional[*]}"
+        print_warning "  Arch:          sudo pacman -S ${missing_optional[*]}"
+        print_warning ""
+        print_warning "Note: Some tools may be embedded in this AppImage."
+        print_warning "The application will continue, but some conversion features may be unavailable."
+        print_warning ""
+        
+        # Give user time to read the warning
+        sleep 3
+    fi
+}
+
+# Run dependency check
+check_system_dependencies
+
+# ============================================================================
+# EMBEDDED TOOLS SETUP
+# ============================================================================
+
+# Make embedded tools available (ffmpeg, pandoc)
+if [ -d "$OMC_EMBEDDED_TOOLS" ]; then
+    export PATH="$OMC_EMBEDDED_TOOLS/ffmpeg:$OMC_EMBEDDED_TOOLS/pandoc:$PATH"
+    
+    # Make embedded binaries executable (in case they're not)
+    if [ -f "$OMC_EMBEDDED_TOOLS/ffmpeg/ffmpeg" ]; then
+        chmod +x "$OMC_EMBEDDED_TOOLS/ffmpeg/ffmpeg" 2>/dev/null || true
+        print_info "Using embedded ffmpeg"
+    fi
+    if [ -f "$OMC_EMBEDDED_TOOLS/pandoc/pandoc" ]; then
+        chmod +x "$OMC_EMBEDDED_TOOLS/pandoc/pandoc" 2>/dev/null || true
+        print_info "Using embedded pandoc"
+    fi
+fi
+
+# ============================================================================
+# JVM OPTIONS
+# ============================================================================
+
+# Default JVM options
+JVM_OPTS=(
+    "-Xmx2G"                          # Maximum heap size
+    "-Xms512M"                        # Initial heap size
+    "-XX:+UseG1GC"                    # Use G1 garbage collector
+    "-XX:MaxGCPauseMillis=200"        # Target max GC pause time
+    "-Dsun.java2d.opengl=true"        # Enable OpenGL rendering
+    "-Djava.awt.headless=false"       # GUI application
+)
+
+# Add AppImage-specific properties
+JVM_OPTS+=(
+    "-Domm.appimage=true"
+    "-Domm.appdir=$APPDIR"
+)
+
+# Enable debug logging if requested
+if [ "$OMC_DEBUG" = "1" ] || [ "$DEBUG" = "1" ]; then
+    JVM_OPTS+=("-Dorg.slf4j.simpleLogger.defaultLogLevel=DEBUG")
+    print_info "Debug logging enabled"
+fi
+
+# Allow user to override JVM options
+if [ -n "$OMC_JVM_OPTS" ]; then
+    print_info "Using custom JVM options: $OMC_JVM_OPTS"
+    JVM_OPTS=($OMC_JVM_OPTS)
+fi
+
+# ============================================================================
+# WAYLAND SUPPORT
+# ============================================================================
+
+# Prefer Wayland if available, fall back to X11
+if [ -n "$WAYLAND_DISPLAY" ]; then
+    export GDK_BACKEND="wayland,x11"
+    print_info "Wayland display detected, using native Wayland backend"
+elif [ -n "$DISPLAY" ]; then
+    export GDK_BACKEND="x11"
+    print_info "X11 display detected"
+else
+    print_warning "No display detected (WAYLAND_DISPLAY or DISPLAY not set)"
+fi
+
+# ============================================================================
+# COMMAND-LINE ARGUMENT HANDLING
+# ============================================================================
+
+# Handle --help and --version flags
+case "$1" in
+    --help|-h)
+        cat <<EOF
+Open Media Converter - Universal Media Conversion Tool (AppImage)
+
+Usage: $(basename "$0") [OPTIONS] [FILES...]
+
+Options:
+  --help, -h            Show this help message
+  --version, -v         Show version information
+  --debug               Enable debug logging
+  --config-dir DIR      Use custom configuration directory
+
+Environment Variables:
+  OMC_DEBUG=1           Enable debug logging
+  OMC_JVM_OPTS          Override JVM options
+  GTK_THEME             Set GTK theme (default: Adwaita)
+
+Files:
+  You can pass media files to convert as arguments.
+
+Examples:
+  $(basename "$0")                          # Start GUI
+  $(basename "$0") video.mp4 audio.mp3      # Start with files pre-loaded
+  OMC_DEBUG=1 $(basename "$0")              # Start with debug logging
+
+For more information, visit: https://github.com/yourusername/open-media-converter
+EOF
+        exit 0
+        ;;
+    --version|-v)
+        VERSION=$("$JAVA_HOME/bin/java" -jar "$APP_JAR" --version 2>&1 || echo "1.0.0")
+        echo "Open Media Converter $VERSION (AppImage)"
+        echo "Java: $("$JAVA_HOME/bin/java" -version 2>&1 | head -n 1)"
+        echo "GTK: $(pkg-config --modversion gtk4 2>/dev/null || echo 'bundled')"
+        echo "AppDir: $APPDIR"
+        exit 0
+        ;;
+esac
+
+# ============================================================================
+# LAUNCH APPLICATION
+# ============================================================================
+
+print_info "Launching Open Media Converter..."
+print_info "Java: $JAVA_HOME"
+print_info "AppDir: $APPDIR"
+
+# Execute the application with all JVM options and arguments
+exec "$JAVA_HOME/bin/java" "${JVM_OPTS[@]}" -jar "$APP_JAR" "$@"

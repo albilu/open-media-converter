@@ -1,0 +1,43 @@
+[Desktop Entry]
+Version=1.5
+Type=Application
+Name=Open Media Converter
+GenericName=Media Converter
+Comment=Convert video, audio, image and document formats
+Comment[es]=Convierte formatos de video, audio, imagen y documentos
+Comment[fr]=Convertir des formats vidéo, audio, image et document
+Comment[de]=Video-, Audio-, Bild- und Dokumentformate konvertieren
+
+# Executable and icon
+Exec=/usr/bin/open-media-converter %F
+Icon=open-media-converter
+TryExec=/usr/bin/open-media-converter
+Terminal=false
+
+# Desktop categories
+Categories=AudioVideo;Audio;Video;Graphics;Office;Utility;GTK;
+
+# Startup and display
+StartupNotify=true
+StartupWMClass=open-media-converter
+Keywords=media;convert;video;audio;image;document;transcode;ffmpeg;
+
+# MIME type associations for all supported formats
+MimeType=video/mp4;video/x-matroska;video/x-msvideo;video/quicktime;video/x-ms-wmv;video/x-flv;video/webm;video/ogg;video/mpeg;video/3gpp;video/x-m4v;audio/mpeg;audio/mp4;audio/x-wav;audio/x-flac;audio/ogg;audio/x-vorbis+ogg;audio/opus;audio/aac;audio/x-aiff;audio/x-ms-wma;audio/x-m4a;image/jpeg;image/png;image/gif;image/bmp;image/webp;image/tiff;image/x-icon;image/svg+xml;image/vnd.microsoft.icon;application/pdf;application/vnd.oasis.opendocument.text;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/msword;application/rtf;application/vnd.oasis.opendocument.presentation;application/vnd.openxmlformats-officedocument.presentationml.presentation;application/vnd.ms-powerpoint;application/vnd.oasis.opendocument.spreadsheet;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.ms-excel;text/markdown;text/html;text/plain;application/x-yaml;application/json;application/epub+zip;
+
+# Actions for quick access
+Actions=ConvertFiles;OpenSettings;
+
+[Desktop Action ConvertFiles]
+Name=Convert Files
+Name[es]=Convertir archivos
+Name[fr]=Convertir des fichiers
+Name[de]=Dateien konvertieren
+Exec=/usr/bin/open-media-converter
+
+[Desktop Action OpenSettings]
+Name=Open Settings
+Name[es]=Abrir configuración
+Name[fr]=Ouvrir les paramètres
+Name[de]=Einstellungen öffnen
+Exec=/usr/bin/open-media-converter --settings

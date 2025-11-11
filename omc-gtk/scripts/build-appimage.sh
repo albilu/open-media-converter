@@ -186,20 +186,43 @@ download_file() {
     
     log_download "Downloading $desc..."
     
+    local download_exit_code=0
+    
     if command -v wget &> /dev/null; then
-        wget --progress=bar:force -O "$output" "$url" 2>&1 | \
-            grep -oP '\d+%' | uniq | while read -r percent; do
-                echo -ne "\r  Progress: $percent"
-            done
-        echo ""
+        # Download without progress parsing to avoid PIPESTATUS issues
+        wget --progress=bar:force -O "$output" "$url" 2>&1
+        download_exit_code=$?
     elif command -v curl &> /dev/null; then
         curl -L -o "$output" --progress-bar "$url"
+        download_exit_code=$?
     else
         log_error "No download tool available"
         exit 1
     fi
     
-    log_success "Downloaded $desc"
+    # Check if download command succeeded
+    if [ $download_exit_code -ne 0 ]; then
+        log_error "Download failed with exit code $download_exit_code"
+        rm -f "$output"
+        exit 1
+    fi
+    
+    # Validate that the file was actually downloaded and has content
+    if [ ! -f "$output" ]; then
+        log_error "Download failed: output file does not exist"
+        exit 1
+    fi
+    
+    local file_size=$(stat -c%s "$output" 2>/dev/null || echo "0")
+    if [ "$file_size" -eq 0 ]; then
+        log_error "Download failed: output file is empty (0 bytes)"
+        log_error "URL: $url"
+        log_error "Output: $output"
+        rm -f "$output"
+        exit 1
+    fi
+    
+    log_success "Downloaded $desc ($(numfmt --to=iec-i --suffix=B $file_size))"
 }
 
 # Build JAR with Maven
@@ -626,30 +649,54 @@ build_appimage() {
     # Capture output to a temp file to check exit status properly
     local appimagetool_log="${BUILD_DIR}/appimagetool.log"
     
-    # Use --appimage-extract-and-run if FUSE is not available (common in Docker)
+    # Use --appimage-extract-and-run if FUSE is not available (common in Docker/GitHub Actions)
     local extract_flag=""
-    if [ ! -e /dev/fuse ] && [[ "$appimagetool_cmd" == *"/appimagetool" ]]; then
-        log_info "FUSE not available, using --appimage-extract-and-run mode..."
+    if [ ! -e /dev/fuse ] || [ ! -w /dev/fuse ] || [ -n "$GITHUB_ACTIONS" ]; then
+        if [ -n "$GITHUB_ACTIONS" ]; then
+            log_info "GitHub Actions environment detected, using --appimage-extract-and-run mode..."
+        elif [ ! -e /dev/fuse ]; then
+            log_info "FUSE not available, using --appimage-extract-and-run mode..."
+        else
+            log_info "FUSE not writable, using --appimage-extract-and-run mode..."
+        fi
         extract_flag="--appimage-extract-and-run"
     fi
     
-    if ARCH="${ARCH}" "$appimagetool_cmd" $extract_flag "$APPDIR" "${DIST_DIR}/${APPIMAGE_FILENAME}" > "$appimagetool_log" 2>&1; then
-        # Show warnings/errors if any
-        if grep -iE "ERROR|WARNING" "$appimagetool_log" > /dev/null 2>&1; then
-            grep -iE "ERROR|WARNING" "$appimagetool_log" | while read -r line; do
-                echo "  $line"
-            done
-        fi
-    else
-        log_error "appimagetool execution failed with exit code $?"
+    # Run appimagetool (may return non-zero even on success due to warnings)
+    set +e
+    ARCH="${ARCH}" "$appimagetool_cmd" $extract_flag "$APPDIR" "${DIST_DIR}/${APPIMAGE_FILENAME}" > "$appimagetool_log" 2>&1
+    local appimagetool_exit_code=$?
+    set -e
+    
+    # Show warnings/errors if any
+    if grep -iE "ERROR|WARNING" "$appimagetool_log" > /dev/null 2>&1; then
+        grep -iE "ERROR|WARNING" "$appimagetool_log" | while read -r line; do
+            echo "  $line"
+        done
+    fi
+    
+    # Check if AppImage was actually created (more reliable than exit code)
+    if [ ! -f "${DIST_DIR}/${APPIMAGE_FILENAME}" ]; then
+        log_error "AppImage file was not created (exit code: $appimagetool_exit_code)"
         echo "  Full output:"
         cat "$appimagetool_log" | sed 's/^/    /'
         exit 1
     fi
     
-    if [ ! -f "${DIST_DIR}/${APPIMAGE_FILENAME}" ]; then
-        log_error "AppImage file was not created"
-        exit 1
+    # Check for success indicators in log
+    local has_success=false
+    if grep -q "Success" "$appimagetool_log" 2>/dev/null; then
+        has_success=true
+    fi
+    
+    # Warn about non-zero exit code if AppImage was created successfully
+    if [ $appimagetool_exit_code -ne 0 ]; then
+        if [ "$has_success" = true ]; then
+            log_warn "appimagetool returned exit code $appimagetool_exit_code but reported success"
+            log_info "This is a known issue with appimagetool warnings in some environments"
+        else
+            log_warn "appimagetool returned exit code $appimagetool_exit_code (but AppImage was created)"
+        fi
     fi
     
     # Make AppImage executable

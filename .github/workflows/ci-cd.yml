@@ -101,7 +101,24 @@ jobs:
             libgtk-4-1 \
             maven \
             file \
-            gobject-introspection
+            gobject-introspection \
+            fuse \
+            libfuse2
+
+      - name: Verify FUSE availability
+        run: |
+          echo "Checking FUSE availability for AppImage building..."
+          ls -la /dev/fuse || echo "FUSE device not found (will use --appimage-extract-and-run)"
+          if [ -e /dev/fuse ]; then
+            echo "FUSE device exists"
+            if [ -r /dev/fuse ]; then
+              echo "FUSE device is readable"
+            fi
+            if [ -w /dev/fuse ]; then
+              echo "FUSE device is writable"
+            fi
+          fi
+          echo "GitHub Actions environment: $GITHUB_ACTIONS"
 
       - name: Extract version from tag and update pom.xml
         if: startsWith(github.ref, 'refs/tags/v')

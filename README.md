@@ -1,6 +1,6 @@
 # Open Media Converter
 
-[![CI/CD](https://github.com/albilu/open-media-converter/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/albilu/open-media-converter/actions/workflows/ci-cd.yml)
+[![CI/CD](https://github.com/albilu/open-media-converter/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/albilu/open-media-converter/actions/workflows/ci-cd.yml) [![CodeQL](https://github.com/albilu/open-media-converter/actions/workflows/codeql.yml/badge.svg)](https://github.com/albilu/open-media-converter/actions/workflows/codeql.yml)
 
 A fully featured GUI (GTK 4 via java-gi) Linux app to convert video, audio, image and document formats using (FFmpeg, ImageMagick, Pandoc, LibreOffice).
 

@@ -2,7 +2,7 @@
 
 A fully featured GUI (GTK 4 via java-gi) Linux app to convert video, audio, image and document formats using (FFmpeg, ImageMagick, Pandoc, LibreOffice).
 
-img:resources/omc.png|center|600px
+![omc.png](resources/omc.png)
 
 ## Quick highlights
 

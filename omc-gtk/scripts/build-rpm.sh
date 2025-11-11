@@ -253,8 +253,8 @@ EOF
     local icons_src="${OMC_GTK_ROOT}/src/main/resources/icons/hicolor"
     if [ -d "$icons_src" ]; then
         for size in 16x16 32x32 48x48 64x64 128x128 256x256; do
-            if [ -f "${icons_src}/${size}/apps/open-media-converter.png" ]; then
-                cp "${icons_src}/${size}/apps/open-media-converter.png" \
+            if [ -f "${icons_src}/${size}/apps/open-media-converter.svg" ]; then
+                cp "${icons_src}/${size}/apps/open-media-converter.svg" \
                    "${staging}/usr/share/icons/hicolor/${size}/apps/"
             fi
         done

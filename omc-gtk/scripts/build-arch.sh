@@ -250,8 +250,8 @@ EOF
                        "${src_dir}/share/icons/hicolor/${size}/apps/"
                 fi
             else
-                if [ -f "${icons_src}/${size}/apps/open-media-converter.png" ]; then
-                    cp "${icons_src}/${size}/apps/open-media-converter.png" \
+                if [ -f "${icons_src}/${size}/apps/open-media-converter.svg" ]; then
+                    cp "${icons_src}/${size}/apps/open-media-converter.svg" \
                        "${src_dir}/share/icons/hicolor/${size}/apps/"
                 fi
             fi

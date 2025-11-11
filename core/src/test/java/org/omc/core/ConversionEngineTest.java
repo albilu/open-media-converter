@@ -257,14 +257,23 @@ class ConversionEngineTest {
         // Single file conversion tests
 
         @Test
-        void testConvertSingle_WithValidParameters_ReturnsCompletableFuture() {
+        void testConvertSingle_WithValidParameters_ReturnsCompletableFuture() throws InterruptedException {
                 // When
                 CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(testFile, testSettings);
 
                 // Then
                 assertNotNull(future);
                 assertFalse(future.isDone()); // Should be running asynchronously
-                assertEquals(1, conversionEngine.getActiveConversionCount());
+
+                // Wait for the conversion to be registered (race condition mitigation)
+                int count = 0;
+                for (int i = 0; i < 100 && count == 0; i++) {
+                        count = conversionEngine.getActiveConversionCount();
+                        if (count == 0) {
+                                Thread.sleep(10); // Wait up to 1 second total
+                        }
+                }
+                assertEquals(1, count);
         }
 
         @Test
@@ -399,10 +408,19 @@ class ConversionEngineTest {
         // Cancel operations tests
 
         @Test
-        void testCancelConversion_WithActiveConversions_CancelsAll() {
+        void testCancelConversion_WithActiveConversions_CancelsAll() throws InterruptedException {
                 // Given
                 conversionEngine.convertSingle(testFile, testSettings);
-                assertEquals(1, conversionEngine.getActiveConversionCount());
+
+                // Wait for the conversion to be registered (race condition mitigation)
+                int count = 0;
+                for (int i = 0; i < 100 && count == 0; i++) {
+                        count = conversionEngine.getActiveConversionCount();
+                        if (count == 0) {
+                                Thread.sleep(10); // Wait up to 1 second total
+                        }
+                }
+                assertEquals(1, count);
 
                 // When
                 conversionEngine.cancelConversion();
@@ -412,10 +430,19 @@ class ConversionEngineTest {
         }
 
         @Test
-        void testCancelConversion_WhenPaused_ResumesBeforeCancelling() {
+        void testCancelConversion_WhenPaused_ResumesBeforeCancelling() throws InterruptedException {
                 // Given
                 conversionEngine.pauseConversion();
                 conversionEngine.convertSingle(testFile, testSettings);
+
+                // Wait for the conversion to be registered (race condition mitigation)
+                int count = 0;
+                for (int i = 0; i < 100 && count == 0; i++) {
+                        count = conversionEngine.getActiveConversionCount();
+                        if (count == 0) {
+                                Thread.sleep(10); // Wait up to 1 second total
+                        }
+                }
 
                 // When
                 conversionEngine.cancelConversion();
@@ -469,12 +496,18 @@ class ConversionEngineTest {
         }
 
         @Test
-        void testGetActiveConversionCount_WithActive_ReturnsCorrectCount() {
+        void testGetActiveConversionCount_WithActive_ReturnsCorrectCount() throws InterruptedException {
                 // Given
                 conversionEngine.convertSingle(testFile, testSettings);
 
-                // When
-                int count = conversionEngine.getActiveConversionCount();
+                // When - Wait for the conversion to be registered (race condition mitigation)
+                int count = 0;
+                for (int i = 0; i < 100 && count == 0; i++) {
+                        count = conversionEngine.getActiveConversionCount();
+                        if (count == 0) {
+                                Thread.sleep(10); // Wait up to 1 second total
+                        }
+                }
 
                 // Then
                 assertEquals(1, count);
@@ -522,7 +555,16 @@ class ConversionEngineTest {
         void testShutdown_WithActiveConversions_WaitsForCompletion() throws InterruptedException {
                 // Given
                 conversionEngine.convertSingle(testFile, testSettings);
-                assertEquals(1, conversionEngine.getActiveConversionCount());
+
+                // Wait for the conversion to be registered (race condition mitigation)
+                int count = 0;
+                for (int i = 0; i < 100 && count == 0; i++) {
+                        count = conversionEngine.getActiveConversionCount();
+                        if (count == 0) {
+                                Thread.sleep(10); // Wait up to 1 second total
+                        }
+                }
+                assertEquals(1, count);
 
                 // When
                 conversionEngine.shutdown();

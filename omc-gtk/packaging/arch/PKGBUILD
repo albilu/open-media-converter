@@ -50,9 +50,9 @@ package() {
     
     # Install icons
     for size in 16x16 32x32 48x48 64x64 128x128 256x256; do
-        if [ -f "share/icons/hicolor/${size}/apps/${pkgname}.png" ]; then
-            install -Dm644 "share/icons/hicolor/${size}/apps/${pkgname}.png" \
-                "${pkgdir}/usr/share/icons/hicolor/${size}/apps/${pkgname}.png"
+        if [ -f "share/icons/hicolor/${size}/apps/${pkgname}.svg" ]; then
+            install -Dm644 "share/icons/hicolor/${size}/apps/${pkgname}.svg" \
+                "${pkgdir}/usr/share/icons/hicolor/${size}/apps/${pkgname}.svg"
         fi
     done
     

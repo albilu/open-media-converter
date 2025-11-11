@@ -476,10 +476,10 @@ copy_icons() {
     
     # Copy PNG icons
     for size in 16x16 24x24 32x32 48x48 64x64 128x128 256x256; do
-        local icon_file="${icons_source}/${size}/apps/${APP_NAME}.png"
+        local icon_file="${icons_source}/${size}/apps/${APP_NAME}.svg"
         if [ -f "$icon_file" ]; then
             cp "$icon_file" "${icons_dest}/${size}/apps/"
-            chmod 644 "${icons_dest}/${size}/apps/${APP_NAME}.png"
+            chmod 644 "${icons_dest}/${size}/apps/${APP_NAME}.svg"
             icon_count=$((icon_count + 1))
         fi
     done
@@ -493,7 +493,7 @@ copy_icons() {
     fi
     
     # Create icon symlink at AppDir root (required by AppImage spec)
-    ln -sf "usr/share/icons/hicolor/256x256/apps/${APP_NAME}.png" "$APPDIR/${APP_NAME}.png"
+    ln -sf "usr/share/icons/hicolor/256x256/apps/${APP_NAME}.svg" "$APPDIR/${APP_NAME}.svg"
     
     log_success "Icons copied (${icon_count} files) and symlinked"
 }

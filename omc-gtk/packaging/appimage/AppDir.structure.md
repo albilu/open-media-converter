@@ -8,7 +8,7 @@ This document describes the directory structure that will be created by the `bui
 AppDir/
 ├── AppRun                                    # Entry point script (from this directory)
 ├── open-media-converter.desktop                # Desktop entry (symlink to usr/share/applications/)
-├── open-media-converter.png                    # Icon (symlink to usr/share/icons/hicolor/256x256/)
+├── open-media-converter.svg                    # Icon (symlink to usr/share/icons/hicolor/256x256/)
 │
 ├── usr/
 │   ├── bin/
@@ -52,13 +52,13 @@ AppDir/
 │       │
 │       ├── icons/
 │       │   └── hicolor/                      # Icon theme
-│       │       ├── 16x16/apps/open-media-converter.png
-│       │       ├── 24x24/apps/open-media-converter.png
-│       │       ├── 32x32/apps/open-media-converter.png
-│       │       ├── 48x48/apps/open-media-converter.png
-│       │       ├── 64x64/apps/open-media-converter.png
-│       │       ├── 128x128/apps/open-media-converter.png
-│       │       ├── 256x256/apps/open-media-converter.png
+│       │       ├── 16x16/apps/open-media-converter.svg
+│       │       ├── 24x24/apps/open-media-converter.svg
+│       │       ├── 32x32/apps/open-media-converter.svg
+│       │       ├── 48x48/apps/open-media-converter.svg
+│       │       ├── 64x64/apps/open-media-converter.svg
+│       │       ├── 128x128/apps/open-media-converter.svg
+│       │       ├── 256x256/apps/open-media-converter.svg
 │       │       └── scalable/apps/open-media-converter.svg
 │       │
 │       └── glib-2.0/                         # GLib schemas
@@ -80,7 +80,7 @@ AppDir/
 
 -   **AppRun**: Entry point script that sets up environment variables and launches the application
 -   **open-media-converter.desktop**: Symlink to desktop entry (required by AppImage spec for desktop integration)
--   **open-media-converter.png**: Symlink to main icon (required by AppImage spec)
+-   **open-media-converter.svg**: Symlink to main icon (required by AppImage spec)
 
 ### usr/bin/
 
@@ -186,7 +186,7 @@ This structure follows the [AppImage specification](https://docs.appimage.org/re
 
 1. ✅ **AppRun executable at root**: Entry point for the application
 2. ✅ **Desktop file symlinked at root**: `open-media-converter.desktop` → `usr/share/applications/open-media-converter.desktop`
-3. ✅ **Icon file symlinked at root**: `open-media-converter.png` → `usr/share/icons/hicolor/256x256/apps/open-media-converter.png`
+3. ✅ **Icon file symlinked at root**: `open-media-converter.svg` → `usr/share/icons/hicolor/256x256/apps/open-media-converter.svg`
 4. ✅ **usr/ directory structure**: Follows FHS (Filesystem Hierarchy Standard)
 5. ✅ **Self-contained**: All dependencies bundled (Java, GTK, tools)
 

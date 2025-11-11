@@ -81,12 +81,12 @@ ln -sf /opt/%{name}/bin/%{name} %{buildroot}/usr/bin/%{name}
 install -m 644 share/applications/%{name}.desktop %{buildroot}/usr/share/applications/
 
 # Install icons
-install -m 644 share/icons/hicolor/16x16/apps/%{name}.png %{buildroot}/usr/share/icons/hicolor/16x16/apps/
-install -m 644 share/icons/hicolor/32x32/apps/%{name}.png %{buildroot}/usr/share/icons/hicolor/32x32/apps/
-install -m 644 share/icons/hicolor/48x48/apps/%{name}.png %{buildroot}/usr/share/icons/hicolor/48x48/apps/
-install -m 644 share/icons/hicolor/64x64/apps/%{name}.png %{buildroot}/usr/share/icons/hicolor/64x64/apps/
-install -m 644 share/icons/hicolor/128x128/apps/%{name}.png %{buildroot}/usr/share/icons/hicolor/128x128/apps/
-install -m 644 share/icons/hicolor/256x256/apps/%{name}.png %{buildroot}/usr/share/icons/hicolor/256x256/apps/
+install -m 644 share/icons/hicolor/16x16/apps/%{name}.svg %{buildroot}/usr/share/icons/hicolor/16x16/apps/
+install -m 644 share/icons/hicolor/32x32/apps/%{name}.svg %{buildroot}/usr/share/icons/hicolor/32x32/apps/
+install -m 644 share/icons/hicolor/48x48/apps/%{name}.svg %{buildroot}/usr/share/icons/hicolor/48x48/apps/
+install -m 644 share/icons/hicolor/64x64/apps/%{name}.svg %{buildroot}/usr/share/icons/hicolor/64x64/apps/
+install -m 644 share/icons/hicolor/128x128/apps/%{name}.svg %{buildroot}/usr/share/icons/hicolor/128x128/apps/
+install -m 644 share/icons/hicolor/256x256/apps/%{name}.svg %{buildroot}/usr/share/icons/hicolor/256x256/apps/
 install -m 644 share/icons/hicolor/scalable/apps/%{name}.svg %{buildroot}/usr/share/icons/hicolor/scalable/apps/
 
 # Install embedded binaries if present
@@ -105,12 +105,12 @@ fi
 /opt/%{name}/lib/%{name}-1.0.0.jar
 /usr/bin/%{name}
 /usr/share/applications/%{name}.desktop
-/usr/share/icons/hicolor/16x16/apps/%{name}.png
-/usr/share/icons/hicolor/32x32/apps/%{name}.png
-/usr/share/icons/hicolor/48x48/apps/%{name}.png
-/usr/share/icons/hicolor/64x64/apps/%{name}.png
-/usr/share/icons/hicolor/128x128/apps/%{name}.png
-/usr/share/icons/hicolor/256x256/apps/%{name}.png
+/usr/share/icons/hicolor/16x16/apps/%{name}.svg
+/usr/share/icons/hicolor/32x32/apps/%{name}.svg
+/usr/share/icons/hicolor/48x48/apps/%{name}.svg
+/usr/share/icons/hicolor/64x64/apps/%{name}.svg
+/usr/share/icons/hicolor/128x128/apps/%{name}.svg
+/usr/share/icons/hicolor/256x256/apps/%{name}.svg
 /usr/share/icons/hicolor/scalable/apps/%{name}.svg
 %dir /opt/%{name}
 %dir /opt/%{name}/bin

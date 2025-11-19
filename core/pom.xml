@@ -25,7 +25,7 @@
         <java-gi.version>0.12.2</java-gi.version>
         <jackson.version>2.17.0</jackson.version>
         <slf4j.version>2.0.12</slf4j.version>
-        <logback.version>1.5.3</logback.version>
+        <logback.version>1.5.21</logback.version>
         <junit.version>5.10.2</junit.version>
         <mockito.version>5.11.0</mockito.version>
     </properties>

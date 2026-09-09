@@ -147,8 +147,11 @@ public class FileManager {
                     continue;
                 }
 
-                // Check for duplicates
-                if (isDuplicate(path)) {
+                if (Thread.currentThread().isInterrupted()) break;
+                // Read content once, off the UI thread. Admission itself is atomic.
+                String hash = calculateFileHash(path);
+                if (Thread.currentThread().isInterrupted()) break;
+                if (isDuplicate(path, hash)) {
                     logger.debug("Skipping duplicate file: {}", path);
                     continue;
                 }
@@ -161,14 +164,14 @@ public class FileManager {
                 ConversionFile file = ConversionFile.create(path, format, size);
 
                 // Add to list
-                files.add(file);
-                addedFiles.add(file);
-
-                // Calculate and store hash for duplicate detection
-                String hash = calculateFileHash(path);
-                if (hash != null) {
-                    fileHashMap.put(path.toString(), hash);
-                    fileHashes.add(hash);
+                synchronized (files) {
+                    if (isDuplicate(path, hash)) continue;
+                    files.add(file);
+                    addedFiles.add(file);
+                    if (hash != null) {
+                        fileHashMap.put(path.toString(), hash);
+                        fileHashes.add(hash);
+                    }
                 }
 
                 // Notify listeners
@@ -176,7 +179,7 @@ public class FileManager {
 
                 logger.debug("Added file: {} (format: {}, size: {})", path, format, FileUtils.formatFileSize(size));
 
-            } catch (Exception e) {
+            } catch (FileOperationException | IllegalArgumentException e) {
                 logger.error("Failed to add file: {}", path, e);
             }
         }
@@ -397,14 +400,13 @@ public class FileManager {
      * @param path File path
      * @return true if file is a duplicate
      */
-    private boolean isDuplicate(Path path) {
+    private boolean isDuplicate(Path path, String hash) {
         // Check by path
-        if (files.stream().anyMatch(f -> f.path().equals(path))) {
+        if (files.stream().anyMatch(f -> f.path().toAbsolutePath().normalize().equals(path.toAbsolutePath().normalize()))) {
             return true;
         }
 
         // Check by hash
-        String hash = calculateFileHash(path);
         if (hash != null && fileHashes.contains(hash)) {
             return true;
         }
@@ -424,7 +426,7 @@ public class FileManager {
             try (DigestInputStream dis = new DigestInputStream(Files.newInputStream(path), digest)) {
                 byte[] buffer = new byte[8192];
                 while (dis.read(buffer) != -1) {
-                    // DigestInputStream updates digest automatically
+                    if (Thread.currentThread().isInterrupted()) return null;
                 }
             }
             byte[] hashBytes = digest.digest();
@@ -439,6 +441,26 @@ public class FileManager {
         } catch (NoSuchAlgorithmException | IOException e) {
             logger.debug("Failed to calculate file hash: {}", path, e);
             return null;
+        }
+    }
+
+    /**
+     * Restores saved records without recreating their identities or hashing their contents.
+     * Interrupted jobs become pending; completed results and custom settings are retained.
+     *
+     * @param savedFiles persisted conversion records
+     */
+    public void restoreFiles(List<ConversionFile> savedFiles) {
+        Objects.requireNonNull(savedFiles, "savedFiles");
+        for (ConversionFile saved : savedFiles) {
+            if (!Files.isRegularFile(saved.path()) || !Files.isReadable(saved.path())) continue;
+            ConversionFile restored = saved.status() == org.omc.model.ConversionStatus.IN_PROGRESS
+                    ? saved.withStatus(org.omc.model.ConversionStatus.PENDING).withProgress(0) : saved;
+            synchronized (files) {
+                if (isDuplicate(restored.path(), null)) continue;
+                files.add(restored);
+            }
+            notifyListeners(new FileEvent(EventType.FILE_ADDED, restored));
         }
     }
 

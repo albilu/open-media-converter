@@ -184,16 +184,31 @@ public class ImageMagickService {
 
         // 4. RESIZE
         Resolution resolution = settings.resolution();
-        if (resolution != null && resolution.getWidth() > 0 && resolution.getHeight() > 0) {
+        if (resolution != null && resolution.getWidth() > 0 && resolution.getHeight() > 0
+                && settings.resizeMode() != org.omc.model.ResizeMode.NONE) {
             String resizeSpec = resolution.getWidth() + "x" + resolution.getHeight();
-
-            // Add '!' suffix to force exact dimensions (ignore aspect ratio)
-            if (!settings.maintainAspectRatio()) {
-                resizeSpec += "!";
+            String filter = switch (settings.resizeMode()) {
+                case LANCZOS -> "Lanczos";
+                case BICUBIC -> "Cubic";
+                case BILINEAR -> "Triangle";
+                case NEAREST_NEIGHBOR -> "Point";
+                default -> null;
+            };
+            if (filter != null) {
+                command.add("-filter");
+                command.add(filter);
             }
-
             command.add("-resize");
-            command.add(resizeSpec);
+            if (settings.resizeMode() == org.omc.model.ResizeMode.FILL) {
+                command.add(resizeSpec + "^");
+                command.add("-gravity");
+                command.add("center");
+                command.add("-extent");
+                command.add(resizeSpec);
+            } else {
+                command.add(resizeSpec + (settings.resizeMode() == org.omc.model.ResizeMode.STRETCH
+                        || !settings.maintainAspectRatio() ? "!" : ""));
+            }
             logger.debug("Added resize parameter: {}", resizeSpec);
         }
 
@@ -204,9 +219,8 @@ public class ImageMagickService {
             FileFormat outputFormat = FileFormat.fromExtension(outputExt);
 
             if (outputFormat == FileFormat.PNG) {
-                command.add("-compress");
-                command.add("Zip");
-                logger.debug("Added PNG compression: Zip");
+                command.add("-define");
+                command.add("png:compression-level=" + compressionLevel);
             }
         }
 
@@ -267,6 +281,10 @@ public class ImageMagickService {
         Objects.requireNonNull(outputPath, "outputPath must not be null");
         Objects.requireNonNull(settings, "settings must not be null");
         Objects.requireNonNull(processRegistry, "processRegistry must not be null");
+
+        if (outputPath.toString().toLowerCase(java.util.Locale.ROOT).endsWith(".svg")) {
+            return convertSvg(inputPath, outputPath, settings, progressCallback, fileId, processRegistry);
+        }
 
         logger.info("Executing ImageMagick conversion: {} → {} (progressCallback: {})",
                 inputPath, outputPath, progressCallback != null ? "provided" : "NULL");
@@ -592,12 +610,35 @@ public class ImageMagickService {
         return "Unknown error";
     }
 
-    /**
-     * Checks if the given format supports the ImageMagick quality parameter.
-     * 
-     * @param format file format to check
-     * @return true if format supports quality parameter
-     */
+    /** Preserves full-colour raster content without requiring a vector tracing delegate. */
+    private ConversionResult convertSvg(Path input, Path output, ImageSettings settings,
+            ProgressCallback callback, String fileId, ProcessRegistry registry) throws ToolExecutionException {
+        Path raster = null;
+        Instant start = Instant.now();
+        try {
+            raster = Files.createTempFile(output.toAbsolutePath().getParent(), "omc-svg-", ".png");
+            ConversionResult result = convertImage(input, raster, settings, callback, fileId, registry);
+            if (!result.success()) return result;
+            if (Thread.currentThread().isInterrupted()) {
+                return ConversionResult.cancelled(fileId, result.toolOutput().orElse(null),
+                        Duration.between(start, Instant.now()), Files.size(input), ConversionTool.IMAGEMAGICK);
+            }
+            RasterSvgExporter.write(raster, output);
+            return ConversionResult.success(fileId, output, result.toolOutput().orElse(null),
+                    Duration.between(start, Instant.now()), Files.size(input), Files.size(output), ConversionTool.IMAGEMAGICK);
+        } catch (IOException e) {
+            cleanupPartialFile(output);
+            throw new ToolExecutionException("Could not create SVG output: " + e.getMessage(),
+                    ErrorCode.TOOL_EXECUTION_FAILED, "imagemagick");
+        } finally {
+            if (raster != null) {
+                try { Files.deleteIfExists(raster); }
+                catch (IOException e) { logger.warn("Could not remove intermediate image", e); }
+            }
+        }
+    }
+
+    /** Checks whether the selected encoder accepts ImageMagick's quality option. */
     private boolean supportsQualityParameter(FileFormat format) {
         // Requirement REQ-PDF-1.3: PDF supports quality parameter for compression
         return format == FileFormat.JPEG ||

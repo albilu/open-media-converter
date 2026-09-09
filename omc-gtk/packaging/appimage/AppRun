@@ -73,10 +73,10 @@ if [ ! -x "$JAVA_HOME/bin/java" ]; then
     exit 1
 fi
 
-# Verify Java version (should be Java 17+)
-JAVA_VERSION=$("$JAVA_HOME/bin/java" -version 2>&1 | head -n 1 | sed 's/.*version "\(.*\)".*/\1/' | cut -d'.' -f1)
-if [ "$JAVA_VERSION" -lt 17 ]; then
-    print_error "Java version $JAVA_VERSION is too old. Java 17 or newer is required."
+# Verify the Java version required by the application classes
+JAVA_VERSION=$("$JAVA_HOME/bin/java" -version 2>&1 | sed -nE 's/.*version "([0-9]+).*/\1/p' | head -n 1)
+if [[ ! "$JAVA_VERSION" =~ ^[0-9]+$ ]] || (( JAVA_VERSION < 23 )); then
+    print_error "Java version $JAVA_VERSION is too old. Java 23 or newer is required."
     exit 1
 fi
 
@@ -193,6 +193,7 @@ fi
 
 # Default JVM options
 JVM_OPTS=(
+    "--enable-native-access=ALL-UNNAMED"
     "-Xmx2G"                          # Maximum heap size
     "-Xms512M"                        # Initial heap size
     "-XX:+UseG1GC"                    # Use G1 garbage collector

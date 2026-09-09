@@ -189,7 +189,7 @@ public final class AudioSettings {
     }
 
     public static class Builder {
-        private String codec = "aac"; // AAC default
+        private String codec = "libmp3lame"; // Matches the default MP3 container
         private int bitrate = 192; // 192 kbps default
         private int sampleRate = -1; // -1 means original
         private int channels = -1; // -1 means original
@@ -259,6 +259,7 @@ public final class AudioSettings {
          */
         public Builder outputFormat(FileFormat outputFormat) {
             this.outputFormat = outputFormat;
+            this.codec = MediaCodecPolicy.audioCodec(outputFormat, codec);
             return this;
         }
 

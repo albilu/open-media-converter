@@ -137,7 +137,7 @@ class FileManagerTest {
         Path path = Paths.get("error.mp4");
 
         when(validationEngine.validateFile(path)).thenReturn(ValidationResult.success());
-        when(fileHandler.detectFormat(path)).thenThrow(new RuntimeException("IO error"));
+        when(fileHandler.detectFormat(path)).thenThrow(new IllegalArgumentException("Invalid format"));
 
         List<ConversionFile> added = fileManager.addFiles(List.of(path));
 

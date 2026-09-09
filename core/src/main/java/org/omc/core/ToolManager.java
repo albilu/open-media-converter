@@ -4,7 +4,6 @@ package org.omc.core;
 
 import java.nio.file.Path;
 import java.util.Objects;
-import java.util.Set;
 
 import org.omc.exception.ErrorCode;
 import org.omc.exception.ToolExecutionException;
@@ -33,9 +32,8 @@ import org.slf4j.LoggerFactory;
  * Tool selection logic:
  * - Video/Audio formats → FFmpegService
  * - Image formats → ImageMagickService
- * - Text document formats (Markdown, HTML, RTF, TXT, EPUB) → PandocService
- * - Office document formats (DOCX, PDF, XLSX, PPTX, ODT, ODS, ODP) →
- * LibreOfficeService
+ * - Document formats → Pandoc or LibreOffice, according to reader/writer support
+ *   and installed services; Pandoc uses LibreOffice to render PDF output.
  * 
  * Requirements:
  * - REQ-004.1: Tool selection based on format pairs
@@ -54,33 +52,16 @@ public class ToolManager {
     private final LibreOfficeService libreOfficeService;
     private final ImageMagickService imageMagickService;
 
-    // Pandoc-specific formats (text-based documents)
-    // Requirement REQ-SEL-1: Extended document format support
-    private static final Set<FileFormat> PANDOC_FORMATS = Set.of(
-            FileFormat.MARKDOWN, FileFormat.HTML, FileFormat.RTF,
-            FileFormat.TXT, FileFormat.EPUB, FileFormat.TEX, FileFormat.LATEX,
-            FileFormat.RST, FileFormat.ORG);
-
-    // LibreOffice-specific formats (office documents and PDF)
-    // Requirement REQ-SEL-1: Legacy Office format support
-    private static final Set<FileFormat> LIBREOFFICE_FORMATS = Set.of(
-            FileFormat.DOCX, FileFormat.PDF, FileFormat.XLSX, FileFormat.PPTX,
-            FileFormat.ODT, FileFormat.ODS, FileFormat.ODP, FileFormat.DOC,
-            FileFormat.XLS, FileFormat.PPT);
-
     /**
      * Creates a new ToolManager with specified tool services.
      * 
      * Requirement REQ-004.1: Tool coordination and selection
      * Requirement REQ-DEP-1: Dependency injection for all services
      * 
-     * @param ffmpegService      service for video/audio conversion
-     * @param pandocService      service for text document conversion
-     * @param libreOfficeService service for office document conversion
-     * @param imageMagickService service for image conversion (may be null if
-     *                           convert binary not found)
-     * @throws NullPointerException if ffmpegService, pandocService, or
-     *                              libreOfficeService is null
+     * @param ffmpegService      video/audio service, or null when unavailable
+     * @param pandocService      text document service, or null when unavailable
+     * @param libreOfficeService office document service, or null when unavailable
+     * @param imageMagickService image service, or null when unavailable
      */
     public ToolManager(
             FFmpegService ffmpegService,
@@ -88,13 +69,13 @@ public class ToolManager {
             LibreOfficeService libreOfficeService,
             ImageMagickService imageMagickService) {
 
-        this.ffmpegService = Objects.requireNonNull(ffmpegService, "ffmpegService must not be null");
-        this.pandocService = Objects.requireNonNull(pandocService, "pandocService must not be null");
-        this.libreOfficeService = Objects.requireNonNull(libreOfficeService, "libreOfficeService must not be null");
+        this.ffmpegService = ffmpegService;
+        this.pandocService = pandocService;
+        this.libreOfficeService = libreOfficeService;
         this.imageMagickService = imageMagickService; // May be null
 
-        logger.info("ToolManager initialized with all four services (ImageMagick: {})",
-                imageMagickService != null ? "available" : "not available");
+        logger.info("Tool availability: FFmpeg={}, Pandoc={}, LibreOffice={}, ImageMagick={}",
+                ffmpegService != null, pandocService != null, libreOfficeService != null, imageMagickService != null);
     }
 
     /**
@@ -103,9 +84,7 @@ public class ToolManager {
      * Selection logic (Requirement REQ-004.1):
      * - VIDEO, AUDIO categories → FFMPEG
      * - IMAGE category → IMAGEMAGICK (Requirement REQ-SEL-2)
-     * - DOCUMENT category:
-     * - Markdown, HTML, RTF, TXT, EPUB → PANDOC
-     * - DOCX, PDF, XLSX, PPTX, ODT, ODS, ODP → LIBREOFFICE
+     * - DOCUMENT category → a supported reader/writer pair in an available service
      * 
      * @param inputFormat  input file format
      * @param outputFormat desired output format
@@ -173,35 +152,26 @@ public class ToolManager {
     /**
      * Selects the appropriate tool for document conversions.
      * 
-     * Priority:
-     * 1. If input is Pandoc-specific (Markdown, HTML, RTF, TXT, EPUB) → Pandoc
-     * 2. If input is LibreOffice-specific (DOCX, PDF, XLSX, PPTX, ODT, ODS, ODP) →
-     * LibreOffice
-     * 3. If output is Pandoc-specific and input supported by Pandoc → Pandoc
-     * 4. Otherwise → LibreOffice
+     * Prefers an available Pandoc reader/writer pair, then a supported native
+     * office pair. Unsupported pairs fail before a process is launched.
      * 
      * @param inputFormat  input document format
      * @param outputFormat output document format
      * @return PANDOC or LIBREOFFICE
      */
-    private ConversionTool selectDocumentTool(FileFormat inputFormat, FileFormat outputFormat) {
-        // Pandoc for text-based documents (Markdown, HTML, RTF, TXT, EPUB)
-        if (PANDOC_FORMATS.contains(inputFormat)) {
+    private ConversionTool selectDocumentTool(FileFormat inputFormat, FileFormat outputFormat)
+            throws ToolExecutionException {
+        // Prefer native office layout when Pandoc cannot read or write this pair.
+        if (PandocService.canConvert(inputFormat, outputFormat) && pandocService != null) {
             return ConversionTool.PANDOC;
         }
-
-        // LibreOffice for office documents (DOCX, PDF, XLSX, PPTX, ODT, ODS, ODP)
-        if (LIBREOFFICE_FORMATS.contains(inputFormat)) {
+        if (LibreOfficeService.canConvert(inputFormat, outputFormat) && libreOfficeService != null) {
             return ConversionTool.LIBREOFFICE;
         }
-
-        // If output is text-based and Pandoc can handle it, prefer Pandoc
-        if (PANDOC_FORMATS.contains(outputFormat) && pandocService.supportsInput(inputFormat)) {
-            return ConversionTool.PANDOC;
-        }
-
-        // Default to LibreOffice for document conversions
-        return ConversionTool.LIBREOFFICE;
+        if (PandocService.canConvert(inputFormat, outputFormat)) return ConversionTool.PANDOC;
+        if (LibreOfficeService.canConvert(inputFormat, outputFormat)) return ConversionTool.LIBREOFFICE;
+        throw new ToolExecutionException("Unsupported document conversion: " + inputFormat + " to " + outputFormat,
+                ErrorCode.INVALID_FILE_FORMAT, "No tool supports this input/output pair");
     }
 
     /**
@@ -216,10 +186,7 @@ public class ToolManager {
     public boolean isToolAvailable(ConversionTool tool) {
         Objects.requireNonNull(tool, "tool must not be null");
 
-        // For this implementation, we assume tools are available if services were
-        // instantiated
-        // In a real implementation, this would check if binaries exist and are
-        // executable
+        // DependencyFactory constructs services only for discovered executables.
         boolean available = switch (tool) {
             case FFMPEG -> ffmpegService != null;
             case PANDOC -> pandocService != null;

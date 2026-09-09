@@ -111,7 +111,13 @@ public class MainWindowJavaGi extends ApplicationWindow {
 
     // Shutdown tracking
     // Prevents multiple confirmation dialogs during shutdown
-    private boolean shutdownInProgress = false;
+    private volatile boolean shutdownInProgress = false;
+    private final java.util.concurrent.ExecutorService fileAdmission =
+            java.util.concurrent.Executors.newSingleThreadExecutor(runnable -> {
+                Thread worker = new Thread(runnable, "file-admission");
+                worker.setDaemon(true);
+                return worker;
+            });
 
     /**
      * Constructs the main window and loads UI from XML.
@@ -477,7 +483,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
             } else {
                 // Add menu item for each available preset
                 for (SectionPreset preset : availablePresets) {
-                    String actionName = "win.apply-preset-" + sanitizeActionName(preset.name());
+                    String actionName = "win.apply-preset-" + preset.category().name().toLowerCase(java.util.Locale.ROOT) + "-" + sanitizeActionName(preset.name());
 
                     // Create action for this preset
                     SimpleAction action = new SimpleAction(actionName.substring(4), null); // Remove "win." prefix
@@ -636,15 +642,13 @@ public class MainWindowJavaGi extends ApplicationWindow {
 
     /**
      * Sanitizes a preset name to create a valid GTK action name.
-     * Replaces spaces and special characters with hyphens.
+     * Encodes UTF-8 bytes without losing distinctions between preset names.
      * 
      * @param name the preset name
      * @return sanitized action name
      */
     private String sanitizeActionName(String name) {
-        return name.toLowerCase()
-                .replaceAll("[^a-z0-9-]", "-")
-                .replaceAll("-+", "-");
+        return java.util.HexFormat.of().formatHex(name.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     // ===== Event Handlers =====
@@ -655,21 +659,8 @@ public class MainWindowJavaGi extends ApplicationWindow {
      */
     private void handleAddFiles() {
         logger.debug("Add Files button clicked");
-        showFileChooserDialog(selectedPaths -> {
-            if (!selectedPaths.isEmpty()) {
-                try {
-                    List<java.nio.file.Path> paths = selectedPaths.stream()
-                            .map(java.nio.file.Paths::get)
-                            .collect(Collectors.toList());
-                    controller.addFiles(paths);
-                    updateFileList();
-                    showStatus(selectedPaths.size() + " file(s) added");
-                } catch (FileOperationException e) {
-                    logger.error("Failed to add files", e);
-                    showErrorDialog("Add Files Error", e.getMessage());
-                }
-            }
-        });
+        showFileChooserDialog(selectedPaths -> addFilesAsync(selectedPaths.stream()
+                .map(java.nio.file.Paths::get).toList()));
     }
 
     /**
@@ -680,15 +671,49 @@ public class MainWindowJavaGi extends ApplicationWindow {
         logger.debug("Add Folder button clicked");
         showFolderChooserDialog(selectedPath -> {
             if (selectedPath != null && !selectedPath.isBlank()) {
-                try {
-                    java.nio.file.Path folderPath = java.nio.file.Paths.get(selectedPath);
-                    List<ConversionFile> addedFiles = controller.addFilesFromFolder(folderPath, true);
-                    updateFileList();
-                    showStatus(addedFiles.size() + " file(s) added from folder");
-                } catch (FileOperationException e) {
-                    logger.error("Failed to add files from folder", e);
-                    showErrorDialog("Add Folder Error", e.getMessage());
-                }
+                admitFiles(() -> controller.addFilesFromFolder(java.nio.file.Paths.get(selectedPath), true).size());
+            }
+        });
+    }
+
+    /**
+     * Adds files in the background, then refreshes the list on the GTK thread.
+     * @param paths files selected by the user or passed on the command line
+     */
+    public void addFilesAsync(List<java.nio.file.Path> paths) {
+        if (paths.isEmpty()) return;
+        List<java.nio.file.Path> snapshot = List.copyOf(paths);
+        admitFiles(() -> {
+            int before = controller.getFileList().size();
+            controller.addFiles(snapshot);
+            return controller.getFileList().size() - before;
+        });
+    }
+
+    @FunctionalInterface
+    private interface FileAdmission {
+        int run() throws FileOperationException;
+    }
+
+    private void admitFiles(FileAdmission admission) {
+        if (shutdownInProgress) return;
+        showStatus("Reading files…");
+        fileAdmission.submit(() -> {
+            try {
+                int count = admission.run();
+                GLib.idleAdd(0, () -> {
+                    if (!shutdownInProgress) {
+                        updateFileList();
+                        showStatus(count + " file(s) added");
+                    }
+                    return false;
+                });
+            } catch (FileOperationException | IllegalArgumentException e) {
+                logger.error("Failed to add files", e);
+                GLib.idleAdd(0, () -> {
+                    if (!shutdownInProgress) showErrorDialog("Add Files", e.getMessage());
+                    return false;
+                });
             }
         });
     }
@@ -706,6 +731,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
             // Create and show settings dialog
             SettingsDialogJavaGi settingsDialog = new SettingsDialogJavaGi(this, currentSettings,
                     controller.getSettingsManager());
+            settingsDialog.setAvailableCategories(controller.getAvailableCategories());
 
             // Register callback to receive updated settings when user clicks Save
             // FIX: Defer error dialog to avoid modal stacking (settings dialog still open)
@@ -869,54 +895,34 @@ public class MainWindowJavaGi extends ApplicationWindow {
      * Requirements: REQ-001.2, REQ-005.1, REQ-005.2, REQ-005.3, Task 49, Task 50
      */
     private boolean handleClose() {
-        logger.info("Window close requested");
-
-        // If shutdown is already in progress, allow the window to close
-        if (shutdownInProgress) {
-            logger.debug("Shutdown already in progress, allowing window to close");
-            return false;
-        }
-
-        // Check if conversions are in progress
+        if (shutdownInProgress) return false;
         if (controller.isConversionInProgress()) {
-            showConfirmDialog(
-                    "Close Application",
-                    "Conversions are in progress. Are you sure you want to exit?\nAll active conversions will be cancelled.",
-                    confirmed -> {
-                        if (confirmed) {
-                            shutdownInProgress = true;
-                            // Shutdown in background thread to avoid blocking GTK main loop
-                            // Then close window once shutdown is complete
-                            new Thread(() -> {
-                                try {
-                                    logger.info("Shutting down controller and cancelling conversions...");
-                                    controller.shutdown(true); // Force shutdown to cancel conversions
-                                    logger.info("Controller shutdown complete, closing window");
-                                    // Close window on GTK main thread
-                                    GLib.idleAdd(0, () -> {
-                                        close();
-                                        return false; // Don't repeat
-                                    });
-                                } catch (Exception e) {
-                                    logger.error("Error during shutdown", e);
-                                    // Still try to close window
-                                    GLib.idleAdd(0, () -> {
-                                        close();
-                                        return false;
-                                    });
-                                }
-                            }, "shutdown-thread").start();
-                        }
-                    });
-            // Return true to prevent window from closing until user responds to dialog
-            return true;
+            showConfirmDialog("Close Application",
+                    "Conversions are in progress. Exit and cancel active conversions?",
+                    confirmed -> { if (confirmed) beginShutdown(); });
         } else {
-            // No conversions in progress, shutdown directly
-            shutdownInProgress = true;
-            controller.shutdown();
-            // Return false to allow window to close
-            return false;
+            beginShutdown();
         }
+        return true;
+    }
+
+    private void beginShutdown() {
+        if (shutdownInProgress) return;
+        controller.updateWindowState(saveState());
+        shutdownInProgress = true;
+        fileAdmission.shutdownNow();
+        new Thread(() -> {
+            try {
+                // Hashing checks interruption, so admission stops before state is saved.
+                fileAdmission.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS);
+                controller.shutdown(true);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.warn("Interrupted while waiting for file admission", e);
+            } finally {
+                GLib.idleAdd(0, () -> { close(); return false; });
+            }
+        }, "shutdown-thread").start();
     }
 
     // ===== Public API for Controller and Actions =====
@@ -1277,7 +1283,26 @@ public class MainWindowJavaGi extends ApplicationWindow {
         });
     }
 
+    /** Shows which conversion categories are available when tools are missing. */
+    public void showAvailableCategories() {
+        var categories = controller.getAvailableCategories();
+        if (categories.size() < 4) {
+            showStatus(categories.isEmpty() ? "No conversion tools found. Install FFmpeg, ImageMagick, Pandoc or LibreOffice."
+                    : "Available conversions: " + categories.stream().map(Enum::name).sorted().collect(Collectors.joining(", ")));
+        }
+    }
+
     // ===== Window State Management =====
+
+    private void captureNormalSize() {
+        // GTK maintains the normal size across user resizing, maximization and
+        // fullscreen. Widget allocation excludes decorations and drifts on restore.
+        var width = new io.github.jwharm.javagi.base.Out<Integer>();
+        var height = new io.github.jwharm.javagi.base.Out<Integer>();
+        getDefaultSize(width, height);
+        if (width.get() != null && width.get() > 0) currentWidth = width.get();
+        if (height.get() != null && height.get() > 0) currentHeight = height.get();
+    }
 
     /**
      * Saves the current window state.
@@ -1285,8 +1310,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
      * @return the captured window state
      */
     public WindowState saveState() {
-        // GTK 4 doesn't provide getDefaultWidth/Height after window is created
-        // Store the last set values
+        captureNormalSize();
         int width = currentWidth;
         int height = currentHeight;
 

@@ -204,8 +204,8 @@ public class ToolSelectionIntegrationTest {
         ConversionTool selectedTool = toolManager.selectTool(FileFormat.DOCX, FileFormat.PDF);
 
         // Then: LIBREOFFICE tool should be selected
-        assertEquals(ConversionTool.LIBREOFFICE, selectedTool,
-                "DOCX → PDF conversion should use LIBREOFFICE");
+        assertEquals(ConversionTool.PANDOC, selectedTool,
+                "DOCX → PDF conversion should use PANDOC");
 
         // And: Tool should be available
         assertTrue(toolManager.isToolAvailable(ConversionTool.LIBREOFFICE),
@@ -250,8 +250,8 @@ public class ToolSelectionIntegrationTest {
         for (FileFormat format : libreOfficeFormats) {
             if (format != FileFormat.PDF) { // Skip PDF → PDF
                 ConversionTool tool = toolManager.selectTool(format, FileFormat.PDF);
-                assertEquals(ConversionTool.LIBREOFFICE, tool,
-                        String.format("%s → PDF should use LIBREOFFICE", format));
+                assertEquals(format == FileFormat.DOCX || format == FileFormat.ODT
+                        ? ConversionTool.PANDOC : ConversionTool.LIBREOFFICE, tool);
             }
         }
     }
@@ -331,9 +331,9 @@ public class ToolSelectionIntegrationTest {
         assertEquals(ConversionTool.PANDOC,
                 toolManager.selectTool(FileFormat.MARKDOWN, FileFormat.HTML),
                 "Markdown conversions should still use PANDOC");
-        assertEquals(ConversionTool.LIBREOFFICE,
+        assertEquals(ConversionTool.PANDOC,
                 toolManager.selectTool(FileFormat.DOCX, FileFormat.ODT),
-                "DOCX conversions should still use LIBREOFFICE");
+                "DOCX conversions should use PANDOC");
     }
 
     /**
@@ -360,7 +360,7 @@ public class ToolSelectionIntegrationTest {
         assertEquals(ConversionTool.PANDOC, docTool1, "Markdown should route to PANDOC");
 
         ConversionTool docTool2 = toolManager.selectTool(FileFormat.DOCX, FileFormat.PDF);
-        assertEquals(ConversionTool.LIBREOFFICE, docTool2, "DOCX should route to LIBREOFFICE");
+        assertEquals(ConversionTool.PANDOC, docTool2, "DOCX should route to PANDOC");
     }
 
     /**

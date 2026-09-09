@@ -64,9 +64,11 @@ public class SettingsDialogJavaGi {
     // Constants for codec/resolution/preset arrays
     // Requirement REQ-VID-1.1, REQ-VID-1.2, REQ-VID-1.3: Include GPU codec options
     private static final String[] VIDEO_CODECS = { "libx264", "libx265", "libvpx-vp9", "mpeg4", "h264_nvenc",
-            "hevc_nvenc" };
+            "hevc_nvenc", "wmv2", "flv" };
     // Requirement REQ-AUD-1.1: Include copy codec option
-    private static final String[] AUDIO_CODECS = { "aac", "libmp3lame", "libopus", "libvorbis", "flac", "copy" };
+    private static final String[] AUDIO_CODECS = { "aac", "libmp3lame", "libopus", "libvorbis", "flac", "copy", "pcm_s16le", "alac" };
+    private static final int[] AUDIO_SAMPLE_RATES = { -1, 8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 192000 };
+    private static final int[] AUDIO_CHANNELS = { -1, 1, 2, 3, 6, 8 };
     private static final String[] VIDEO_PRESETS = { "ultrafast", "superfast", "veryfast", "faster", "fast", "medium",
             "slow", "slower", "veryslow" };
 
@@ -86,6 +88,76 @@ public class SettingsDialogJavaGi {
      */
     static long uiByteLength(String ui) {
         return ui.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+    }
+
+    /**
+     * Disables sections whose required converter is unavailable.
+     * @param available categories supported by discovered tools
+     */
+    public void setAvailableCategories(java.util.Set<FormatCategory> available) {
+        var notebook = (org.gnome.gtk.Notebook) builder.getObject("settingsNotebook");
+        FormatCategory[] categories = { FormatCategory.VIDEO, FormatCategory.AUDIO, FormatCategory.IMAGE, FormatCategory.DOCUMENT };
+        for (int i = 0; i < categories.length; i++) {
+            var page = notebook.getNthPage(i + 1);
+            boolean enabled = available.contains(categories[i]);
+            page.setSensitive(enabled);
+            notebook.getTabLabel(page).setTooltipText(enabled ? null : "Install the conversion tool for this section.");
+        }
+    }
+
+    private void updateDocumentControls() {
+        int index = documentFormatDropdown.getSelected();
+        FileFormat[] formats = FileFormat.getFormatsByCategory(FormatCategory.DOCUMENT);
+        if (index < 0 || index >= formats.length) return;
+        FileFormat format = formats[index];
+        boolean text = org.omc.service.PandocService.canConvert(FileFormat.MARKDOWN, format);
+        boolean margins = format == FileFormat.PDF || format == FileFormat.HTML || format == FileFormat.DOCX || format == FileFormat.ODT;
+        boolean toc = java.util.Set.of(FileFormat.PDF, FileFormat.HTML, FileFormat.DOCX, FileFormat.EPUB,
+                FileFormat.TEX, FileFormat.LATEX).contains(format);
+        embedFontsCheckbox.setSensitive(format == FileFormat.PDF);
+        embedFontsCheckbox.setTooltipText("Embed standard fonts in PDF output. Other formats use their own font handling.");
+        if (format != FileFormat.PDF) embedFontsCheckbox.setActive(false);
+        generateTocCheckbox.setSensitive(toc);
+        generateTocCheckbox.setTooltipText("Generate contents from headings in text documents supported by Pandoc.");
+        if (!toc) generateTocCheckbox.setActive(false);
+        for (var spin : java.util.List.of(marginTopSpinButton, marginBottomSpinButton, marginLeftSpinButton, marginRightSpinButton)) {
+            spin.setSensitive(margins);
+            spin.setTooltipText("Page margins for text documents. Native spreadsheet and presentation conversions retain their source layout.");
+            if (!margins) spin.setValue(25);
+        }
+        templateFileEntry.setSensitive(text);
+        if (!text) templateFileEntry.setText("");
+        preserveFormattingCheckbox.setSensitive(text);
+        if (!text) preserveFormattingCheckbox.setActive(true);
+    }
+
+    private void synchronizeMediaCodec(boolean video) {
+        DropDown formatWidget = video ? videoFormatDropdown : audioFormatDropdown;
+        DropDown codecWidget = video ? videoCodecDropdown : audioCodecDropdown;
+        FileFormat[] formats = FileFormat.getFormatsByCategory(video ? FormatCategory.VIDEO : FormatCategory.AUDIO);
+        String[] codecs = video ? VIDEO_CODECS : AUDIO_CODECS;
+        int selectedFormat = formatWidget.getSelected();
+        int selectedCodec = codecWidget.getSelected();
+        if (selectedFormat < 0 || selectedFormat >= formats.length || selectedCodec < 0 || selectedCodec >= codecs.length) return;
+        String codec = video ? org.omc.model.MediaCodecPolicy.videoCodec(formats[selectedFormat], codecs[selectedCodec])
+                : org.omc.model.MediaCodecPolicy.audioCodec(formats[selectedFormat], codecs[selectedCodec]);
+        for (int i = 0; i < codecs.length; i++) {
+            if (codecs[i].equals(codec) && i != selectedCodec) {
+                codecWidget.setSelected(i);
+                break;
+            }
+        }
+    }
+
+    private static int indexOf(int[] values, int value) {
+        for (int i = 0; i < values.length; i++) {
+            if (values[i] == value) return i;
+        }
+        return 0;
+    }
+
+    private static int valueAt(int[] values, int index) {
+        return index >= 0 && index < values.length ? values[index] : values[0];
     }
 
     // UI Components from Builder
@@ -212,6 +284,7 @@ public class SettingsDialogJavaGi {
             org.omc.controller.SettingsManager settingsManager) {
         long startTime = System.currentTimeMillis(); // REQ-5.2: Performance tracking
 
+        settings = settings == null ? ConversionSettings.builder().build().withDefaults() : settings.withDefaults();
         this.currentSettings = settings;
         this.settingsManager = settingsManager;
 
@@ -244,6 +317,12 @@ public class SettingsDialogJavaGi {
         populateImageResizeModeCombo();
         populateImageRotationCombo();
         populateImageFlipCombo();
+
+        documentFormatDropdown.onNotify("selected", param -> updateDocumentControls());
+        videoFormatDropdown.onNotify("selected", param -> synchronizeMediaCodec(true));
+        audioFormatDropdown.onNotify("selected", param -> synchronizeMediaCodec(false));
+        videoCodecDropdown.onNotify("selected", param -> synchronizeMediaCodec(true));
+        audioCodecDropdown.onNotify("selected", param -> synchronizeMediaCodec(false));
 
         // Populate preset management dropdowns (REQ-2.6)
         if (settingsManager != null) {
@@ -1146,66 +1225,8 @@ public class SettingsDialogJavaGi {
             SectionPreset preset = audioPresets.get(presetIndex);
             AudioSettings settings = preset.audioSettings();
 
-            // Load settings into UI
-            // Format
-            if (audioFormatDropdown != null && settings.outputFormat() != null) {
-                FileFormat[] audioFormats = FileFormat.getFormatsByCategory(FormatCategory.AUDIO);
-                for (int i = 0; i < audioFormats.length; i++) {
-                    if (audioFormats[i] == settings.outputFormat()) {
-                        audioFormatDropdown.setSelected(i);
-                        break;
-                    }
-                }
-            }
-
-            // Codec
-            if (audioCodecDropdown != null && settings.codec() != null) {
-                org.gnome.gtk.StringList codecList = new org.gnome.gtk.StringList(AUDIO_CODECS);
-                audioCodecDropdown.setModel(codecList);
-
-                for (int i = 0; i < AUDIO_CODECS.length; i++) {
-                    if (AUDIO_CODECS[i].equals(settings.codec())) {
-                        audioCodecDropdown.setSelected(i);
-                        break;
-                    }
-                }
-            }
-
-            // Bitrate
-            if (audioBitrateSpinButton != null) {
-                audioBitrateSpinButton.setValue(settings.bitrate());
-            }
-
-            // Sample rate
-            if (audioSampleRateDropdown != null) {
-                int sampleRate = settings.sampleRate();
-                int sampleRateIndex = switch (sampleRate) {
-                    case -1 -> 0; // Original
-                    case 44100 -> 1;
-                    case 48000 -> 2;
-                    case 96000 -> 3;
-                    default -> 0;
-                };
-                audioSampleRateDropdown.setSelected(sampleRateIndex);
-            }
-
-            // Channels
-            if (audioChannelsDropdown != null) {
-                int channels = settings.channels();
-                int channelsIndex = switch (channels) {
-                    case -1 -> 0; // Original
-                    case 1 -> 1; // Mono
-                    case 2 -> 2; // Stereo
-                    case 6 -> 3; // 5.1
-                    default -> 0;
-                };
-                audioChannelsDropdown.setSelected(channelsIndex);
-            }
-
-            // Quality
-            if (audioQualityScale != null) {
-                audioQualityScale.setValue(settings.quality());
-            }
+            populateAudioSettings(settings);
+            hasUnsavedChanges = true;
 
             logger.info("Applied audio preset: {}", preset.name());
 
@@ -1405,31 +1426,8 @@ public class SettingsDialogJavaGi {
             SectionPreset preset = imagePresets.get(presetIndex);
             ImageSettings settings = preset.imageSettings();
 
-            // Load settings into UI
-            // Quality
-            if (imageQualityScale != null) {
-                imageQualityScale.setValue(settings.quality());
-            }
-
-            // Resolution
-            if (settings.resolution() != null) {
-                if (imageWidthSpinButton != null) {
-                    imageWidthSpinButton.setValue(settings.resolution().getWidth());
-                }
-                if (imageHeightSpinButton != null) {
-                    imageHeightSpinButton.setValue(settings.resolution().getHeight());
-                }
-            }
-
-            // Maintain aspect ratio
-            if (maintainAspectRatioCheckbox != null) {
-                maintainAspectRatioCheckbox.setActive(settings.maintainAspectRatio());
-            }
-
-            // Compression level
-            if (compressionLevelScale != null) {
-                compressionLevelScale.setValue(settings.compressionLevel());
-            }
+            populateImageSettings(settings);
+            hasUnsavedChanges = true;
 
             logger.info("Applied image preset: {}", preset.name());
 
@@ -1629,40 +1627,8 @@ public class SettingsDialogJavaGi {
             SectionPreset preset = docPresets.get(presetIndex);
             DocumentSettings settings = preset.documentSettings();
 
-            // Load settings into UI
-            // Template file
-            if (templateFileEntry != null && settings.templatePath() != null) {
-                templateFileEntry.setText(settings.templatePath().toString());
-            }
-
-            // Preserve formatting
-            if (preserveFormattingCheckbox != null) {
-                preserveFormattingCheckbox.setActive(settings.preserveFormatting());
-            }
-
-            // Embed fonts
-            if (embedFontsCheckbox != null) {
-                embedFontsCheckbox.setActive(settings.embedFonts());
-            }
-
-            // Generate TOC
-            if (generateTocCheckbox != null) {
-                generateTocCheckbox.setActive(settings.generateTableOfContents());
-            }
-
-            // Margins
-            if (marginTopSpinButton != null) {
-                marginTopSpinButton.setValue(settings.marginTop());
-            }
-            if (marginBottomSpinButton != null) {
-                marginBottomSpinButton.setValue(settings.marginBottom());
-            }
-            if (marginLeftSpinButton != null) {
-                marginLeftSpinButton.setValue(settings.marginLeft());
-            }
-            if (marginRightSpinButton != null) {
-                marginRightSpinButton.setValue(settings.marginRight());
-            }
+            populateDocumentSettings(settings);
+            hasUnsavedChanges = true;
 
             logger.info("Applied document preset: {}", preset.name());
 
@@ -2111,6 +2077,7 @@ public class SettingsDialogJavaGi {
             return;
         }
 
+        settings = settings.withDefaults();
         this.currentSettings = settings;
 
         // Populate output settings
@@ -2404,27 +2371,13 @@ public class SettingsDialogJavaGi {
 
         // Set sample rate
         if (audioSampleRateDropdown != null) {
-            int sampleRate = audioSettings.sampleRate();
-            int sampleRateIndex = switch (sampleRate) {
-                case -1 -> 0; // Original
-                case 44100 -> 1;
-                case 48000 -> 2;
-                case 96000 -> 3;
-                default -> 0;
-            };
+            int sampleRateIndex = indexOf(AUDIO_SAMPLE_RATES, audioSettings.sampleRate());
             audioSampleRateDropdown.setSelected(sampleRateIndex);
         }
 
         // Set channels
         if (audioChannelsDropdown != null) {
-            int channels = audioSettings.channels();
-            int channelsIndex = switch (channels) {
-                case -1 -> 0; // Original
-                case 1 -> 1; // Mono
-                case 2 -> 2; // Stereo
-                case 6 -> 3; // 5.1
-                default -> 0;
-            };
+            int channelsIndex = indexOf(AUDIO_CHANNELS, audioSettings.channels());
             audioChannelsDropdown.setSelected(channelsIndex);
         }
 
@@ -2459,15 +2412,12 @@ public class SettingsDialogJavaGi {
             imageQualityScale.setValue(imageSettings.quality());
         }
 
-        // Set resolution
-        if (imageSettings.resolution() != null) {
-            if (imageWidthSpinButton != null) {
-                imageWidthSpinButton.setValue(imageSettings.resolution().getWidth());
-            }
-
-            if (imageHeightSpinButton != null) {
-                imageHeightSpinButton.setValue(imageSettings.resolution().getHeight());
-            }
+        // Clear dimensions when restoring an original-size preset.
+        if (imageWidthSpinButton != null) {
+            imageWidthSpinButton.setValue(imageSettings.resolution() == null ? 0 : imageSettings.resolution().getWidth());
+        }
+        if (imageHeightSpinButton != null) {
+            imageHeightSpinButton.setValue(imageSettings.resolution() == null ? 0 : imageSettings.resolution().getHeight());
         }
 
         // Set maintain aspect ratio checkbox
@@ -2482,13 +2432,7 @@ public class SettingsDialogJavaGi {
 
         // Set resize mode
         if (resizeModeDropdown != null && imageSettings.resizeMode() != null) {
-            int resizeModeIndex = switch (imageSettings.resizeMode()) {
-                case FIT -> 0;
-                case FILL -> 1;
-                case STRETCH -> 2;
-                case NONE -> 3;
-                default -> 3; // Default to NONE
-            };
+            int resizeModeIndex = imageSettings.resizeMode().ordinal();
             resizeModeDropdown.setSelected(resizeModeIndex);
         }
 
@@ -2572,6 +2516,7 @@ public class SettingsDialogJavaGi {
         if (marginRightSpinButton != null) {
             marginRightSpinButton.setValue(documentSettings.marginRight());
         }
+        updateDocumentControls();
     }
 
     /**
@@ -2715,26 +2660,14 @@ public class SettingsDialogJavaGi {
         // Sample rate
         if (audioSampleRateDropdown != null) {
             int sampleRateIndex = audioSampleRateDropdown.getSelected();
-            int sampleRate = switch (sampleRateIndex) {
-                case 0 -> -1; // Original
-                case 1 -> 44100;
-                case 2 -> 48000;
-                case 3 -> 96000;
-                default -> -1;
-            };
+            int sampleRate = valueAt(AUDIO_SAMPLE_RATES, sampleRateIndex);
             builder.sampleRate(sampleRate);
         }
 
         // Channels
         if (audioChannelsDropdown != null) {
             int channelsIndex = audioChannelsDropdown.getSelected();
-            int channels = switch (channelsIndex) {
-                case 0 -> -1; // Original
-                case 1 -> 1; // Mono
-                case 2 -> 2; // Stereo
-                case 3 -> 6; // 5.1
-                default -> -1;
-            };
+            int channels = valueAt(AUDIO_CHANNELS, channelsIndex);
             builder.channels(channels);
         }
 
@@ -2810,13 +2743,8 @@ public class SettingsDialogJavaGi {
         // Resize mode
         if (resizeModeDropdown != null) {
             int resizeModeIndex = resizeModeDropdown.getSelected();
-            ResizeMode resizeMode = switch (resizeModeIndex) {
-                case 0 -> ResizeMode.FIT;
-                case 1 -> ResizeMode.FILL;
-                case 2 -> ResizeMode.STRETCH;
-                case 3 -> ResizeMode.NONE;
-                default -> ResizeMode.NONE;
-            };
+            ResizeMode resizeMode = resizeModeIndex >= 0 && resizeModeIndex < ResizeMode.values().length
+                    ? ResizeMode.values()[resizeModeIndex] : ResizeMode.NONE;
             builder.resizeMode(resizeMode);
         }
 
@@ -3232,7 +3160,7 @@ public class SettingsDialogJavaGi {
                 "VP9 (libvpx-vp9)", // VIDEO_CODECS[2]: "libvpx-vp9"
                 "MPEG-4 (mpeg4)", // VIDEO_CODECS[3]: "mpeg4"
                 "H.264 (NVIDIA GPU)", // VIDEO_CODECS[4]: "h264_nvenc"
-                "HEVC (NVIDIA GPU)" // VIDEO_CODECS[5]: "hevc_nvenc"
+                "HEVC (NVIDIA GPU)", "Windows Media Video", "Flash Video"
         });
 
         videoCodecDropdown.setModel(codecList);
@@ -3411,7 +3339,7 @@ public class SettingsDialogJavaGi {
                 "Opus (libopus)", // AUDIO_CODECS[2]: "libopus"
                 "Vorbis (libvorbis)", // AUDIO_CODECS[3]: "libvorbis"
                 "FLAC (flac)", // AUDIO_CODECS[4]: "flac"
-                "Copy (No Re-encode)" // AUDIO_CODECS[5]: "copy"
+                "Copy (No Re-encode)", "PCM (WAV)", "Apple Lossless"
         });
 
         audioCodecDropdown.setModel(codecList);

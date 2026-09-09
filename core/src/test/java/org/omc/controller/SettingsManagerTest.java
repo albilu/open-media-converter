@@ -189,7 +189,7 @@ class SettingsManagerTest {
 
         // Then: Should return loaded settings
         assertNotNull(current);
-        assertEquals(FileFormat.MP3, current.outputFormat());
+        assertEquals(FileFormat.MP3, current.outputFormat(org.omc.model.FormatCategory.AUDIO));
         assertEquals(2, current.parallelConversions());
     }
 

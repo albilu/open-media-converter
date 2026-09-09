@@ -45,16 +45,19 @@ public class PandocService {
     private static final String TRUNCATION_MESSAGE = "\n[Output truncated - exceeded 1MB limit]\n";
 
     private final Path pandocPath;
+    private final LibreOfficeService pdfRenderer;
 
     // Pandoc-supported document formats for input
     private static final List<FileFormat> SUPPORTED_INPUT_FORMATS = List.of(
             FileFormat.MARKDOWN, FileFormat.HTML, FileFormat.DOCX,
-            FileFormat.RTF, FileFormat.ODT, FileFormat.EPUB, FileFormat.TXT);
+            FileFormat.RTF, FileFormat.ODT, FileFormat.EPUB, FileFormat.TXT,
+            FileFormat.TEX, FileFormat.LATEX, FileFormat.RST, FileFormat.ORG);
 
     // Pandoc-supported document formats for output
     private static final List<FileFormat> SUPPORTED_OUTPUT_FORMATS = List.of(
             FileFormat.MARKDOWN, FileFormat.HTML, FileFormat.DOCX,
-            FileFormat.RTF, FileFormat.ODT, FileFormat.EPUB, FileFormat.TXT, FileFormat.PDF);
+            FileFormat.RTF, FileFormat.ODT, FileFormat.EPUB, FileFormat.TXT, FileFormat.PDF,
+            FileFormat.TEX, FileFormat.LATEX, FileFormat.RST, FileFormat.ORG);
 
     /**
      * Creates a new PandocService with the specified Pandoc binary path.
@@ -65,7 +68,17 @@ public class PandocService {
      * @throws NullPointerException if pandocPath is null
      */
     public PandocService(Path pandocPath) {
+        this(pandocPath, null);
+    }
+
+    /**
+     * Creates a text converter with an optional LibreOffice PDF renderer.
+     * @param pandocPath Pandoc executable
+     * @param pdfRenderer renderer required for PDF output, or null if unavailable
+     */
+    public PandocService(Path pandocPath, LibreOfficeService pdfRenderer) {
         this.pandocPath = Objects.requireNonNull(pandocPath, "pandocPath must not be null");
+        this.pdfRenderer = pdfRenderer;
         logger.debug("PandocService initialized with path: {}", pandocPath);
     }
 
@@ -123,6 +136,9 @@ public class PandocService {
         Objects.requireNonNull(settings, "settings must not be null");
         Objects.requireNonNull(progressCallback, "progressCallback must not be null");
 
+        if (detectFormat(outputPath) == FileFormat.PDF) {
+            return convertPdf(inputPath, outputPath, settings, progressCallback, fileId, processRegistry);
+        }
         Instant startTime = Instant.now();
         long inputSize = 0;
 
@@ -132,9 +148,18 @@ public class PandocService {
             logger.warn("Could not determine input file size: {}", e.getMessage());
         }
 
+        Path formattingFilter = null;
         try {
             // Build Pandoc command
             List<String> command = buildCommand(inputPath, outputPath, settings);
+            if (!settings.preserveFormatting()) {
+                formattingFilter = Files.createTempFile("omc-formatting-", ".lua");
+                try (var filter = getClass().getResourceAsStream("/pandoc/plain-formatting.lua")) {
+                    if (filter == null) throw new IOException("Document formatting filter is missing");
+                    Files.copy(filter, formattingFilter, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+                command.add("--lua-filter=" + formattingFilter);
+            }
 
             logger.debug("Executing Pandoc command: {}", String.join(" ", command));
 
@@ -238,7 +263,8 @@ public class PandocService {
             }
 
             // Get output file size
-            long outputSize = Files.exists(outputPath) ? Files.size(outputPath) : 0;
+            DocumentOutputOptions.apply(outputPath, detectFormat(outputPath), settings);
+            long outputSize = Files.size(outputPath);
 
             logger.info("Pandoc conversion successful: {} -> {} in {}ms ({} bytes -> {} bytes)",
                     inputPath.getFileName(), outputPath.getFileName(), conversionTime.toMillis(), inputSize,
@@ -285,6 +311,10 @@ public class PandocService {
                     "Process interrupted",
                     e);
         } finally {
+            if (formattingFilter != null) {
+                try { Files.deleteIfExists(formattingFilter); }
+                catch (IOException e) { logger.warn("Could not remove document filter", e); }
+            }
             // Unregister process
             if (fileId != null && processRegistry != null) {
                 processRegistry.unregisterProcess(fileId);
@@ -301,6 +331,8 @@ public class PandocService {
      * @param output   path to output file
      * @param settings document settings
      * @return list of command arguments
+     * @throws IllegalArgumentException if PDF is requested; use convertDocument
+     *                                  for the PDF rendering workflow
      */
     public List<String> buildCommand(Path input, Path output, DocumentSettings settings) {
         Objects.requireNonNull(input, "input must not be null");
@@ -312,6 +344,7 @@ public class PandocService {
 
         // Input file
         command.add(input.toString());
+        command.add("--resource-path=" + input.toAbsolutePath().getParent());
 
         // Output file
         command.add("-o");
@@ -320,11 +353,14 @@ public class PandocService {
         // Detect input and output formats from extensions
         FileFormat inputFormat = detectFormat(input);
         FileFormat outputFormat = detectFormat(output);
+        if (outputFormat == FileFormat.PDF) {
+            throw new IllegalArgumentException("PDF output uses convertDocument with a LibreOffice renderer.");
+        }
 
         // Explicitly set input format if known
         if (inputFormat != FileFormat.UNKNOWN) {
             command.add("-f");
-            command.add(mapFormatToPandoc(inputFormat));
+            command.add(inputFormat == FileFormat.TXT ? "markdown_strict" : mapFormatToPandoc(inputFormat));
         }
 
         // Explicitly set output format if known
@@ -343,41 +379,20 @@ public class PandocService {
 
         // Template (if provided)
         if (settings.templatePath() != null && Files.exists(settings.templatePath())) {
-            command.add("--template=" + settings.templatePath().toString());
+            command.add((outputFormat == FileFormat.DOCX || outputFormat == FileFormat.ODT
+                    ? "--reference-doc=" : "--template=") + settings.templatePath());
         }
 
         // Standalone document (includes headers, etc.)
         command.add("--standalone");
 
-        // Preserve formatting (use appropriate writer options)
-        if (settings.preserveFormatting()) {
-            // For HTML output
-            if (outputFormat == FileFormat.HTML) {
-                command.add("--embed-resources");
-            }
-
-            // For DOCX output
-            if (outputFormat == FileFormat.DOCX && settings.templatePath() != null) {
-                command.add("--reference-doc=" + settings.templatePath().toString());
-            }
-        }
-
-        // PDF-specific options (Pandoc uses LaTeX for PDF generation)
-        if (outputFormat == FileFormat.PDF) {
-            // Margins (convert mm to inches: 1 inch = 25.4 mm)
-            double topInches = settings.marginTop() / 25.4;
-            double bottomInches = settings.marginBottom() / 25.4;
-            double leftInches = settings.marginLeft() / 25.4;
-            double rightInches = settings.marginRight() / 25.4;
-
-            command.add(String.format("-V geometry:margin=%fin", topInches));
-            command.add(String.format("-V geometry:top=%fin", topInches));
-            command.add(String.format("-V geometry:bottom=%fin", bottomInches));
-            command.add(String.format("-V geometry:left=%fin", leftInches));
-            command.add(String.format("-V geometry:right=%fin", rightInches));
-
-            // PDF engine (pdflatex is default, but xelatex supports more fonts)
-            command.add("--pdf-engine=xelatex");
+        if (outputFormat == FileFormat.HTML) {
+            // Resource portability is independent of stripping text formatting.
+            // PDF rendering also needs resources embedded in its HTML intermediate.
+            command.add("--embed-resources");
+            command.add("--variable=header-includes:<style>@page { margin: " + settings.marginTop() + "mm "
+                    + settings.marginRight() + "mm " + settings.marginBottom() + "mm "
+                    + settings.marginLeft() + "mm; }</style>");
         }
 
         return command;
@@ -457,8 +472,54 @@ public class PandocService {
             case EPUB -> "epub";
             case TXT -> "plain";
             case PDF -> "pdf";
-            default -> "markdown"; // Default fallback
+            case TEX, LATEX -> "latex";
+            case RST -> "rst";
+            case ORG -> "org";
+            default -> throw new IllegalArgumentException("Unsupported Pandoc format: " + format);
         };
+    }
+
+    /**
+     * Checks the supported reader/writer pair independently of installed tools.
+     * @param input source format
+     * @param output target format
+     * @return true if the conversion is supported
+     */
+    public static boolean canConvert(FileFormat input, FileFormat output) {
+        return SUPPORTED_INPUT_FORMATS.contains(input) && SUPPORTED_OUTPUT_FORMATS.contains(output);
+    }
+
+    private ConversionResult convertPdf(Path input, Path output, DocumentSettings settings,
+            ProgressCallback callback, String fileId, ProcessRegistry registry) throws ToolExecutionException {
+        if (pdfRenderer == null) {
+            throw new ToolExecutionException("Install LibreOffice to render text documents as PDF.",
+                    ErrorCode.TOOL_NOT_FOUND, "libreoffice");
+        }
+        Path html = null;
+        Instant start = Instant.now();
+        try {
+            html = Files.createTempFile(output.toAbsolutePath().getParent(), "omc-document-", ".html");
+            ConversionResult textResult = convertDocument(input, html, settings.withOutputFormat(FileFormat.HTML),
+                    (percent, bytes, speed) -> callback.onProgress(percent * 0.5, bytes, speed), fileId, registry);
+            if (!textResult.success()) return textResult;
+            if (Thread.currentThread().isInterrupted()) {
+                throw new ToolExecutionException("Conversion cancelled", ErrorCode.TOOL_EXECUTION_FAILED, "pandoc");
+            }
+            ConversionResult pdf = pdfRenderer.convertDocument(html, output, settings,
+                    (percent, bytes, speed) -> callback.onProgress(50 + percent * 0.5, bytes, speed), fileId, registry);
+            if (!pdf.success()) return pdf;
+            return ConversionResult.success(fileId == null ? input.toString() : fileId, output,
+                    textResult.toolOutput().orElse("") + "\n" + pdf.toolOutput().orElse(""),
+                    Duration.between(start, Instant.now()), Files.size(input), Files.size(output), ConversionTool.PANDOC);
+        } catch (IOException e) {
+            throw new ToolExecutionException("Could not prepare the PDF document: " + e.getMessage(),
+                    ErrorCode.TOOL_EXECUTION_FAILED, "pandoc");
+        } finally {
+            if (html != null) {
+                try { Files.deleteIfExists(html); }
+                catch (IOException e) { logger.warn("Could not remove intermediate document", e); }
+            }
+        }
     }
 
     /**

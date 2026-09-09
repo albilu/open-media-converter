@@ -28,7 +28,8 @@ import ch.qos.logback.classic.LoggerContext;
  */
 public class MainApplicationJavaGi extends Application {
     private static final Logger logger = LoggerFactory.getLogger(MainApplicationJavaGi.class);
-    private static final String VERSION = "1.0.0-SNAPSHOT";
+    private static final String VERSION = MainApplicationJavaGi.class.getPackage().getImplementationVersion() == null
+            ? "0.1.0-SNAPSHOT" : MainApplicationJavaGi.class.getPackage().getImplementationVersion();
 
     // Application components
     private MainWindowJavaGi mainWindow;
@@ -158,6 +159,10 @@ public class MainApplicationJavaGi extends Application {
      */
     @Override
     public void activate() {
+        if (mainWindow != null) {
+            mainWindow.present();
+            return;
+        }
         logger.info("Application activated, initializing...");
 
         try {
@@ -175,6 +180,7 @@ public class MainApplicationJavaGi extends Application {
             // This must happen after controller.initialize() because that's when state is
             // loaded
             mainWindow.restoreSortStateFromController();
+            mainWindow.restoreState(controller.getWindowState());
 
             // Wire progress and completion callbacks from controller to UI
             // Requirement REQ-004.2, Task 74: Progress event flow
@@ -202,19 +208,14 @@ public class MainApplicationJavaGi extends Application {
                 for (String filePath : filesToPreload) {
                     pathsToAdd.add(Paths.get(filePath));
                 }
-                try {
-                    controller.addFiles(pathsToAdd);
-                    logger.debug("Preloaded {} files successfully", pathsToAdd.size());
-                } catch (Exception e) {
-                    logger.error("Failed to preload files from command-line", e);
-                    ErrorDialog.showError(mainWindow, "Failed to load files", e);
-                }
+                mainWindow.addFilesAsync(pathsToAdd);
             }
 
             // Update file list UI to reflect restored/preloaded files
             // This also sets the initial button states (Convert/Clear All disabled if no
             // files)
             mainWindow.updateFileList();
+            mainWindow.showAvailableCategories();
 
             // Show the main window
             mainWindow.present();

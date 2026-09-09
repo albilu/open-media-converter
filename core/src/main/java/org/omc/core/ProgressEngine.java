@@ -211,8 +211,7 @@ public class ProgressEngine {
 
         ConversionProgress currentProgress = progressMap.get(fileId);
         if (currentProgress == null) {
-            logger.warn("No progress tracking found for file: {}", fileId);
-            return;
+            currentProgress = ConversionProgress.initial(fileId, fileSizeMap.getOrDefault(fileId, result.inputSize()));
         }
 
         // Update to 100% complete
@@ -220,7 +219,8 @@ public class ProgressEngine {
         progressMap.put(fileId, completedProgress);
 
         // Update status based on result
-        ConversionStatus status = result.success() ? ConversionStatus.COMPLETED : ConversionStatus.FAILED;
+        ConversionStatus status = result.isCancelled() ? ConversionStatus.CANCELLED
+                : result.success() ? ConversionStatus.COMPLETED : ConversionStatus.FAILED;
         statusMap.put(fileId, status);
 
         logger.debug("Completed tracking for file: {} - {}", fileId, status);

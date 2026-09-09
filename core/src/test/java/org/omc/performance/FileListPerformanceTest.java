@@ -404,11 +404,11 @@ class FileListPerformanceTest {
         testCases.add(new FormatPair(FileFormat.TEX, FileFormat.PDF, ConversionTool.PANDOC));
 
         // DOCUMENT formats → LIBREOFFICE
-        testCases.add(new FormatPair(FileFormat.DOCX, FileFormat.PDF, ConversionTool.LIBREOFFICE));
+        testCases.add(new FormatPair(FileFormat.DOCX, FileFormat.PDF, ConversionTool.PANDOC));
         testCases.add(new FormatPair(FileFormat.DOC, FileFormat.PDF, ConversionTool.LIBREOFFICE));
         testCases.add(new FormatPair(FileFormat.XLS, FileFormat.PDF, ConversionTool.LIBREOFFICE));
         testCases.add(new FormatPair(FileFormat.PPT, FileFormat.PDF, ConversionTool.LIBREOFFICE));
-        testCases.add(new FormatPair(FileFormat.ODT, FileFormat.PDF, ConversionTool.LIBREOFFICE));
+        testCases.add(new FormatPair(FileFormat.ODT, FileFormat.PDF, ConversionTool.PANDOC));
 
         // Warm up JVM (run each test case once)
         for (FormatPair pair : testCases) {

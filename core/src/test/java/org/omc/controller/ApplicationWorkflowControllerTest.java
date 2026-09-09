@@ -147,7 +147,6 @@ class ApplicationWorkflowControllerTest {
         when(stateManager.loadState()).thenReturn(mockState);
         when(mockState.sessionState()).thenReturn(mockSessionState);
         when(mockSessionState.pendingFiles()).thenReturn(List.of(mockFile));
-        when(mockFile.path()).thenReturn(existingPath);
 
         try (MockedStatic<Files> mockedFiles = Mockito.mockStatic(Files.class)) {
             mockedFiles.when(() -> Files.exists(existingPath)).thenReturn(true);
@@ -156,7 +155,7 @@ class ApplicationWorkflowControllerTest {
             controller.initialize();
 
             // Assert
-            verify(fileManager).addFiles(List.of(existingPath));
+            verify(fileManager).restoreFiles(List.of(mockFile));
         }
     }
 
@@ -399,8 +398,6 @@ class ApplicationWorkflowControllerTest {
 
         when(mockState.sessionState()).thenReturn(mockSessionState);
         when(mockSessionState.pendingFiles()).thenReturn(List.of(existingFile, missingFile));
-        when(existingFile.path()).thenReturn(existingPath);
-        when(missingFile.path()).thenReturn(missingPath);
 
         try (MockedStatic<Files> mockedFiles = Mockito.mockStatic(Files.class)) {
             mockedFiles.when(() -> Files.exists(existingPath)).thenReturn(true);
@@ -413,7 +410,7 @@ class ApplicationWorkflowControllerTest {
             controller.initialize();
 
             // Assert
-            verify(fileManager).addFiles(List.of(existingPath));
+            verify(fileManager).restoreFiles(List.of(existingFile, missingFile));
         }
     }
 

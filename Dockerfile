@@ -20,6 +20,7 @@ RUN wget -O - https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg
 RUN apt-get update && apt-get install -y \
     temurin-23-jdk \
     maven \
+    python3 \
     dpkg-dev \
     rpm \
     tar \
@@ -86,6 +87,7 @@ RUN pacman -Syu --noconfirm && \
     base-devel \
     jdk-openjdk \
     maven \
+    python \
     git \
     gtk4 \
     gobject-introspection \
@@ -113,6 +115,10 @@ RUN chown -R builder:builder /workspace
 
 # Switch to builder user
 USER builder
+
+# Build the artifact inside Docker; host JARs are excluded by .dockerignore.
+FROM builder AS packaged
+RUN mvn -B -DskipTests package
 
 # Runtime stage - minimal image for running the application
 FROM ubuntu:24.04 AS runtime
@@ -152,7 +158,7 @@ ENV PATH="${JAVA_HOME}/bin:${PATH}"
 RUN mkdir -p /opt/open-media-converter
 
 # Copy built JAR from builder
-COPY --from=builder /workspace/omc-gtk/target/open-media-converter-*.jar /opt/open-media-converter/app.jar
+COPY --from=packaged /workspace/omc-gtk/target/open-media-converter-*.jar /opt/open-media-converter/app.jar
 
 # Set working directory
 WORKDIR /opt/open-media-converter

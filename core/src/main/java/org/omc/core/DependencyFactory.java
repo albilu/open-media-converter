@@ -170,17 +170,18 @@ public class DependencyFactory {
         logger.debug("Tool discovery complete");
 
         // Create tool services with discovered paths
-        FFmpegService ffmpegService = new FFmpegService(
+        FFmpegService ffmpegService = toolConfig.getFfmpegPath() == null ? null : new FFmpegService(
                 toolConfig.getFfmpegPath(),
                 toolConfig.getFfprobePath());
         logger.debug("Created FFmpegService with path: {}", toolConfig.getFfmpegPath());
 
-        PandocService pandocService = new PandocService(toolConfig.getPandocPath());
-        logger.debug("Created PandocService with path: {}", toolConfig.getPandocPath());
-
-        LibreOfficeService libreOfficeService = new LibreOfficeService(
+        LibreOfficeService libreOfficeService = toolConfig.getLibreOfficePath() == null ? null : new LibreOfficeService(
                 toolConfig.getLibreOfficePath());
         logger.debug("Created LibreOfficeService with path: {}", toolConfig.getLibreOfficePath());
+
+        PandocService pandocService = toolConfig.getPandocPath() == null ? null
+                : new PandocService(toolConfig.getPandocPath(), libreOfficeService);
+        validationEngine.setToolConfiguration(toolConfig);
 
         // Create ImageMagickService if convert binary was found
         ImageMagickService imageMagickService = null;

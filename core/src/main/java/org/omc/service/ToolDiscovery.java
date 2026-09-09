@@ -47,7 +47,7 @@ public class ToolDiscovery {
     private static final String IMAGEMAGICK_NAME = "convert";
 
     // Version detection patterns
-    private static final Pattern FFMPEG_VERSION_PATTERN = Pattern.compile("ffmpeg version ([\\d.]+)",
+    private static final Pattern FFMPEG_VERSION_PATTERN = Pattern.compile("ff(?:mpeg|probe) version n?([\\d.]+)",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern PANDOC_VERSION_PATTERN = Pattern.compile("pandoc ([\\d.]+)", Pattern.CASE_INSENSITIVE);
     private static final Pattern LIBREOFFICE_VERSION_PATTERN = Pattern.compile("LibreOffice ([\\d.]+)",
@@ -59,6 +59,7 @@ public class ToolDiscovery {
     private static final long VERSION_CHECK_TIMEOUT = 5000;
 
     private final Path toolsConfigPath;
+    private final Path extractedToolsDirectory;
 
     /**
      * Creates a new tool discovery service.
@@ -67,6 +68,7 @@ public class ToolDiscovery {
      */
     public ToolDiscovery(ConfigurationManager configurationManager) {
         this.toolsConfigPath = configurationManager.getToolsConfigPath();
+        this.extractedToolsDirectory = configurationManager.getCacheDirectory().resolve("tools");
     }
 
     /**
@@ -316,24 +318,72 @@ public class ToolDiscovery {
      * @return the path to the embedded binary, or empty if not found
      */
     private Optional<Path> findEmbeddedBinary(String binaryName) {
-        try {
-            // Try to extract embedded binary to temp directory
-            String resourcePath = EMBEDDED_BIN_PATH + binaryName;
-            var resource = getClass().getClassLoader().getResource(resourcePath);
-
-            if (resource == null) {
-                logger.debug("Embedded binary not found: {}", resourcePath);
-                return Optional.empty();
+        String machine = System.getProperty("os.arch", "");
+        String arch = switch (machine) {
+            case "amd64", "x86_64" -> "linux-x86_64";
+            case "aarch64", "arm64" -> "linux-aarch64";
+            default -> null;
+        };
+        if (arch == null || !System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("linux")) {
+            return Optional.empty();
+        }
+        String tool = binaryName.equals(FFPROBE_NAME) ? FFMPEG_NAME : binaryName;
+        String resourcePath = EMBEDDED_BIN_PATH + arch + "/" + tool + "/" + binaryName;
+        ClassLoader loader = getClass().getClassLoader();
+        Path temporary = null;
+        try (var checksumResource = loader.getResourceAsStream(resourcePath + ".sha256")) {
+            if (checksumResource == null) return Optional.empty();
+            String checksum = new String(checksumResource.readNBytes(128), java.nio.charset.StandardCharsets.UTF_8).trim();
+            if (!checksum.matches("[a-f0-9]{64}")) throw new IOException("Invalid embedded tool checksum");
+            Path directory = extractedToolsDirectory.resolve(checksum);
+            Files.createDirectories(directory);
+            Path executable = directory.resolve(binaryName);
+            if (Files.isRegularFile(executable) && checksum.equals(binaryChecksum(executable))) {
+                makeExecutable(executable);
+                return Optional.of(executable);
             }
-
-            // For now, return empty - full extraction logic would go here
-            // In production, we would extract the binary to a temp location
-            logger.debug("Embedded binary found but extraction not implemented: {}", resourcePath);
+            temporary = Files.createTempFile(directory, binaryName, ".part");
+            try (var resource = loader.getResourceAsStream(resourcePath)) {
+                if (resource == null) return Optional.empty();
+                Files.copy(resource, temporary, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            if (!checksum.equals(binaryChecksum(temporary))) throw new IOException("Embedded tool checksum mismatch");
+            makeExecutable(temporary);
+            try {
+                Files.move(temporary, executable, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(temporary, executable, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            return Optional.of(executable);
+        } catch (IOException | SecurityException e) {
+            logger.warn("Could not extract embedded {}: {}", binaryName, e.getMessage());
             return Optional.empty();
+        } finally {
+            if (temporary != null) {
+                try { Files.deleteIfExists(temporary); }
+                catch (IOException e) { logger.debug("Could not remove extraction temporary file", e); }
+            }
+        }
+    }
 
-        } catch (Exception e) {
-            logger.debug("Error finding embedded binary {}: {}", binaryName, e.getMessage());
-            return Optional.empty();
+    private static String binaryChecksum(Path executable) throws IOException {
+        try {
+            var digest = java.security.MessageDigest.getInstance("SHA-256");
+            try (var input = new java.security.DigestInputStream(Files.newInputStream(executable), digest)) {
+                input.transferTo(java.io.OutputStream.nullOutputStream());
+            }
+            return java.util.HexFormat.of().formatHex(digest.digest());
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required by the Java runtime", e);
+        }
+    }
+
+    private static void makeExecutable(Path executable) throws IOException {
+        try {
+            Files.setPosixFilePermissions(executable, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        } catch (UnsupportedOperationException e) {
+            if (!executable.toFile().setExecutable(true, true)) throw new IOException("Cannot mark tool executable");
         }
     }
 
@@ -344,14 +394,6 @@ public class ToolDiscovery {
      * @return the path to the binary, or empty if not found
      */
     private Optional<Path> findSystemBinary(String binaryName) {
-        // Check standard system paths
-        for (String systemPath : SYSTEM_PATHS) {
-            Path binaryPath = Paths.get(systemPath, binaryName);
-            if (Files.isExecutable(binaryPath)) {
-                return Optional.of(binaryPath);
-            }
-        }
-
         // Check PATH environment variable
         String pathEnv = System.getenv("PATH");
         if (pathEnv != null) {
@@ -361,6 +403,14 @@ public class ToolDiscovery {
                 if (Files.isExecutable(binaryPath)) {
                     return Optional.of(binaryPath);
                 }
+            }
+        }
+
+        // Check standard system paths
+        for (String systemPath : SYSTEM_PATHS) {
+            Path binaryPath = Paths.get(systemPath, binaryName);
+            if (Files.isExecutable(binaryPath)) {
+                return Optional.of(binaryPath);
             }
         }
 

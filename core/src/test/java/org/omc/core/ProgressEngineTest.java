@@ -721,7 +721,7 @@ class ProgressEngineTest {
     }
 
     @Test
-    void testCompleteTracking_NoTrackingFound_Ignores() {
+    void testCompleteTracking_BeforeTracking_RecordsTerminalState() {
         // Given
         ConversionResult result = ConversionResult.success("file1", Path.of("/output"), null, Duration.ofSeconds(1),
                 1000L, 800L, mockTool);
@@ -731,7 +731,7 @@ class ProgressEngineTest {
 
         // Then
         Optional<ConversionProgress> progressOpt = progressEngine.getProgress("file1");
-        assertFalse(progressOpt.isPresent());
+        assertEquals(100, progressOpt.orElseThrow().percentage());
     }
 
     // Additional utility methods tests

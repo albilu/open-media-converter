@@ -11,7 +11,7 @@ A fully featured GUI (GTK 4 via java-gi) Linux app to convert video, audio, imag
 -   Multi-format conversions: video, audio, image, documents
 -   Batch processing with per-file progress and presets
 -   Portable AppImage or native DEB package
--   Bundles tools for an easy out-of-the-box experience (optional)
+-   Bundles verified FFmpeg, ffprobe and Pandoc executables by default
 
 ## Get the app
 
@@ -35,7 +35,29 @@ Quick examples:
 
 ## Build from source (short)
 
-Prerequisites: Java 23+, Maven 3.8+, GTK 4 (for system runtime if not using AppImage).
+Prerequisites: Java 23+, Maven 3.8+, Python 3.11+, and GTK 4. Install ImageMagick
+for images and LibreOffice for native Office conversions and PDF rendering.
+
+```bash
+mvn clean package
+omc-gtk/bin/open-media-converter
+```
+
+The first build downloads pinned FFmpeg and Pandoc archives for Linux x86_64 or
+aarch64, verifies their SHA-256 checksums, and includes the executables and license
+information in the application JAR. Later offline builds can reuse
+`omc-gtk/.tool-cache/`. Versions and sources are recorded in
+[`omc-gtk/packaging/tools.json`](omc-gtk/packaging/tools.json) and
+[`BINARY_LICENSES.md`](BINARY_LICENSES.md).
+
+For a smaller build that uses installed converters:
+
+```bash
+mvn clean package -Domc.skipEmbeddedTools=true
+```
+
+Unavailable converters disable the corresponding settings sections; the
+application can still launch. Text-to-PDF conversion requires LibreOffice.
 
 Docker Build, test, dev, and run:
 
@@ -46,7 +68,7 @@ make dev
 make run
 ```
 
-See `scripts/` and `packaging/` for packaging helpers (AppImage / DEB).
+See `omc-gtk/scripts/` and `omc-gtk/packaging/` for packaging helpers (AppImage / DEB).
 
 ## Usage overview
 
@@ -54,6 +76,25 @@ See `scripts/` and `packaging/` for packaging helpers (AppImage / DEB).
 2. Select or create a preset in **Settings**.
 3. Click **Convert** to start a batch.
 4. Monitor per-file progress and open the output folder when finished.
+
+Each Video, Audio, Image and Document section has its own output format, settings
+and saved presets. Right-click a file to apply a section preset or custom settings;
+the file list indicates the override. Window size, maximized/fullscreen state,
+file records, per-file settings and section settings are restored on restart.
+
+Video and audio use container-compatible FFmpeg codecs. Images support fit, fill,
+stretch, resampling filters, rotation, flipping and PNG compression. SVG exports
+contain the transformed raster image; they do not trace it into vector paths.
+
+Document routing considers both formats: Pandoc handles supported text/editable
+document pairs, while LibreOffice handles native word-processing, spreadsheet
+and presentation formats. PDF is an export format; PDF-to-editable-document
+conversion is unsupported. Applicable document exports support margins, templates,
+formatting removal, contents tables and PDF font embedding. Native Office paths
+preserve source layout and report unsupported custom text-layout options.
+
+See the [feature remediation report](docs/feature-remediation.md) for verified
+workflows, regression commands and platform coverage.
 
 ## Troubleshooting & docs
 

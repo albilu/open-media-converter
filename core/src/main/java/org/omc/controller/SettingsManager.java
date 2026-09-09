@@ -144,6 +144,8 @@ public class SettingsManager {
                 return defaults;
             }
 
+            settings = settings.withDefaults();
+
             // Validate settings using basic validation
             if (!settings.isValid()) {
                 logger.warn("Loaded settings are invalid, using defaults");
@@ -331,7 +333,7 @@ public class SettingsManager {
                 .overwriteExisting(false)
                 .createSubdirectory(false)
                 .parallelConversions(4)
-                .build();
+                .build().withDefaults();
     }
 
     /**

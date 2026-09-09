@@ -20,7 +20,7 @@
 # Output: dist/open-media-converter_1.0.0_amd64.deb
 ###############################################################################
 
-set -e  # Exit on error
+set -eo pipefail  # Propagate validation failures through pipelines
 
 # Script configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,8 +53,9 @@ detect_version() {
 # Application metadata
 APP_NAME="open-media-converter"
 APP_SNAPSHOT_VERSION="$(detect_version)"
+JAR_SOURCE="${OMC_JAR:-${OMC_GTK_ROOT}/target/${APP_NAME}-${APP_SNAPSHOT_VERSION}.jar}"
 APP_VERSION="${APP_SNAPSHOT_VERSION%-SNAPSHOT}"  # Remove -SNAPSHOT suffix for package version
-ARCH="amd64"
+ARCH="$(dpkg --print-architecture)"
 DEB_FILENAME="${APP_NAME}_${APP_VERSION}_${ARCH}.deb"
 
 # Color output
@@ -145,7 +146,7 @@ build_jar() {
         log_step "Skipping Maven build (--skip-build)"
         
         # Check if JAR exists
-        if [ ! -f "${OMC_GTK_ROOT}/target/${APP_NAME}-${APP_SNAPSHOT_VERSION}.jar" ]; then
+        if [ ! -f "${JAR_SOURCE}" ]; then
             log_error "JAR not found: ${OMC_GTK_ROOT}/target/${APP_NAME}-${APP_SNAPSHOT_VERSION}.jar"
             log_error "Run without --skip-build to build JAR first"
             exit 1
@@ -168,8 +169,8 @@ prepare_build_directory() {
     
     # Create directory structure
     mkdir -p "$BUILD_DIR/DEBIAN"
-    mkdir -p "$BUILD_DIR/opt/${APP_NAME}/bin"
-    mkdir -p "$BUILD_DIR/opt/${APP_NAME}/lib"
+    mkdir -p "$BUILD_DIR/usr/share/${APP_NAME}/bin"
+    mkdir -p "$BUILD_DIR/usr/share/${APP_NAME}/lib"
     mkdir -p "$BUILD_DIR/usr/bin"
     mkdir -p "$BUILD_DIR/usr/share/applications"
     mkdir -p "$BUILD_DIR/usr/share/icons/hicolor/16x16/apps"
@@ -194,7 +195,7 @@ copy_control_files() {
     cp "${PACKAGING_DIR}/DEBIAN/postrm" "$BUILD_DIR/DEBIAN/"
     
     # Update version in control file dynamically
-    sed -i "s/^Version:.*/Version: ${APP_VERSION}/" "$BUILD_DIR/DEBIAN/control"
+    sed -i "s/^Version:.*/Version: ${APP_VERSION}/; s/^Architecture:.*/Architecture: ${ARCH}/" "$BUILD_DIR/DEBIAN/control"
     
     # Set executable permissions on maintainer scripts
     chmod 755 "$BUILD_DIR/DEBIAN/postinst"
@@ -209,8 +210,8 @@ copy_control_files() {
 copy_jar() {
     log_step "Copying application JAR"
     
-    local jar_source="${OMC_GTK_ROOT}/target/${APP_NAME}-${APP_SNAPSHOT_VERSION}.jar"
-    local jar_dest="$BUILD_DIR/opt/${APP_NAME}/lib/${APP_NAME}-${APP_VERSION}.jar"
+    local jar_source="${JAR_SOURCE}"
+    local jar_dest="$BUILD_DIR/usr/share/${APP_NAME}/lib/${APP_NAME}-${APP_VERSION}.jar"
     
     if [ ! -f "$jar_source" ]; then
         log_error "JAR not found: $jar_source"
@@ -229,19 +230,20 @@ copy_launcher() {
     log_step "Copying launcher script"
     
     local launcher_source="${OMC_GTK_ROOT}/bin/${APP_NAME}"
-    local launcher_dest="$BUILD_DIR/opt/${APP_NAME}/bin/${APP_NAME}"
+    local launcher_dest="$BUILD_DIR/usr/share/${APP_NAME}/bin/${APP_NAME}"
     
     if [ ! -f "$launcher_source" ]; then
         log_error "Launcher script not found: $launcher_source"
         exit 1
     fi
     
-    # Copy launcher to /opt/app/bin/
+    # Copy launcher beside the packaged JAR
     cp "$launcher_source" "$launcher_dest"
+    sed -i "s/^APP_VERSION=.*/APP_VERSION=\"${APP_VERSION}\"/" "$launcher_dest"
     chmod 755 "$launcher_dest"
     
     # Create symlink in /usr/bin/
-    ln -sf "/opt/${APP_NAME}/bin/${APP_NAME}" "$BUILD_DIR/usr/bin/${APP_NAME}"
+    ln -sf "../share/${APP_NAME}/bin/${APP_NAME}" "$BUILD_DIR/usr/bin/${APP_NAME}"
     
     log_success "Launcher script copied"
 }
@@ -305,41 +307,24 @@ copy_icons() {
 
 # Copy embedded binaries (if present)
 copy_embedded_binaries() {
-    log_step "Copying embedded binaries (if present)"
-    
-    local binaries_source="${OMC_GTK_ROOT}/src/main/resources/bin"
-    local binaries_dest="$BUILD_DIR/opt/${APP_NAME}/bin/embedded"
-    
-    if [ ! -d "$binaries_source" ]; then
-        log_warn "No embedded binaries directory found (optional)"
-        return
-    fi
-    
-    # Check for Linux x86_64 binaries
-    local arch_dir="${binaries_source}/linux-x86_64"
-    if [ -d "$arch_dir" ]; then
-        mkdir -p "$binaries_dest"
-        
-        # Copy ffmpeg if present
-        if [ -f "${arch_dir}/ffmpeg/ffmpeg" ]; then
-            mkdir -p "${binaries_dest}/ffmpeg"
-            cp "${arch_dir}/ffmpeg/ffmpeg" "${binaries_dest}/ffmpeg/"
-            chmod 755 "${binaries_dest}/ffmpeg/ffmpeg"
-            log_info "  Copied ffmpeg binary"
-        fi
-        
-        # Copy pandoc if present
-        if [ -f "${arch_dir}/pandoc/pandoc" ]; then
-            mkdir -p "${binaries_dest}/pandoc"
-            cp "${arch_dir}/pandoc/pandoc" "${binaries_dest}/pandoc/"
-            chmod 755 "${binaries_dest}/pandoc/pandoc"
-            log_info "  Copied pandoc binary"
-        fi
-        
-        log_success "Embedded binaries copied"
-    else
-        log_warn "No x86_64 binaries found (will use system tools)"
-    fi
+    log_step "Conversion binaries are contained in the application JAR"
+}
+
+copy_documentation() {
+    local documentation="$BUILD_DIR/usr/share/doc/${APP_NAME}"
+    mkdir -p "$documentation"
+    cp "$PACKAGING_DIR/copyright" "$documentation/copyright"
+    cp "$PROJECT_ROOT/BINARY_LICENSES.md" "$documentation/BINARY_LICENSES.md"
+    mkdir -p "$BUILD_DIR/usr/share/man/man1"
+    gzip -n -9 -c "$PACKAGING_DIR/open-media-converter.1" > "$BUILD_DIR/usr/share/man/man1/${APP_NAME}.1.gz"
+    cat > "$documentation/changelog" <<EOF
+${APP_NAME} (${APP_VERSION}) unstable; urgency=medium
+
+  * Package conversion workflows, presets and embedded tools.
+
+ -- Open Media Converter Team <maintainer@openmediaconverter.org>  $(date -R)
+EOF
+    gzip -n -9 "$documentation/changelog"
 }
 
 # Set file permissions
@@ -350,7 +335,7 @@ set_permissions() {
     find "$BUILD_DIR" -type f -exec chmod 644 {} \;
     
     # Executables
-    find "$BUILD_DIR/opt/${APP_NAME}/bin" -type f -exec chmod 755 {} \;
+    find "$BUILD_DIR/usr/share/${APP_NAME}/bin" -type f -exec chmod 755 {} \;
     find "$BUILD_DIR/DEBIAN" -type f -name "postinst" -o -name "prerm" -o -name "postrm" | xargs chmod 755
     
     # Directories
@@ -400,11 +385,11 @@ validate_package() {
     log_step "Validating package with lintian"
     
     # Run lintian with reduced verbosity (only show warnings and errors)
-    if lintian --no-tag-display-limit "${DIST_DIR}/${DEB_FILENAME}" 2>&1 | tee /tmp/lintian-output.txt; then
+    if lintian --tag-display-limit 0 "${DIST_DIR}/${DEB_FILENAME}" 2>&1 | tee "${PROJECT_ROOT}/build/lintian-output.txt"; then
         log_success "Package validation passed"
     else
-        log_warn "Package has lintian warnings (see above)"
-        log_info "Note: Some warnings are expected for custom packages"
+        log_error "Package validation failed (see lintian output above)"
+        return 1
     fi
 }
 
@@ -444,6 +429,7 @@ main() {
     copy_desktop_entry
     copy_icons
     copy_embedded_binaries
+    copy_documentation
     set_permissions
     calculate_installed_size
     build_deb_package

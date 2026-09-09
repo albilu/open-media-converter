@@ -155,6 +155,48 @@ public final class ConversionSettings {
     }
 
     /**
+     * Resolves a file's section override and supplies defaults for absent sections.
+     * The returned settings are used by both validation and tool execution.
+     *
+     * @param file file whose settings are being resolved
+     * @return complete effective conversion settings
+     */
+    public ConversionSettings forFile(ConversionFile file) {
+        Objects.requireNonNull(file, "file cannot be null");
+        if (file.settingsOverride() == null && outputFormat(file.format().getCategory()) != null) {
+            return this;
+        }
+        ConversionSettings defaults = withDefaults();
+        FileSettingsOverride override = file.settingsOverride();
+        if (override == null) {
+            return defaults;
+        }
+        return new ConversionSettings(outputDirectory, overwriteExisting, createSubdirectory,
+                parallelConversions, deleteOriginalFile,
+                override.videoSettings() != null ? override.videoSettings() : defaults.videoSettings,
+                override.audioSettings() != null ? override.audioSettings() : defaults.audioSettings,
+                override.imageSettings() != null ? override.imageSettings() : defaults.imageSettings,
+                override.documentSettings() != null ? override.documentSettings() : defaults.documentSettings);
+    }
+
+    /**
+     * Supplies safe defaults for sections missing from an older configuration.
+     *
+     * @return settings with all four sections initialized
+     */
+    public ConversionSettings withDefaults() {
+        if (videoSettings != null && audioSettings != null && imageSettings != null && documentSettings != null) {
+            return this;
+        }
+        return new ConversionSettings(outputDirectory, overwriteExisting, createSubdirectory,
+                parallelConversions, deleteOriginalFile,
+                videoSettings != null ? videoSettings : VideoSettings.builder().build(),
+                audioSettings != null ? audioSettings : AudioSettings.builder().build(),
+                imageSettings != null ? imageSettings : ImageSettings.builder().build(),
+                documentSettings != null ? documentSettings : DocumentSettings.builder().build());
+    }
+
+    /**
      * Returns the output format for the specified category.
      * 
      * <p>

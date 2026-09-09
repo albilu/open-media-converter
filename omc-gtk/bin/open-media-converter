@@ -22,12 +22,12 @@
 set -e
 
 # Script directory and application root
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 APP_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Application metadata
 APP_NAME="Open Media Converter"
-APP_VERSION="1.0.0-SNAPSHOT"
+APP_VERSION="0.1.0-SNAPSHOT"
 APP_JAR="open-media-converter-${APP_VERSION}.jar"
 
 # Color output for terminal
@@ -52,7 +52,7 @@ log_error() {
 
 log_debug() {
     if [[ "${OMC_DEBUG}" == "1" ]] || [[ "${DEBUG_MODE}" == "1" ]]; then
-        echo -e "${BLUE}[DEBUG]${NC} $1"
+        echo -e "${BLUE}[DEBUG]${NC} $1" >&2
     fi
 }
 
@@ -98,7 +98,7 @@ EOF
 show_version() {
     echo "${APP_NAME} v${APP_VERSION}"
     echo "Copyright © 2025 Open Media Converter Team"
-    echo "Licensed under the MIT License"
+    echo "Licensed under the GNU General Public License v3"
 }
 
 # Detect Java installation
@@ -126,14 +126,13 @@ detect_java() {
     fi
     
     # Verify Java version
-    local java_version=$("${java_cmd}" -version 2>&1 | head -n 1 | cut -d'"' -f2 | cut -d'.' -f1)
-    log_debug "Detected Java version: ${java_version}"
-    
-    if [[ ${java_version} -lt 17 ]]; then
-        log_warn "Java ${java_version} detected, but Java 23+ is recommended"
-        log_warn "Some features may not work correctly"
+    local java_version
+    java_version=$("${java_cmd}" -version 2>&1 | sed -nE 's/.*version "([0-9]+).*/\1/p' | head -n 1)
+    if [[ ! "$java_version" =~ ^[0-9]+$ ]] || (( java_version < 23 )); then
+        log_error "Java 23 or newer is required (detected: ${java_version:-unknown}). Set JAVA_HOME to a compatible runtime."
+        return 1
     fi
-    
+
     echo "${java_cmd}"
 }
 
@@ -149,66 +148,24 @@ check_gtk4() {
         log_debug "Found GTK 4 version: ${gtk_version}"
         return 0
     else
-        log_error "GTK 4 not found. Please install GTK 4 libraries."
-        log_error "On Debian/Ubuntu: sudo apt install libgtk-4-1"
-        log_error "On Fedora: sudo dnf install gtk4"
-        log_error "On Arch: sudo pacman -S gtk4"
-        exit 1
+        # Runtime packages do not include pkg-config development metadata.
+        log_debug "GTK development metadata is absent; the JVM will load the runtime library."
+        return 0
     fi
 }
 
 # Find application JAR
 find_jar() {
-    local jar_path=""
-    
-    # Check in lib directory (installed package)
-    if [[ -f "${APP_ROOT}/lib/${APP_JAR}" ]]; then
-        jar_path="${APP_ROOT}/lib/${APP_JAR}"
-    # Check in target directory (development build)
-    elif [[ -f "${APP_ROOT}/target/${APP_JAR}" ]]; then
-        jar_path="${APP_ROOT}/target/${APP_JAR}"
-    # Check in current directory
-    elif [[ -f "${APP_ROOT}/${APP_JAR}" ]]; then
-        jar_path="${APP_ROOT}/${APP_JAR}"
-    else
-        log_error "Application JAR not found: ${APP_JAR}"
-        log_error "Searched in:"
-        log_error "  - ${APP_ROOT}/lib/"
-        log_error "  - ${APP_ROOT}/target/"
-        log_error "  - ${APP_ROOT}/"
-        log_error "Please build the application with: mvn package"
-        exit 1
-    fi
-    
-    log_debug "Found JAR: ${jar_path}"
-    echo "${jar_path}"
-}
-
-# Set up library paths for java-gi native bindings
-setup_library_path() {
-    local lib_paths=()
-    
-    # Add common system library paths
-    lib_paths+=("/usr/lib/x86_64-linux-gnu")
-    lib_paths+=("/usr/lib64")
-    lib_paths+=("/usr/lib")
-    lib_paths+=("/lib/x86_64-linux-gnu")
-    
-    # Add application lib directory if exists
-    if [[ -d "${APP_ROOT}/lib" ]]; then
-        lib_paths+=("${APP_ROOT}/lib")
-    fi
-    
-    # Construct LD_LIBRARY_PATH
-    local ld_path=$(IFS=:; echo "${lib_paths[*]}")
-    
-    if [[ -n "${LD_LIBRARY_PATH}" ]]; then
-        export LD_LIBRARY_PATH="${ld_path}:${LD_LIBRARY_PATH}"
-    else
-        export LD_LIBRARY_PATH="${ld_path}"
-    fi
-    
-    log_debug "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
+    local candidate
+    shopt -s nullglob
+    for candidate in "${APP_ROOT}"/lib/open-media-converter*.jar \
+            "${APP_ROOT}"/target/open-media-converter*.jar "${APP_ROOT}"/open-media-converter*.jar; do
+        [[ "$candidate" == *-sources.jar || "$candidate" == *-javadoc.jar ]] && continue
+        echo "$candidate"
+        return 0
+    done
+    log_error "Application JAR not found under ${APP_ROOT}. Build with mvn package."
+    return 1
 }
 
 # Set up GTK theme and styling
@@ -236,7 +193,8 @@ setup_gtk_theme() {
 
 # Build Java command-line arguments
 build_java_args() {
-    local java_args=()
+    local -n java_args="$1"
+    java_args=("--enable-native-access=ALL-UNNAMED")
     
     # Memory settings
     java_args+=("-Xms256m")
@@ -264,7 +222,7 @@ build_java_args() {
     java_args+=("-Dapp.version=${APP_VERSION}")
     java_args+=("-Dapp.root=${APP_ROOT}")
     
-    echo "${java_args[@]}"
+
 }
 
 # Main execution
@@ -314,27 +272,31 @@ main() {
     log_info "Starting ${APP_NAME}..."
     
     # Detect and verify environment
-    local java_cmd=$(detect_java)
+    local java_cmd
+    java_cmd=$(detect_java) || return 1
     check_gtk4
-    local jar_path=$(find_jar)
+    local jar_path
+    jar_path=$(find_jar) || return 1
     
     # Set up environment
-    setup_library_path
+    # Use the platform loader. Prepending system library directories overrides
+    # private converter libraries, including LibreOffice's bundled UNO runtime.
     setup_gtk_theme
     
     # Build Java arguments
-    local java_args=($(build_java_args))
+    local launch_args=()
+    build_java_args launch_args
     
     # Log startup information
     log_debug "Java command: ${java_cmd}"
     log_debug "JAR path: ${jar_path}"
-    log_debug "Java args: ${java_args[*]}"
+    log_debug "Java args: ${launch_args[*]}"
     log_debug "App args: ${app_args[*]}"
     
     # Launch application
     log_info "Launching application..."
     exec "${java_cmd}" \
-        "${java_args[@]}" \
+        "${launch_args[@]}" \
         -jar "${jar_path}" \
         "${app_args[@]}"
 }

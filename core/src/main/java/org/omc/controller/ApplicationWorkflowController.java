@@ -64,9 +64,10 @@ public class ApplicationWorkflowController {
     private final AtomicBoolean hasUnsavedChanges;
 
     // Tracked state for session persistence
-    private Path lastInputDirectory;
-    private Path lastOutputDirectory;
-    private List<Path> recentFilePaths;
+    private volatile WindowState windowState = WindowState.defaultState();
+    private volatile Path lastInputDirectory;
+    private volatile Path lastOutputDirectory;
+    private volatile List<Path> recentFilePaths;
 
     // Current settings cached for quick access
     private ConversionSettings currentSettings;
@@ -153,6 +154,7 @@ public class ApplicationWorkflowController {
             this.recentFilePaths = sessionState.recentFilePaths() != null ? sessionState.recentFilePaths() : List.of();
 
             // Restore file list from session state if any
+            windowState = state.windowState();
             restoreFileList(state.sessionState());
 
             // Register conversion completion handler to track conversion status
@@ -1591,6 +1593,24 @@ public class ApplicationWorkflowController {
         return presets;
     }
 
+    /** Returns the window geometry and desktop state restored at startup. */
+    public WindowState getWindowState() {
+        return windowState;
+    }
+
+    /** Returns the format sections supported by installed conversion tools. */
+    public java.util.Set<FormatCategory> getAvailableCategories() {
+        return conversionEngine.getAvailableCategories();
+    }
+
+    /**
+     * Captures window state on the GTK thread for subsequent background persistence.
+     * @param state current window geometry and desktop state
+     */
+    public void updateWindowState(WindowState state) {
+        windowState = Objects.requireNonNull(state, "state");
+    }
+
     // ===== Private Helper Methods =====
 
     /**
@@ -1613,22 +1633,7 @@ public class ApplicationWorkflowController {
 
         logger.info("Restoring {} files from session state", pendingFiles.size());
 
-        // Extract paths from ConversionFile objects and filter out files that no longer
-        // exist
-        List<Path> existingFilePaths = pendingFiles.stream()
-                .map(ConversionFile::path)
-                .filter(Files::exists)
-                .toList();
-
-        int missingCount = pendingFiles.size() - existingFilePaths.size();
-        if (missingCount > 0) {
-            logger.warn("Skipped {} missing files from session state", missingCount);
-        }
-
-        if (!existingFilePaths.isEmpty()) {
-            fileManager.addFiles(existingFilePaths);
-            logger.info("Restored {} files to file list", existingFilePaths.size());
-        }
+        fileManager.restoreFiles(pendingFiles);
     }
 
     /**
@@ -1651,7 +1656,7 @@ public class ApplicationWorkflowController {
             );
 
             // Get current window state (would come from UI)
-            WindowState windowState = WindowState.defaultState();
+            WindowState capturedWindowState = windowState;
 
             // Get current sort state to preserve it during shutdown
             // Requirement REQ-FL-4.5: Persist sort state across application restarts
@@ -1660,7 +1665,7 @@ public class ApplicationWorkflowController {
 
             // Create new state with all current values including sort state
             ApplicationState state = new ApplicationState(
-                    windowState,
+                    capturedWindowState,
                     sessionState,
                     currentSettings,
                     sortState, // Preserve current sort state

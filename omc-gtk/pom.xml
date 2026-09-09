@@ -15,6 +15,7 @@
     <description>The GTK UI of the Open Media Converter</description>
 
     <properties>
+        <omc.skipEmbeddedTools>false</omc.skipEmbeddedTools>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>23</maven.compiler.source>
         <maven.compiler.target>23</maven.compiler.target>
@@ -196,6 +197,19 @@
                 <executions>
                     <!-- Run packaging scripts during deploy phase -->
                     <execution>
+                        <id>prepare-embedded-tools</id>
+                        <phase>generate-resources</phase>
+                        <goals><goal>exec</goal></goals>
+                        <configuration>
+                            <skip>${omc.skipEmbeddedTools}</skip>
+                            <executable>python3</executable>
+                            <arguments>
+                                <argument>${project.basedir}/scripts/prepare-tools.py</argument>
+                                <argument>--offline=${settings.offline}</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                    <execution>
                         <id>build-packages</id>
                         <phase>deploy</phase>
                         <goals>
@@ -215,4 +229,18 @@
             </plugin>
         </plugins>
     </build>
+    <profiles>
+        <profile>
+            <id>embedded-tools</id>
+            <activation>
+                <property><name>omc.skipEmbeddedTools</name><value>!true</value></property>
+            </activation>
+            <build>
+                <resources>
+                    <resource><directory>src/main/resources</directory></resource>
+                    <resource><directory>.tool-cache/resources</directory></resource>
+                </resources>
+            </build>
+        </profile>
+    </profiles>
 </project>

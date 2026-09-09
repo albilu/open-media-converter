@@ -100,13 +100,15 @@ public class FFmpegService {
 
         List<String> command = new ArrayList<>();
         command.add(ffmpegPath.toString());
+        FileFormat targetFormat = outputFormat(outputPath, settings.outputFormat());
+        String ffmpegCodec = org.omc.model.MediaCodecPolicy.videoCodec(targetFormat, mapVideoCodec(settings.codec()));
 
         // Enable progress output to stdout (pipe:1)
         command.add("-progress");
         command.add("pipe:1");
 
         // GPU acceleration BEFORE input (REQ-PERF-1.3, REQ-VID-1.2, REQ-VID-1.3)
-        if (isGPUCodec(settings.codec())) {
+        if (isGPUCodec(ffmpegCodec)) {
             command.add("-hwaccel");
             command.add("cuda");
             command.add("-hwaccel_output_format");
@@ -122,7 +124,6 @@ public class FFmpegService {
         command.add(inputPath.toString());
 
         // Video codec mapping
-        String ffmpegCodec = mapVideoCodec(settings.codec());
         command.add("-c:v");
         command.add(ffmpegCodec);
 
@@ -148,7 +149,7 @@ public class FFmpegService {
         }
 
         // Bitrate (used as max bitrate for CRF mode)
-        if (settings.bitrate() > 0) {
+        if (settings.bitrate() > 0 && !ffmpegCodec.equals("libvpx-vp9")) {
             command.add("-maxrate");
             command.add(settings.bitrate() + "k");
             command.add("-bufsize");
@@ -171,7 +172,7 @@ public class FFmpegService {
         // Audio codec: transcode when the target container cannot safely hold
         // common source audio codecs; copy otherwise to preserve quality
         command.add("-c:a");
-        command.add(resolveAudioCodec(settings.outputFormat()));
+        command.add(resolveAudioCodec(targetFormat));
         // No "-b:a": it is ignored with stream copy and VideoSettings carries
         // no explicit audio bitrate
 
@@ -217,7 +218,7 @@ public class FFmpegService {
         command.add(inputPath.toString());
 
         // Audio codec mapping
-        String ffmpegCodec = mapAudioCodec(settings.codec());
+        String ffmpegCodec = org.omc.model.MediaCodecPolicy.audioCodec(outputFormat(outputPath, settings.outputFormat()), mapAudioCodec(settings.codec()));
         command.add("-c:a");
         command.add(ffmpegCodec);
 
@@ -380,6 +381,13 @@ public class FFmpegService {
      * @param codec user-friendly codec name
      * @return FFmpeg codec identifier
      */
+    private static FileFormat outputFormat(Path output, FileFormat fallback) {
+        String name = output.getFileName().toString();
+        if (name.toLowerCase(java.util.Locale.ROOT).endsWith(".opus")) return FileFormat.OGG;
+        FileFormat format = FileFormat.fromExtension(name.substring(name.lastIndexOf('.') + 1));
+        return format == FileFormat.UNKNOWN ? fallback : format;
+    }
+
     private String mapVideoCodec(String codec) {
         if (codec == null) {
             return "libx264"; // Default

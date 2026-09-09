@@ -165,6 +165,10 @@ check_prerequisites() {
         log_error "Maven not found. Install with: sudo apt install maven"
         missing=true
     fi
+    if ! command -v python3 &> /dev/null; then
+        log_error "Python 3.11 or newer is required to prepare and verify embedded tools"
+        missing=true
+    fi
     
     # Check for appimagetool
     if ! command -v appimagetool &> /dev/null && [ ! -x "${DOWNLOAD_DIR}/appimagetool" ]; then
@@ -239,9 +243,17 @@ build_jar() {
     else
         log_step "Building JAR with Maven"
         cd "$PROJECT_ROOT"
-        mvn clean package -DskipTests
+        mvn clean package -DskipTests -Domc.skipEmbeddedTools="$NO_EMBEDDED_TOOLS"
         log_success "JAR built successfully"
     fi
+    python3 - "${OMC_GTK_ROOT}/target/${APP_NAME}-${APP_SNAPSHOT_VERSION}.jar" "$NO_EMBEDDED_TOOLS" <<'PY'
+import sys
+import zipfile
+with zipfile.ZipFile(sys.argv[1]) as jar:
+    bundled = all(any(name.endswith('/' + tool) for name in jar.namelist()) for tool in ('ffmpeg', 'ffprobe', 'pandoc'))
+if bundled != (sys.argv[2] == 'false'):
+    raise SystemExit('JAR tool contents do not match --no-embedded-tools. Rebuild without --skip-build.')
+PY
 }
 
 # Clean and create build directory
@@ -307,7 +319,6 @@ download_jre() {
     # Remove unnecessary files to reduce size
     log_info "Optimizing JRE size..."
     rm -rf "$APPDIR/usr/lib/jre/man"
-    rm -rf "$APPDIR/usr/lib/jre/legal"
     find "$APPDIR/usr/lib/jre" -name "*.debuginfo" -delete
     
     local jre_size=$(du -sh "$APPDIR/usr/lib/jre" | cut -f1)
@@ -523,59 +534,11 @@ copy_icons() {
 
 # Copy embedded conversion tools
 copy_embedded_tools() {
+    # Maven bundles converters in the JAR; avoid duplicating hundreds of MB here.
     if [ "$NO_EMBEDDED_TOOLS" = true ]; then
-        log_step "Skipping embedded tools (--no-embedded-tools)"
-        log_warn "AppImage will require ffmpeg and pandoc to be installed on target system"
-        return
-    fi
-    
-    log_step "Copying embedded conversion tools"
-    
-    local binaries_source="${OMC_GTK_ROOT}/src/main/resources/bin"
-    
-    if [ ! -d "$binaries_source" ]; then
-        log_warn "No embedded binaries directory found"
-        return
-    fi
-    
-    local arch_dir="${binaries_source}/linux-${ARCH}"
-    if [ ! -d "$arch_dir" ]; then
-        log_warn "No binaries found for architecture: ${ARCH}"
-        return
-    fi
-    
-    local tools_copied=0
-    
-    # Copy ffmpeg
-    if [ -f "${arch_dir}/ffmpeg/ffmpeg" ]; then
-        cp "${arch_dir}/ffmpeg/ffmpeg" "$APPDIR/embedded/ffmpeg/"
-        chmod 755 "$APPDIR/embedded/ffmpeg/ffmpeg"
-        local ffmpeg_size=$(du -h "$APPDIR/embedded/ffmpeg/ffmpeg" | cut -f1)
-        log_info "  Copied ffmpeg (${ffmpeg_size})"
-        tools_copied=$((tools_copied + 1))
-    fi
-    
-    # Copy ffprobe if present
-    if [ -f "${arch_dir}/ffmpeg/ffprobe" ]; then
-        cp "${arch_dir}/ffmpeg/ffprobe" "$APPDIR/embedded/ffmpeg/"
-        chmod 755 "$APPDIR/embedded/ffmpeg/ffprobe"
-        log_info "  Copied ffprobe"
-        tools_copied=$((tools_copied + 1))
-    fi
-    
-    # Copy pandoc
-    if [ -f "${arch_dir}/pandoc/pandoc" ]; then
-        cp "${arch_dir}/pandoc/pandoc" "$APPDIR/embedded/pandoc/"
-        chmod 755 "$APPDIR/embedded/pandoc/pandoc"
-        local pandoc_size=$(du -h "$APPDIR/embedded/pandoc/pandoc" | cut -f1)
-        log_info "  Copied pandoc (${pandoc_size})"
-        tools_copied=$((tools_copied + 1))
-    fi
-    
-    if [ $tools_copied -eq 0 ]; then
-        log_warn "No embedded tools found to copy"
+        log_step "Using system conversion tools (--no-embedded-tools)"
     else
-        log_success "Embedded tools copied (${tools_copied} binaries)"
+        log_step "Embedded conversion tools are included in the application JAR"
     fi
 }
 

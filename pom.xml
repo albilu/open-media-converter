@@ -11,6 +11,7 @@
     <url>https://github.com/albilu/open-media-converter</url>
 
     <properties>
+        <omc.build.directory>target</omc.build.directory>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>23</maven.compiler.source>
         <maven.compiler.target>23</maven.compiler.target>
@@ -24,6 +25,10 @@
         <junit.version>5.10.2</junit.version>
         <mockito.version>5.11.0</mockito.version>
     </properties>
+
+    <build>
+        <directory>${omc.build.directory}</directory>
+    </build>
 
     <modules>
         <module>core</module>

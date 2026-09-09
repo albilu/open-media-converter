@@ -66,7 +66,7 @@ public final class ImageSettings {
         this.resolution = resolution;
         this.maintainAspectRatio = maintainAspectRatio;
         this.compressionLevel = compressionLevel;
-        this.resizeMode = resizeMode;
+        this.resizeMode = resizeMode == null ? (resolution == null ? ResizeMode.NONE : ResizeMode.FIT) : resizeMode;
         // Requirement REQ-IMG-1.1, REQ-IMG-2.1: Default to NONE for backward
         // compatibility
         this.rotation = rotation != null ? rotation : ImageRotation.NONE;
@@ -207,6 +207,7 @@ public final class ImageSettings {
         private boolean maintainAspectRatio = true;
         private int compressionLevel = 0; // 0 means not set (no compression)
         private ResizeMode resizeMode = ResizeMode.NONE;
+        private boolean resizeModeExplicit;
         private ImageRotation rotation = ImageRotation.NONE; // Requirement REQ-IMG-1.1: Default rotation
         private ImageFlip flip = ImageFlip.NONE; // Requirement REQ-IMG-2.1: Default flip
         private FileFormat outputFormat = FileFormat.PNG;
@@ -244,6 +245,7 @@ public final class ImageSettings {
          */
         public Builder resolution(Resolution resolution) {
             this.resolution = resolution;
+            if (!resizeModeExplicit) this.resizeMode = resolution == null ? ResizeMode.NONE : ResizeMode.FIT;
             return this;
         }
 
@@ -278,6 +280,7 @@ public final class ImageSettings {
          */
         public Builder resizeMode(ResizeMode resizeMode) {
             this.resizeMode = resizeMode;
+            this.resizeModeExplicit = true;
             return this;
         }
 

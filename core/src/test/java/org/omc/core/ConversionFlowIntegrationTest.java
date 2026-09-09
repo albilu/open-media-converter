@@ -178,7 +178,7 @@ public class ConversionFlowIntegrationTest {
                 eq(inputPath),
                 any(Path.class),
                 eq(FileFormat.MKV), // Override format
-                eq(globalSettings),
+                org.mockito.ArgumentMatchers.<ConversionSettings>argThat(effective -> effective.videoSettings().equals(overrideSettings)),
                 any(),
                 any(), any());
     }
@@ -368,7 +368,7 @@ public class ConversionFlowIntegrationTest {
                 eq(inputPath),
                 any(Path.class),
                 eq(FileFormat.WEBP), // Override format determines extension
-                eq(globalSettings),
+                org.mockito.ArgumentMatchers.<ConversionSettings>argThat(effective -> effective.imageSettings().equals(overrideSettings)),
                 any(),
                 any(), any());
     }
@@ -420,15 +420,13 @@ public class ConversionFlowIntegrationTest {
         assertTrue(result.success());
         verify(toolManager).selectTool(FileFormat.DOCX, FileFormat.EPUB);
 
-        // The globalSettings are passed through, but the engine resolves per-file
-        // overrides
-        // The actual settings used (codec, bitrate, etc.) come from the override
+        // Verify the complete override reaches the execution boundary.
         verify(toolManager).executeTool(
                 eq(ConversionTool.PANDOC),
                 eq(inputPath),
                 any(Path.class),
                 eq(FileFormat.EPUB),
-                eq(globalSettings), // Global settings passed, but override is in the file
+                org.mockito.ArgumentMatchers.<ConversionSettings>argThat(effective -> effective.documentSettings().equals(overrideSettings)), // Effective settings must reach the tool
                 any(),
                 any(), any());
     }

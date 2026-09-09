@@ -1,0 +1,48 @@
+{
+  "x86_64": {
+    "ffmpeg": {
+      "version": "ffmpeg-n8.1.2-50-g1a748fe2cd",
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n8.1.2-50-g1a748fe2cd-linux64-gpl-8.1.tar.xz",
+      "sha256": "c733b4b2951e5957e15505f788b2c65a7a41b6da4b289e295852cc38079b4d2b",
+      "binaries": [
+        "ffmpeg",
+        "ffprobe"
+      ],
+      "license": "GPL-3.0-or-later",
+      "source": "https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-08-31-13-27"
+    },
+    "pandoc": {
+      "version": "3.10.2",
+      "url": "https://github.com/jgm/pandoc/releases/download/3.10.2/pandoc-3.10.2-linux-amd64.tar.gz",
+      "sha256": "c7edd535941c48be6a362081a748272837de81ae11777202d9c341d3d8261c9a",
+      "binaries": [
+        "pandoc"
+      ],
+      "license": "GPL-2.0-or-later",
+      "source": "https://github.com/jgm/pandoc/tree/3.10.2"
+    }
+  },
+  "aarch64": {
+    "ffmpeg": {
+      "version": "ffmpeg-n8.1.2-50-g1a748fe2cd",
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n8.1.2-50-g1a748fe2cd-linuxarm64-gpl-8.1.tar.xz",
+      "sha256": "ae5da4f51b9052390f414005f8ab26c1eed1268f327cce7cb79aa076b29bd66e",
+      "binaries": [
+        "ffmpeg",
+        "ffprobe"
+      ],
+      "license": "GPL-3.0-or-later",
+      "source": "https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-08-31-13-27"
+    },
+    "pandoc": {
+      "version": "3.10.2",
+      "url": "https://github.com/jgm/pandoc/releases/download/3.10.2/pandoc-3.10.2-linux-arm64.tar.gz",
+      "sha256": "1c4d69f2a092bd47cb180e58a4aab7b9637101ced928252458c7d41a7f7fa71d",
+      "binaries": [
+        "pandoc"
+      ],
+      "license": "GPL-2.0-or-later",
+      "source": "https://github.com/jgm/pandoc/tree/3.10.2"
+    }
+  }
+}

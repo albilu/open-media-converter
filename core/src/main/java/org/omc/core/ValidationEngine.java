@@ -73,6 +73,15 @@ public class ValidationEngine {
     private static final int MAX_IMAGE_DIMENSION = 65535;
 
     private final FileHandler fileHandler;
+    private volatile org.omc.model.ToolConfiguration toolConfiguration;
+
+    /**
+     * Uses the same discovered binaries for validation and conversion.
+     * @param configuration installed and extracted tool paths
+     */
+    public void setToolConfiguration(org.omc.model.ToolConfiguration configuration) {
+        toolConfiguration = Objects.requireNonNull(configuration, "configuration");
+    }
 
     /**
      * Creates a new ValidationEngine.
@@ -666,10 +675,12 @@ public class ValidationEngine {
 
         try {
             // FFmpeg uses single-dash flags, other tools use double-dash
-            String versionFlag = (tool == ConversionTool.FFMPEG) ? "-version" : "--version";
+            String versionFlag = (tool == ConversionTool.FFMPEG || tool == ConversionTool.IMAGEMAGICK)
+                    ? "-version" : "--version";
 
             ProcessBuilder pb = new ProcessBuilder(command, versionFlag);
             pb.redirectErrorStream(true);
+            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
             Process process = pb.start();
 
             // Wait for process to complete with timeout
@@ -699,6 +710,15 @@ public class ValidationEngine {
      * Gets the command name for a conversion tool.
      */
     private String getToolCommand(ConversionTool tool) {
+        if (toolConfiguration != null) {
+            Path path = switch (tool) {
+                case FFMPEG -> toolConfiguration.getFfmpegPath();
+                case PANDOC -> toolConfiguration.getPandocPath();
+                case LIBREOFFICE -> toolConfiguration.getLibreOfficePath();
+                case IMAGEMAGICK -> toolConfiguration.getConvertPath();
+            };
+            return path == null ? null : path.toString();
+        }
         return switch (tool) {
             case FFMPEG ->
                 "ffmpeg";

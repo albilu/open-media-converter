@@ -168,6 +168,16 @@ public final class DocumentSettings {
     }
 
     /**
+     * Copies settings for an intermediate document in a multi-tool conversion.
+     * @param format intermediate output format
+     * @return settings retaining all document options
+     */
+    public DocumentSettings withOutputFormat(FileFormat format) {
+        return new DocumentSettings(templatePath, preserveFormatting, embedFonts, generateTableOfContents,
+                marginTop, marginBottom, marginLeft, marginRight, format);
+    }
+
+    /**
      * Validates document settings.
      * Requirement REQ-2.5: Validate output format is DOCUMENT category.
      * 

@@ -1,0 +1,41 @@
+.TH OPEN-MEDIA-CONVERTER 1 "September 2026" "Open Media Converter" "User Commands"
+.SH NAME
+open-media-converter \- convert media and documents with a native GTK interface
+.SH SYNOPSIS
+.B open-media-converter
+.RI [ options ]
+.RI [ files ...]
+.SH DESCRIPTION
+Open Media Converter converts video, audio, images and documents. Add files,
+configure section settings or per-file presets, and start a conversion batch.
+.SH OPTIONS
+.TP
+.B --help, -h
+Show command-line usage.
+.TP
+.B --version, -v
+Show the application version.
+.TP
+.B --debug
+Enable diagnostic logging.
+.TP
+.BI --config-dir " directory"
+Use an alternative configuration directory.
+.SH ENVIRONMENT
+.TP
+.B JAVA_HOME
+Select a Java 23 or newer installation.
+.TP
+.B OMC_DEBUG
+Set to 1 to enable diagnostic logging.
+.TP
+.B GTK_THEME
+Override the GTK theme.
+.SH FILES
+.I ~/.config/open-media-converter/
+stores settings, presets and session state.
+.SH SEE ALSO
+.BR ffmpeg (1),
+.BR pandoc (1),
+.BR convert (1),
+.BR libreoffice (1)

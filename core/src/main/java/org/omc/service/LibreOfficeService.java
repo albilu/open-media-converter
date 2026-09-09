@@ -50,13 +50,13 @@ public class LibreOfficeService {
     private static final List<FileFormat> SUPPORTED_INPUT_FORMATS = List.of(
             FileFormat.DOCX, FileFormat.XLSX, FileFormat.PPTX,
             FileFormat.ODT, FileFormat.ODS, FileFormat.ODP,
-            FileFormat.RTF, FileFormat.TXT, FileFormat.HTML);
+            FileFormat.RTF, FileFormat.TXT, FileFormat.HTML, FileFormat.DOC, FileFormat.XLS, FileFormat.PPT, FileFormat.CSV);
 
     // LibreOffice-supported document formats for output
     private static final List<FileFormat> SUPPORTED_OUTPUT_FORMATS = List.of(
             FileFormat.PDF, FileFormat.DOCX, FileFormat.XLSX, FileFormat.PPTX,
             FileFormat.ODT, FileFormat.ODS, FileFormat.ODP,
-            FileFormat.HTML, FileFormat.TXT);
+            FileFormat.HTML, FileFormat.TXT, FileFormat.RTF, FileFormat.DOC, FileFormat.XLS, FileFormat.PPT, FileFormat.CSV);
 
     /**
      * Creates a new LibreOfficeService with the specified LibreOffice binary path.
@@ -140,6 +140,16 @@ public class LibreOfficeService {
         try {
             tempOutputDir = Files.createTempDirectory("libreoffice-conversion-");
 
+            FileFormat inputFormat = detectFormat(inputPath);
+            // Text layout options are applied by Pandoc before HTML reaches this renderer.
+            if (inputFormat != FileFormat.HTML && (settings.templatePath() != null
+                    || settings.generateTableOfContents() || !settings.preserveFormatting()
+                    || settings.marginTop() != 25 || settings.marginBottom() != 25
+                    || settings.marginLeft() != 25 || settings.marginRight() != 25)) {
+                throw new ToolExecutionException("This native office conversion preserves the source layout. "
+                        + "Templates, new contents tables, and custom margins require a text document supported by Pandoc.",
+                        ErrorCode.INVALID_SETTINGS, "libreoffice");
+            }
             // Build LibreOffice command with temp directory
             List<String> command = buildCommand(inputPath, outputPath, settings, tempOutputDir);
             final Path finalTempOutputDir = tempOutputDir; // For cleanup in finally block
@@ -331,8 +341,8 @@ public class LibreOfficeService {
 
             // Clean up temporary directory
             if (tempOutputDir != null && Files.exists(tempOutputDir)) {
-                try {
-                    Files.walk(tempOutputDir)
+                try (var paths = Files.walk(tempOutputDir)) {
+                    paths
                             .sorted((a, b) -> b.compareTo(a)) // Delete files before directories
                             .forEach(path -> {
                                 try {
@@ -376,13 +386,24 @@ public class LibreOfficeService {
 
         // Headless mode (no GUI)
         command.add("--headless");
+        command.add("-env:UserInstallation=" + outputDir.resolve("profile").toAbsolutePath().toUri());
 
         // Detect output format from extension
         FileFormat outputFormat = detectFormat(output);
 
         // Convert-to option with format
         command.add("--convert-to");
-        command.add(mapFormatToLibreOffice(outputFormat));
+        if (!canConvert(detectFormat(input), outputFormat)) {
+            throw new IllegalArgumentException("LibreOffice cannot convert " + detectFormat(input) + " to " + outputFormat);
+        }
+        if (outputFormat == FileFormat.PDF) {
+            String filter = isSpreadsheet(detectFormat(input)) ? "calc_pdf_Export"
+                    : isPresentation(detectFormat(input)) ? "impress_pdf_Export" : "writer_pdf_Export";
+            command.add("pdf:" + filter + ":{\"EmbedStandardFonts\":{\"type\":\"boolean\",\"value\":\""
+                    + settings.embedFonts() + "\"}}");
+        } else {
+            command.add(mapFormatToLibreOffice(outputFormat));
+        }
 
         // Output directory (use provided outputDir instead of deriving from output
         // path)
@@ -486,8 +507,31 @@ public class LibreOfficeService {
             case TXT -> "txt";
             case RTF -> "rtf";
             case JPEG -> "jpeg";
-            default -> "pdf"; // Default fallback to PDF
+            case CSV -> "csv";
+            default -> throw new IllegalArgumentException("Unsupported LibreOffice output: " + format);
         };
+    }
+
+    /**
+     * Checks native office conversions without substituting an unrelated format.
+     * @param input source document format
+     * @param output target document format
+     * @return true if the document family supports the requested output
+     */
+    public static boolean canConvert(FileFormat input, FileFormat output) {
+        if (!SUPPORTED_INPUT_FORMATS.contains(input) || !SUPPORTED_OUTPUT_FORMATS.contains(output)) return false;
+        if (output == FileFormat.PDF || output == FileFormat.HTML) return true;
+        if (isSpreadsheet(input)) return isSpreadsheet(output);
+        if (isPresentation(input)) return isPresentation(output);
+        return !isSpreadsheet(output) && !isPresentation(output);
+    }
+
+    private static boolean isSpreadsheet(FileFormat format) {
+        return format == FileFormat.XLS || format == FileFormat.XLSX || format == FileFormat.ODS || format == FileFormat.CSV;
+    }
+
+    private static boolean isPresentation(FileFormat format) {
+        return format == FileFormat.PPT || format == FileFormat.PPTX || format == FileFormat.ODP;
     }
 
     /**

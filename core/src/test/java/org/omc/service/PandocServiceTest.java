@@ -139,7 +139,7 @@ class PandocServiceTest {
     void testGetSupportedInputFormats_ReturnsCorrectList() {
         List<FileFormat> formats = service.getSupportedInputFormats();
         assertNotNull(formats);
-        assertEquals(7, formats.size());
+        assertEquals(11, formats.size());
         assertTrue(formats.contains(FileFormat.MARKDOWN));
         assertTrue(formats.contains(FileFormat.HTML));
         assertTrue(formats.contains(FileFormat.DOCX));
@@ -153,7 +153,7 @@ class PandocServiceTest {
     void testGetSupportedOutputFormats_ReturnsCorrectList() {
         List<FileFormat> formats = service.getSupportedOutputFormats();
         assertNotNull(formats);
-        assertEquals(8, formats.size());
+        assertEquals(12, formats.size());
         assertTrue(formats.contains(FileFormat.MARKDOWN));
         assertTrue(formats.contains(FileFormat.HTML));
         assertTrue(formats.contains(FileFormat.DOCX));
@@ -279,12 +279,7 @@ class PandocServiceTest {
         Path input = tempDir.resolve("input.md");
         Path output = tempDir.resolve("output.pdf");
 
-        List<String> command = service.buildCommand(input, output, defaultSettings);
-
-        assertNotNull(command);
-        assertTrue(command.contains("-t"));
-        assertTrue(command.contains("pdf"));
-        assertTrue(command.contains("--pdf-engine=xelatex"));
+        assertThrows(IllegalArgumentException.class, () -> service.buildCommand(input, output, defaultSettings));
     }
 
     @Test
@@ -345,9 +340,9 @@ class PandocServiceTest {
     }
 
     @Test
-    void testBuildCommand_PdfWithMargins() {
+    void testBuildCommand_PdfHtmlWithMargins() {
         // Requirement REQ-006.4: PDF margin configuration
-        Path pdfOutput = tempDir.resolve("output.pdf");
+        Path pdfOutput = tempDir.resolve("intermediate.html");
 
         DocumentSettings settingsWithMargins = DocumentSettings.builder()
                 .marginTop(25) // 25mm (~1 inch)
@@ -361,11 +356,7 @@ class PandocServiceTest {
 
         List<String> command = service.buildCommand(inputPath, pdfOutput, settingsWithMargins);
 
-        // Check that margin arguments are present (converted from mm to inches)
-        assertTrue(command.stream().anyMatch(arg -> arg.contains("geometry:top=")));
-        assertTrue(command.stream().anyMatch(arg -> arg.contains("geometry:bottom=")));
-        assertTrue(command.stream().anyMatch(arg -> arg.contains("geometry:left=")));
-        assertTrue(command.stream().anyMatch(arg -> arg.contains("geometry:right=")));
+        assertTrue(command.stream().anyMatch(arg -> arg.contains("margin: 25mm 38mm 51mm 13mm")));
     }
 
     @Test
@@ -515,8 +506,8 @@ class PandocServiceTest {
     }
 
     @Test
-    void testBuildCommand_PdfWithMinimumMargins() {
-        Path pdfOutput = tempDir.resolve("output.pdf");
+    void testBuildCommand_PdfHtmlWithMinimumMargins() {
+        Path pdfOutput = tempDir.resolve("intermediate.html");
 
         DocumentSettings settingsMinimumMargins = DocumentSettings.builder()
                 .marginTop(0)
@@ -530,16 +521,12 @@ class PandocServiceTest {
 
         List<String> command = service.buildCommand(inputPath, pdfOutput, settingsMinimumMargins);
 
-        // Should include geometry arguments with minimum valid values
-        assertTrue(command.stream().anyMatch(arg -> arg.contains("geometry:top=")));
-        assertTrue(command.stream().anyMatch(arg -> arg.contains("geometry:bottom=")));
-        assertTrue(command.stream().anyMatch(arg -> arg.contains("geometry:left=")));
-        assertTrue(command.stream().anyMatch(arg -> arg.contains("geometry:right=")));
+        assertTrue(command.stream().anyMatch(arg -> arg.contains("margin: 0mm 0mm 0mm 0mm")));
     }
 
     @Test
-    void testBuildCommand_PdfWithMaximumMargins() {
-        Path pdfOutput = tempDir.resolve("output.pdf");
+    void testBuildCommand_PdfHtmlWithMaximumMargins() {
+        Path pdfOutput = tempDir.resolve("intermediate.html");
 
         DocumentSettings settingsMaximumMargins = DocumentSettings.builder()
                 .marginTop(100) // Maximum valid margin
@@ -553,11 +540,7 @@ class PandocServiceTest {
 
         List<String> command = service.buildCommand(inputPath, pdfOutput, settingsMaximumMargins);
 
-        // Should include geometry arguments with maximum valid values
-        assertTrue(command.stream().anyMatch(arg -> arg.contains("geometry:top=")));
-        assertTrue(command.stream().anyMatch(arg -> arg.contains("geometry:bottom=")));
-        assertTrue(command.stream().anyMatch(arg -> arg.contains("geometry:left=")));
-        assertTrue(command.stream().anyMatch(arg -> arg.contains("geometry:right=")));
+        assertTrue(command.stream().anyMatch(arg -> arg.contains("margin: 100mm 100mm 100mm")));
     }
 
     @Test
@@ -617,11 +600,8 @@ class PandocServiceTest {
         assertTrue(cmd2.contains("-f") && cmd2.contains("html"));
         assertTrue(cmd2.contains("-t") && cmd2.contains("docx"));
 
-        // DOCX to PDF
-        List<String> cmd3 = service.buildCommand(docxInput, pdfOutput, defaultSettings);
-        assertTrue(cmd3.contains("-f") && cmd3.contains("docx"));
-        assertTrue(cmd3.contains("-t") && cmd3.contains("pdf"));
-        assertTrue(cmd3.contains("--pdf-engine=xelatex"));
+        // PDF requires the conversion workflow, which also runs the renderer.
+        assertThrows(IllegalArgumentException.class, () -> service.buildCommand(docxInput, pdfOutput, defaultSettings));
     }
 
     @Test
@@ -643,7 +623,7 @@ class PandocServiceTest {
         assertTrue(command.contains("--standalone"));
         assertFalse(command.contains("--toc"));
         assertFalse(command.stream().anyMatch(arg -> arg.startsWith("--template=")));
-        assertFalse(command.contains("--embed-resources"));
+        assertTrue(command.contains("--embed-resources"), "HTML resources remain portable when formatting is removed");
         assertFalse(command.contains("--reference-doc"));
     }
 

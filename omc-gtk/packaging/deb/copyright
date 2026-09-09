@@ -1,0 +1,29 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Open Media Converter
+Source: https://github.com/albilu/open-media-converter
+
+Files: *
+Copyright: 2025 Open Media Converter Team
+License: GPL-3
+ This application is distributed under the GNU General Public License version 3.
+ The complete license is available on Debian systems in
+ /usr/share/common-licenses/GPL-3.
+
+Files: bin/linux-*/ffmpeg/*
+Copyright: FFmpeg and bundled dependency contributors
+License: GPL-3+
+ These embedded executables are distributed under the GNU General Public
+ License version 3 or later. The complete license is available on Debian
+ systems in /usr/share/common-licenses/GPL-3.
+Comment: The files reside inside the application JAR. License texts, build
+ references and source locations are included next to the executables and
+ documented in BINARY_LICENSES.md.
+
+Files: bin/linux-*/pandoc/*
+Copyright: John MacFarlane and Pandoc contributors
+License: GPL-2+
+ Pandoc is distributed under the GNU General Public License version 2 or
+ later. The complete license is available on Debian systems in
+ /usr/share/common-licenses/GPL-2.
+Comment: The files reside inside the application JAR. The upstream license
+ and source reference are included next to the executable.

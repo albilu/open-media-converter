@@ -21,7 +21,7 @@ class AudioSettingsTest {
         AudioSettings settings = AudioSettings.builder().build();
 
         // Then: Check all default values
-        assertEquals("aac", settings.codec());
+        assertEquals("libmp3lame", settings.codec());
         assertEquals(192, settings.bitrate());
         assertEquals(-1, settings.sampleRate());
         assertEquals(-1, settings.channels());

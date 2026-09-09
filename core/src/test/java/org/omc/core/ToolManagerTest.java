@@ -3,6 +3,7 @@
 package org.omc.core;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -97,24 +98,21 @@ class ToolManagerTest {
     }
 
     @Test
-    void testConstructor_WithNullFFmpegService_ThrowsException() {
+    void testConstructor_WithNullFFmpegService_DisablesTool() {
         // When/Then
-        assertThrows(NullPointerException.class,
-                () -> new ToolManager(null, pandocService, libreOfficeService, imageMagickService));
+        assertFalse(new ToolManager(null, pandocService, libreOfficeService, imageMagickService).isToolAvailable(ConversionTool.FFMPEG));
     }
 
     @Test
-    void testConstructor_WithNullPandocService_ThrowsException() {
+    void testConstructor_WithNullPandocService_DisablesTool() {
         // When/Then
-        assertThrows(NullPointerException.class,
-                () -> new ToolManager(ffmpegService, null, libreOfficeService, imageMagickService));
+        assertFalse(new ToolManager(ffmpegService, null, libreOfficeService, imageMagickService).isToolAvailable(ConversionTool.PANDOC));
     }
 
     @Test
-    void testConstructor_WithNullLibreOfficeService_ThrowsException() {
+    void testConstructor_WithNullLibreOfficeService_DisablesTool() {
         // When/Then
-        assertThrows(NullPointerException.class,
-                () -> new ToolManager(ffmpegService, pandocService, null, imageMagickService));
+        assertFalse(new ToolManager(ffmpegService, pandocService, null, imageMagickService).isToolAvailable(ConversionTool.LIBREOFFICE));
     }
 
     // Tool selection tests - Video formats (REQ-006.1)
@@ -281,21 +279,17 @@ class ToolManagerTest {
     // Tool selection tests - LibreOffice formats (REQ-006.4)
 
     @Test
-    void testSelectTool_DOCXToPDF_SelectsLibreOffice() throws ToolExecutionException {
+    void testSelectTool_DOCXToPDF_SelectsPandoc() throws ToolExecutionException {
         // When
         ConversionTool tool = toolManager.selectTool(FileFormat.DOCX, FileFormat.PDF);
 
         // Then
-        assertEquals(ConversionTool.LIBREOFFICE, tool);
+        assertEquals(ConversionTool.PANDOC, tool);
     }
 
     @Test
-    void testSelectTool_PDFToDOCX_SelectsLibreOffice() throws ToolExecutionException {
-        // When
-        ConversionTool tool = toolManager.selectTool(FileFormat.PDF, FileFormat.DOCX);
-
-        // Then
-        assertEquals(ConversionTool.LIBREOFFICE, tool);
+    void testSelectTool_PDFToDOCX_RejectsUnsupportedPair() throws ToolExecutionException {
+        assertThrows(ToolExecutionException.class, () -> toolManager.selectTool(FileFormat.PDF, FileFormat.DOCX));
     }
 
     @Test
@@ -317,18 +311,18 @@ class ToolManagerTest {
     }
 
     @Test
-    void testSelectTool_ODTToPDF_SelectsLibreOffice() throws ToolExecutionException {
+    void testSelectTool_ODTToPDF_SelectsPandoc() throws ToolExecutionException {
         // When
         ConversionTool tool = toolManager.selectTool(FileFormat.ODT, FileFormat.PDF);
 
         // Then
-        assertEquals(ConversionTool.LIBREOFFICE, tool);
+        assertEquals(ConversionTool.PANDOC, tool);
     }
 
     // Tool selection tests - Mixed document conversions
 
     @Test
-    void testSelectTool_DOCXToMarkdown_SelectsLibreOffice() throws ToolExecutionException {
+    void testSelectTool_DOCXToMarkdown_SelectsPandoc() throws ToolExecutionException {
         // DOCX is a LibreOffice format, so it always selects LibreOffice
         // regardless of output format
 
@@ -336,7 +330,7 @@ class ToolManagerTest {
         ConversionTool tool = toolManager.selectTool(FileFormat.DOCX, FileFormat.MARKDOWN);
 
         // Then
-        assertEquals(ConversionTool.LIBREOFFICE, tool);
+        assertEquals(ConversionTool.PANDOC, tool);
     }
 
     @Test

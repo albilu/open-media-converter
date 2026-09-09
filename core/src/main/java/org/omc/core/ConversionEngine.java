@@ -10,9 +10,11 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -67,6 +69,20 @@ public class ConversionEngine implements ProcessRegistry {
     private static final long CANCEL_DRAIN_TIMEOUT_MS = 2000; // Must exceed the 1s pause-wait poll worst case
 
     private final ToolManager toolManager;
+
+    /** Returns conversion categories supported by the discovered executables. */
+    public Set<FormatCategory> getAvailableCategories() {
+        Set<FormatCategory> categories = new HashSet<>();
+        if (toolManager.isToolAvailable(ConversionTool.FFMPEG)) {
+            categories.add(FormatCategory.VIDEO);
+            categories.add(FormatCategory.AUDIO);
+        }
+        if (toolManager.isToolAvailable(ConversionTool.IMAGEMAGICK)) categories.add(FormatCategory.IMAGE);
+        if (toolManager.isToolAvailable(ConversionTool.PANDOC) || toolManager.isToolAvailable(ConversionTool.LIBREOFFICE)) {
+            categories.add(FormatCategory.DOCUMENT);
+        }
+        return Set.copyOf(categories);
+    }
     private final ValidationEngine validationEngine;
     private final ProgressEngine progressEngine;
     private final FileHandler fileHandler;
@@ -177,7 +193,10 @@ public class ConversionEngine implements ProcessRegistry {
             throw new IllegalStateException("ConversionEngine is shutting down");
         }
 
-        // New batch: clear any stale cancel request from a previous run
+        if (!activeConversions.isEmpty() || !waitForCancelDrain()) {
+            throw new IllegalStateException("A previous conversion is still running");
+        }
+        // New batch: clear a cancellation only after its workers have stopped.
         cancelRequested.set(false);
 
         logger.info("Starting batch conversion of {} files", files.size());
@@ -197,12 +216,14 @@ public class ConversionEngine implements ProcessRegistry {
         }
         progressEngine.startBatch(fileIds, fileSizes);
 
+        Map<String, Path> outputPaths = planOutputPaths(files, settings);
+
         // Submit all files for conversion. Uses the internal submitter (not
         // convertSingle) so a cancel arriving mid-loop is never cleared by the
         // remaining submissions.
         List<CompletableFuture<ConversionResult>> futures = new ArrayList<>();
         for (ConversionFile file : files) {
-            CompletableFuture<ConversionResult> future = submitConversion(file, settings);
+            CompletableFuture<ConversionResult> future = submitConversion(file, settings, outputPaths.get(file.id()));
             futures.add(future);
         }
 
@@ -244,6 +265,11 @@ public class ConversionEngine implements ProcessRegistry {
                                     file.size(),
                                     ConversionTool.FFMPEG));
                         } catch (InterruptedException | ExecutionException e) {
+                            if (e instanceof ExecutionException && e.getCause() instanceof CancellationException) {
+                                results.add(conversionResults.getOrDefault(file.id(), ConversionResult.cancelled(
+                                        file.id(), "", Duration.ZERO, file.size(), null)));
+                                continue;
+                            }
                             // Requirement REQ-004.2: Handle exceptional future completion
                             // This can happen if executor is shut down or task submission fails
                             logger.error("Failed to get conversion result for file: {}",
@@ -325,7 +351,7 @@ public class ConversionEngine implements ProcessRegistry {
             cancelRequested.set(false);
         }
 
-        return submitConversion(file, settings);
+        return submitConversion(file, settings, planOutputPaths(List.of(file), settings).get(file.id()));
     }
 
     /**
@@ -341,7 +367,8 @@ public class ConversionEngine implements ProcessRegistry {
      */
     private CompletableFuture<ConversionResult> submitConversion(
             ConversionFile file,
-            ConversionSettings settings) {
+            ConversionSettings settings,
+            Path outputPath) {
 
         String fileId = file.id();
         logger.debug("Submitting conversion for file: {} ({})", file.fileName(), fileId);
@@ -395,7 +422,7 @@ public class ConversionEngine implements ProcessRegistry {
 
                         // Requirement REQ-004.1: Validate conversion request
                         try {
-                            return performConversion(file, settings);
+                            return performConversion(file, settings, outputPath);
                         } catch (CancellationException e) {
                             // User-initiated cancellation - log at info level, not error
                             logger.info("Conversion cancelled: {}", file.fileName());
@@ -428,7 +455,7 @@ public class ConversionEngine implements ProcessRegistry {
         activeConversions.put(fileId, future);
 
         // Clean up tracking when complete
-        future.whenComplete((result, throwable) -> {
+        CompletableFuture<ConversionResult> observed = future.whenComplete((result, throwable) -> {
             activeConversions.remove(fileId);
 
             ConversionResult finalResult = result;
@@ -466,6 +493,7 @@ public class ConversionEngine implements ProcessRegistry {
 
             // Requirement REQ-FL-2.2: Store conversion result for later retrieval
             if (finalResult != null) {
+                progressEngine.completeTracking(fileId, finalResult);
                 conversionResults.put(fileId, finalResult);
                 logger.debug("Stored conversion result for file: {}", fileId);
             }
@@ -480,7 +508,17 @@ public class ConversionEngine implements ProcessRegistry {
             }
         });
 
-        return future;
+        CompletableFuture<ConversionResult> completed = new CompletableFuture<>();
+        observed.whenComplete((result, error) -> {
+            Throwable cause = error instanceof java.util.concurrent.CompletionException ? error.getCause() : error;
+            if (cause instanceof CancellationException) completed.cancel(false);
+            else if (cause != null) completed.completeExceptionally(cause);
+            else completed.complete(result);
+        });
+        completed.whenComplete((result, error) -> {
+            if (completed.isCancelled()) future.cancel(true);
+        });
+        return completed;
     }
 
     /**
@@ -798,12 +836,13 @@ public class ConversionEngine implements ProcessRegistry {
      * @param settings the conversion settings
      * @return the conversion result
      */
-    private ConversionResult performConversion(ConversionFile file, ConversionSettings settings) {
+    private ConversionResult performConversion(ConversionFile file, ConversionSettings settings, Path finalOutputPath) {
         String fileId = file.id();
         Instant startTime = Instant.now();
         Path tempOutputPath = null;
 
         try {
+            settings = settings.forFile(file);
             // Step 1: Resolve effective settings for this file
             // Requirement REQ-007: Support per-file settings overrides
             FormatCategory category = file.format().getCategory();
@@ -863,7 +902,6 @@ public class ConversionEngine implements ProcessRegistry {
             // Step 4: Generate final output file path
             // Requirement REQ-004.1: Create output file path (same name, different
             // extension)
-            Path finalOutputPath = generateOutputPath(file, settings, outputFormat);
             logger.debug("Final output path: {}", finalOutputPath);
 
             // Step 5: Check for conflicts
@@ -963,11 +1001,16 @@ public class ConversionEngine implements ProcessRegistry {
             // Step 11: Move temporary file to final location on success
             // Requirement REQ-004.2: Atomic move on success
             if (result.success()) {
+                if (cancelRequested.get() || Thread.currentThread().isInterrupted()) {
+                    return ConversionResult.cancelled(fileId, result.toolOutput().orElse(""),
+                            result.conversionTime(), file.size(), tool);
+                }
                 logger.debug("Conversion successful, moving temp file to final location: {}", finalOutputPath);
                 // Ensure output directory exists before moving file
                 Files.createDirectories(finalOutputPath.getParent());
-                Files.move(tempOutputPath, finalOutputPath,
-                        StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                boolean replacesInput = Files.exists(file.path()) && Files.exists(finalOutputPath)
+                        && Files.isSameFile(file.path(), finalOutputPath);
+                OutputPublisher.publish(tempOutputPath, finalOutputPath, settings.overwriteExisting());
                 fileHandler.unregisterCleanup(tempOutputPath);
                 tempOutputPath = null; // Mark as moved successfully
                 logger.info("Moved temp file to final location: {}", finalOutputPath);
@@ -975,7 +1018,7 @@ public class ConversionEngine implements ProcessRegistry {
                 // Update result with final output path instead of temp path
                 // This ensures "Open File Location" opens the correct directory
                 result = ConversionResult.success(
-                        result.fileId(),
+                        fileId,
                         finalOutputPath, // Use final path, not temp path
                         result.toolOutput().orElse(null),
                         result.conversionTime(),
@@ -985,7 +1028,7 @@ public class ConversionEngine implements ProcessRegistry {
 
                 // Step 11.5: Delete original file if requested
                 // Requirement REQ-GEN-1.2: Delete original file after successful conversion
-                if (settings.deleteOriginalFile()) {
+                if (settings.deleteOriginalFile() && !replacesInput) {
                     if (cancelRequested.get()) {
                         logger.info("Skipping original file deletion after cancellation: {}", file.fileName());
                     } else {
@@ -998,8 +1041,6 @@ public class ConversionEngine implements ProcessRegistry {
             }
 
             // Step 12: Complete progress tracking
-            progressEngine.completeTracking(fileId, result);
-
             Duration totalTime = Duration.between(startTime, Instant.now());
             logger.info("Conversion completed: {} in {} ms (success={})",
                     file.fileName(), totalTime.toMillis(), result.success());
@@ -1018,7 +1059,6 @@ public class ConversionEngine implements ProcessRegistry {
                     file.size(),
                     ConversionTool.FFMPEG);
 
-            progressEngine.completeTracking(fileId, failureResult);
             return failureResult;
 
         } finally {
@@ -1237,14 +1277,14 @@ public class ConversionEngine implements ProcessRegistry {
         }
 
         // Add new extension
-        String extension = outputFormat.getPrimaryExtension();
+        String extension = outputFormat != null ? outputFormat.getPrimaryExtension() : "converted";
         String outputFileName = baseName + "." + extension;
 
         // Determine output directory
         Path outputDir = settings.outputDirectory();
         if (outputDir == null) {
             // Default: same directory as input
-            outputDir = inputPath.getParent();
+            outputDir = inputPath.toAbsolutePath().getParent();
         }
 
         // Create subdirectory if requested
@@ -1257,7 +1297,49 @@ public class ConversionEngine implements ProcessRegistry {
             }
         }
 
-        return outputDir.resolve(outputFileName);
+        return outputDir.resolve(outputFileName).toAbsolutePath().normalize();
+    }
+
+    private Map<String, Path> planOutputPaths(List<ConversionFile> files, ConversionSettings settings) {
+        Set<Path> inputs = new HashSet<>();
+        for (ConversionFile file : files) {
+            inputs.add(canonicalPath(file.path()));
+        }
+        Set<Path> claimed = new HashSet<>();
+        Map<String, Path> outputs = new HashMap<>();
+        for (ConversionFile file : files) {
+            ConversionSettings effective = settings.forFile(file);
+            Path proposed = generateOutputPath(file, effective, effective.outputFormat(file.format().getCategory()));
+            Path candidate = proposed;
+            int suffix = 2;
+            while (claimed.contains(canonicalPath(candidate))
+                    || (inputs.contains(canonicalPath(candidate))
+                            && !canonicalPath(file.path()).equals(canonicalPath(candidate)))) {
+                String name = proposed.getFileName().toString();
+                int dot = name.lastIndexOf('.');
+                String numbered = (dot > 0 ? name.substring(0, dot) : name) + "-" + suffix++
+                        + (dot > 0 ? name.substring(dot) : "");
+                candidate = proposed.resolveSibling(numbered);
+            }
+            claimed.add(canonicalPath(candidate));
+            outputs.put(file.id(), candidate);
+        }
+        return outputs;
+    }
+
+    private Path canonicalPath(Path path) {
+        try {
+            if (Files.exists(path)) {
+                return path.toRealPath();
+            }
+            Path parent = path.toAbsolutePath().getParent();
+            if (parent != null && Files.exists(parent)) {
+                return parent.toRealPath().resolve(path.getFileName());
+            }
+        } catch (IOException e) {
+            logger.debug("Could not resolve real path for {}", path, e);
+        }
+        return path.toAbsolutePath().normalize();
     }
 
     /**

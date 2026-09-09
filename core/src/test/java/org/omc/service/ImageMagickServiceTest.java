@@ -261,9 +261,9 @@ class ImageMagickServiceTest {
 
         List<String> command = service.buildImageCommand(inputPath, outputPathPng, settings);
 
-        assertTrue(command.contains("-compress"));
-        int compressIndex = command.indexOf("-compress");
-        assertEquals("Zip", command.get(compressIndex + 1));
+        assertTrue(command.contains("-define"));
+        int compressIndex = command.indexOf("-define");
+        assertEquals("png:compression-level=6", command.get(compressIndex + 1));
     }
 
     @Test
@@ -341,8 +341,8 @@ class ImageMagickServiceTest {
         assertTrue(command.contains("95"));
         assertTrue(command.contains("-resize"));
         assertTrue(command.contains("800x600!"));
-        assertTrue(command.contains("-compress"));
-        assertTrue(command.contains("Zip"));
+        assertTrue(command.contains("-define"));
+        assertTrue(command.contains("png:compression-level=9"));
     }
 
     @Test

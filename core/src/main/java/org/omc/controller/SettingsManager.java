@@ -1,6 +1,9 @@
 package org.omc.controller;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.omc.core.ConfigurationManager;
 import org.omc.core.ValidationEngine;
 import org.omc.exception.InvalidSettingsException;
@@ -187,7 +190,7 @@ public class SettingsManager {
      * @throws InvalidSettingsException if settings are invalid
      * @throws IOException              if save operation fails
      */
-    public void saveSettings(ConversionSettings settings) throws InvalidSettingsException, IOException {
+    public synchronized void saveSettings(ConversionSettings settings) throws InvalidSettingsException, IOException {
         Objects.requireNonNull(settings, "settings cannot be null");
         logger.debug("Saving settings");
 
@@ -342,7 +345,7 @@ public class SettingsManager {
     private void backupCorruptedSettings(Path settingsPath) {
         try {
             if (Files.exists(settingsPath)) {
-                String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
+                String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSSSSSSSS"));
                 Path backupPath = Path.of(settingsPath.toString() + BACKUP_SUFFIX + "_" + timestamp);
 
                 Files.move(settingsPath, backupPath, StandardCopyOption.REPLACE_EXISTING);
@@ -444,36 +447,56 @@ public class SettingsManager {
             throw new IllegalArgumentException("Cannot save built-in preset: " + preset.name());
         }
 
-        // Load existing custom presets
-        Path presetsPath = configurationManager.getConfigDirectory().resolve("presets.json");
-        List<SettingsPreset> customPresets = new ArrayList<>();
+        // Read-merge-write cycle is guarded so concurrent saves cannot interleave
+        // (consistent with the savePresetsAtomic / savePresetsBySection monitors)
+        synchronized (this) {
+            // Load existing custom presets, preserving unknown keys (e.g. section presets)
+            Path presetsPath = configurationManager.getConfigDirectory().resolve("presets.json");
+            List<SettingsPreset> customPresets = new ArrayList<>();
+            ObjectNode existingRoot = null;
 
-        if (Files.exists(presetsPath)) {
-            try {
-                PresetContainer container = JsonUtils.readJsonFile(presetsPath.toFile(), PresetContainer.class);
-                if (container != null && container.presets != null) {
-                    customPresets.addAll(container.presets);
+            if (Files.exists(presetsPath)) {
+                try {
+                    JsonNode tree = JsonUtils.getObjectMapper().readTree(presetsPath.toFile());
+                    JsonNode presetsNode = tree != null && tree.isObject() ? tree.get("presets") : tree;
+                    if (tree != null && tree.isObject()) {
+                        existingRoot = (ObjectNode) tree;
+                    }
+                    if (presetsNode != null && presetsNode.isArray()) {
+                        customPresets.addAll(JsonUtils.getObjectMapper().convertValue(
+                                presetsNode, new TypeReference<List<SettingsPreset>>() {
+                                }));
+                    }
+                } catch (IOException | IllegalArgumentException e) {
+                    logger.warn("Failed to load existing presets, backing up before overwrite", e);
+                    if (!backupPresetsFile(presetsPath)) {
+                        throw new IOException(
+                                "Failed to back up existing presets file; aborting save to avoid data loss", e);
+                    }
                 }
-            } catch (IOException e) {
-                logger.warn("Failed to load existing presets, will create new file", e);
+            }
+
+            // Check for built-in preset name conflict
+            List<String> builtInNames = createBuiltInPresets().stream()
+                    .map(SettingsPreset::name)
+                    .toList();
+            if (builtInNames.contains(preset.name())) {
+                throw new IllegalArgumentException("Preset name conflicts with built-in preset: " + preset.name());
+            }
+
+            // Remove existing preset with same name and add new one
+            customPresets.removeIf(p -> p.name().equals(preset.name()));
+            customPresets.add(preset);
+
+            // Save to file, preserving coexisting section-based presets
+            if (existingRoot != null) {
+                existingRoot.set("presets", JsonUtils.getObjectMapper().valueToTree(customPresets));
+                savePresetsAtomic(existingRoot, presetsPath);
+            } else {
+                PresetContainer container = new PresetContainer(customPresets);
+                savePresetsAtomic(container, presetsPath);
             }
         }
-
-        // Check for built-in preset name conflict
-        List<String> builtInNames = createBuiltInPresets().stream()
-                .map(SettingsPreset::name)
-                .toList();
-        if (builtInNames.contains(preset.name())) {
-            throw new IllegalArgumentException("Preset name conflicts with built-in preset: " + preset.name());
-        }
-
-        // Remove existing preset with same name and add new one
-        customPresets.removeIf(p -> p.name().equals(preset.name()));
-        customPresets.add(preset);
-
-        // Save to file
-        PresetContainer container = new PresetContainer(customPresets);
-        savePresetsAtomic(container, presetsPath);
 
         logger.info("Preset saved successfully: {}", preset.name());
     }
@@ -591,17 +614,18 @@ public class SettingsManager {
 
     /**
      * Saves presets atomically using temporary file and rename.
+     * Synchronized because the temporary file name is fixed.
      *
-     * @param container   Preset container to save
+     * @param value       presets value to save (container or JSON tree)
      * @param presetsPath Target file path
      * @throws IOException if save operation fails
      */
-    private void savePresetsAtomic(PresetContainer container, Path presetsPath) throws IOException {
+    private synchronized void savePresetsAtomic(Object value, Path presetsPath) throws IOException {
         // Write to temporary file first
         Path tempPath = Path.of(presetsPath.toString() + TEMP_SUFFIX);
 
         try {
-            JsonUtils.writeJsonFile(container, tempPath.toFile());
+            JsonUtils.writeJsonFile(value, tempPath.toFile());
 
             // Atomic rename
             Files.move(tempPath, presetsPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
@@ -621,7 +645,10 @@ public class SettingsManager {
 
     /**
      * Container class for JSON serialization of presets.
+     * Tolerates unknown properties so old-API reads of new-format
+     * {@link PresetsBySection} files do not fail.
      */
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private static class PresetContainer {
         public List<SettingsPreset> presets;
 
@@ -712,22 +739,23 @@ public class SettingsManager {
      * 
      * <p>
      * This method handles the conversion of legacy preset files to the new
-     * section-based
-     * structure. It categorizes each old preset by its output format's category and
-     * creates
-     * corresponding {@link SectionPreset} instances. Invalid or malformed presets
-     * are skipped
-     * with warnings logged.
+     * section-based structure. It accepts both legacy shapes: bare
+     * {@code List<SettingsPreset>} arrays and {@code {"presets":[...]}}
+     * containers. Section presets coexisting in the same file are preserved.
+     * Each old preset is categorized by its output format's category and
+     * converted to corresponding {@link SectionPreset} instances. Invalid or
+     * malformed presets are skipped with warnings logged.
      * </p>
      * 
      * <p>
      * <b>Migration Steps:</b>
      * </p>
      * <ol>
-     * <li>Load old {@code List<SettingsPreset>} from JSON</li>
+     * <li>Create backup of the old file with timestamp suffix
+     * (.old.TIMESTAMP.bak)</li>
+     * <li>Parse defensively: bare array or legacy container</li>
      * <li>Validate each preset and extract output format category</li>
      * <li>Create {@link SectionPreset} for each valid preset based on category</li>
-     * <li>Create backup of old file with timestamp suffix (.old.TIMESTAMP.bak)</li>
      * <li>Save new {@link PresetsBySection} structure atomically</li>
      * </ol>
      * 
@@ -737,7 +765,8 @@ public class SettingsManager {
      * <ul>
      * <li>Invalid presets are skipped with warnings</li>
      * <li>Presets without output format or category are skipped</li>
-     * <li>If backup fails, migration continues with warning</li>
+     * <li>If the backup attempt fails, migration is aborted before any
+     * destructive rewrite (fail-closed)</li>
      * <li>Returns empty {@link PresetsBySection} if migration fails completely</li>
      * </ul>
      * 
@@ -758,25 +787,43 @@ public class SettingsManager {
 
         logger.info("Starting migration from old preset format at: {}", presetsPath);
 
-        try {
-            // Load old format: List<SettingsPreset>
-            List<SettingsPreset> oldPresets = JsonUtils.readJsonFile(
-                    presetsPath.toFile(),
-                    new TypeReference<List<SettingsPreset>>() {
-                    });
+        // Backup before parsing so unreadable content is never lost.
+        // Fail closed: never rewrite the file when the backup attempt failed.
+        if (!backupPresetsFile(presetsPath)) {
+            logger.error("Aborting preset migration: backup failed for {}", presetsPath);
+            return PresetsBySection.empty();
+        }
 
-            if (oldPresets == null || oldPresets.isEmpty()) {
-                logger.warn("No old presets found to migrate");
+        try {
+            // Parse defensively: accept bare [...] arrays and {"presets":[...]} containers
+            JsonNode root = JsonUtils.getObjectMapper().readTree(presetsPath.toFile());
+            JsonNode legacyNode = root != null && root.isObject() ? root.get("presets") : root;
+
+            List<SettingsPreset> oldPresets = List.of();
+            if (legacyNode != null && legacyNode.isArray()) {
+                mapLegacyGlobalOutputFormats(legacyNode);
+                oldPresets = JsonUtils.getObjectMapper().convertValue(
+                        legacyNode, new TypeReference<List<SettingsPreset>>() {
+                        });
+            }
+
+            // Preserve section presets coexisting with legacy data (mixed files)
+            PresetsBySection existingSections = root != null && root.isObject()
+                    ? readExistingSections(root)
+                    : PresetsBySection.empty();
+
+            if (oldPresets.isEmpty() && existingSections.totalPresetCount() == 0) {
+                logger.warn("No recognizable presets found to migrate");
                 return PresetsBySection.empty();
             }
 
             logger.info("Loaded {} old presets for migration", oldPresets.size());
 
             // Categorize presets by output format category
-            List<SectionPreset> videoPresets = new ArrayList<>();
-            List<SectionPreset> audioPresets = new ArrayList<>();
-            List<SectionPreset> imagePresets = new ArrayList<>();
-            List<SectionPreset> documentPresets = new ArrayList<>();
+            List<SectionPreset> videoPresets = new ArrayList<>(existingSections.videoPresets());
+            List<SectionPreset> audioPresets = new ArrayList<>(existingSections.audioPresets());
+            List<SectionPreset> imagePresets = new ArrayList<>(existingSections.imagePresets());
+            List<SectionPreset> documentPresets = new ArrayList<>(existingSections.documentPresets());
 
             for (SettingsPreset oldPreset : oldPresets) {
                 if (!oldPreset.isValid()) {
@@ -865,7 +912,7 @@ public class SettingsManager {
                             }
                         }
                     }
-                } catch (Exception e) {
+                } catch (RuntimeException e) {
                     logger.error("Error migrating preset '{}': {}", oldPreset.name(), e.getMessage(), e);
                 }
             }
@@ -877,16 +924,6 @@ public class SettingsManager {
                     imagePresets,
                     documentPresets);
 
-            // Backup old file
-            try {
-                String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
-                Path backupPath = Path.of(presetsPath.toString() + ".old." + timestamp + ".bak");
-                Files.copy(presetsPath, backupPath, StandardCopyOption.REPLACE_EXISTING);
-                logger.info("Backed up old presets to: {}", backupPath);
-            } catch (IOException backupError) {
-                logger.warn("Failed to backup old presets file, continuing migration", backupError);
-            }
-
             // Save in new format
             savePresetsBySection(newPresets);
 
@@ -896,9 +933,144 @@ public class SettingsManager {
 
             return newPresets;
 
-        } catch (IOException e) {
+        } catch (IOException | IllegalArgumentException e) {
             logger.error("Failed to migrate old presets format", e);
             return PresetsBySection.empty();
+        }
+    }
+
+    /**
+     * Maps the legacy global {@code outputFormat} field onto the matching
+     * section settings before binding, so presets written by versions prior to
+     * the section-based architecture survive migration.
+     *
+     * <p>
+     * For each legacy preset whose {@code settings} node carries a textual
+     * {@code outputFormat} but lacks the corresponding section settings, a
+     * default-valid section settings object with that format is injected.
+     * Existing section settings are never overwritten. Presets with unknown
+     * formats are left untouched (they are skipped later by validation).
+     * </p>
+     *
+     * @param legacyPresets array node of legacy {@link SettingsPreset} objects
+     */
+    private void mapLegacyGlobalOutputFormats(JsonNode legacyPresets) {
+        for (JsonNode presetNode : legacyPresets) {
+            JsonNode settingsNode = presetNode.get("settings");
+            if (!(settingsNode instanceof ObjectNode settingsObject)) {
+                continue;
+            }
+
+            JsonNode formatNode = settingsObject.get("outputFormat");
+            if (formatNode == null || !formatNode.isTextual()) {
+                continue;
+            }
+
+            FileFormat legacyFormat;
+            try {
+                legacyFormat = FileFormat.valueOf(formatNode.asText());
+            } catch (IllegalArgumentException e) {
+                logger.warn("Cannot map legacy global outputFormat '{}': unknown format",
+                        formatNode.asText());
+                continue;
+            }
+
+            JsonNode sectionSettings;
+            switch (legacyFormat.getCategory()) {
+                case VIDEO -> sectionSettings = JsonUtils.getObjectMapper().valueToTree(
+                        VideoSettings.builder().outputFormat(legacyFormat).build());
+                case AUDIO -> sectionSettings = JsonUtils.getObjectMapper().valueToTree(
+                        AudioSettings.builder().outputFormat(legacyFormat).build());
+                case IMAGE -> sectionSettings = JsonUtils.getObjectMapper().valueToTree(
+                        ImageSettings.builder().outputFormat(legacyFormat).build());
+                case DOCUMENT -> sectionSettings = JsonUtils.getObjectMapper().valueToTree(
+                        DocumentSettings.builder().outputFormat(legacyFormat).build());
+                default -> {
+                    continue;
+                }
+            }
+
+            String sectionField = sectionFieldName(legacyFormat.getCategory());
+            JsonNode existingSection = settingsObject.get(sectionField);
+            if (existingSection == null || existingSection.isNull()) {
+                settingsObject.set(sectionField, sectionSettings);
+                logger.debug("Mapped legacy global outputFormat '{}' to {} for migration",
+                        legacyFormat, sectionField);
+            }
+        }
+    }
+
+    /**
+     * Gets the JSON field name of the section settings for a category.
+     *
+     * @param category the format category
+     * @return the settings field name (e.g. {@code videoSettings})
+     */
+    private String sectionFieldName(FormatCategory category) {
+        return switch (category) {
+            case VIDEO -> "videoSettings";
+            case AUDIO -> "audioSettings";
+            case IMAGE -> "imageSettings";
+            case DOCUMENT -> "documentSettings";
+            default -> "settings";
+        };
+    }
+
+    /**
+     * Backs up a presets file with a timestamped .old.TIMESTAMP.bak suffix.
+     *
+     * @param presetsPath path to the presets file
+     * @return true if a backup was created or there is nothing to back up,
+     *         false if the backup attempt failed
+     */
+    private boolean backupPresetsFile(Path presetsPath) {
+        if (!Files.exists(presetsPath)) {
+            return true;
+        }
+        try {
+            String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSSSSSSSS"));
+            Path backupPath = Path.of(presetsPath.toString() + ".old." + timestamp + ".bak");
+            Files.copy(presetsPath, backupPath, StandardCopyOption.REPLACE_EXISTING);
+            logger.info("Backed up old presets to: {}", backupPath);
+            return true;
+        } catch (IOException e) {
+            logger.error("Failed to backup old presets file: {}", presetsPath, e);
+            return false;
+        }
+    }
+
+    /**
+     * Extracts per-category section presets from a JSON object node.
+     * Unreadable sections are skipped with warnings.
+     *
+     * @param root object node possibly containing section preset arrays
+     * @return presets organized by section, empty where absent or unreadable
+     */
+    private PresetsBySection readExistingSections(JsonNode root) {
+        return new PresetsBySection(
+                readSectionPresetList(root.get("videoPresets")),
+                readSectionPresetList(root.get("audioPresets")),
+                readSectionPresetList(root.get("imagePresets")),
+                readSectionPresetList(root.get("documentPresets")));
+    }
+
+    /**
+     * Converts a JSON array node into a list of section presets.
+     *
+     * @param node array node, or null/non-array for an empty list
+     * @return converted list, or empty list if the node is unreadable
+     */
+    private List<SectionPreset> readSectionPresetList(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return new ArrayList<>();
+        }
+        try {
+            return JsonUtils.getObjectMapper().convertValue(
+                    node, new TypeReference<List<SectionPreset>>() {
+                    });
+        } catch (IllegalArgumentException e) {
+            logger.warn("Skipping unreadable section presets during migration: {}", e.getMessage());
+            return new ArrayList<>();
         }
     }
 
@@ -920,7 +1092,7 @@ public class SettingsManager {
      * @param presets The presets to save
      * @throws IOException if write operation fails
      */
-    private void savePresetsBySection(PresetsBySection presets) throws IOException {
+    private synchronized void savePresetsBySection(PresetsBySection presets) throws IOException {
         Path configDir = configurationManager.getConfigDirectory();
         Path presetsPath = configDir.resolve("presets.json");
         Path tempPath = configDir.resolve("presets.json.tmp");

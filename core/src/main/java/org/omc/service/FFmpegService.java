@@ -11,6 +11,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
@@ -21,6 +22,7 @@ import org.omc.exception.ToolExecutionException;
 import org.omc.model.AudioSettings;
 import org.omc.model.ConversionResult;
 import org.omc.model.ConversionTool;
+import org.omc.model.FileFormat;
 import org.omc.model.ImageSettings;
 import org.omc.model.Resolution;
 import org.omc.model.VideoSettings;
@@ -49,6 +51,16 @@ public class FFmpegService {
 
     /** Message appended when output is truncated due to size limit */
     private static final String TRUNCATION_MESSAGE = "\n[Output truncated - exceeded 1MB limit]\n";
+
+    /**
+     * Target video formats whose containers cannot reliably hold audio codecs
+     * that are common in other containers (e.g. MP4(AAC)→WebM fails with
+     * "Could not find tag for codec aac"). For these targets the audio stream
+     * is transcoded to the container-native codec mapped here. All other
+     * targets keep "-c:a copy" to preserve source audio quality.
+     */
+    private static final Map<FileFormat, String> CONTAINER_NATIVE_AUDIO_CODECS = Map.of(
+            FileFormat.WEBM, "libopus");
 
     private final Path ffmpegPath;
     private final Path ffprobePath;
@@ -156,11 +168,12 @@ public class FFmpegService {
             command.add(String.valueOf(settings.frameRate()));
         }
 
-        // Audio codec (copy by default)
+        // Audio codec: transcode when the target container cannot safely hold
+        // common source audio codecs; copy otherwise to preserve quality
         command.add("-c:a");
-        command.add("copy");
-        command.add("-b:a");
-        command.add("192k");
+        command.add(resolveAudioCodec(settings.outputFormat()));
+        // No "-b:a": it is ignored with stream copy and VideoSettings carries
+        // no explicit audio bitrate
 
         // Overwrite output file
         command.add("-y");
@@ -388,7 +401,12 @@ public class FFmpegService {
     /**
      * Builds FFmpeg video filter chain with resolution scaling and aspect ratio.
      * 
-     * Filter order: scale → setdar → pad
+     * Filter order: scale → pad → setdar
+     * 
+     * setdar must run LAST: it derives the sample aspect ratio from the frame
+     * dimensions it receives, so it must see the final post-padding dimensions.
+     * Running setdar before pad computes SAR for pre-padding dimensions and the
+     * padded output ends up with a distorted display aspect ratio.
      * 
      * Requirements: REQ-VID-2.2, REQ-VID-2.3
      * 
@@ -404,18 +422,18 @@ public class FFmpegService {
             filters.add(String.format("scale=%d:%d", res.getWidth(), res.getHeight()));
         }
 
-        // 2. Aspect ratio filter (if not KEEP_ORIGINAL)
+        // 2. Aspect ratio filters (if not KEEP_ORIGINAL)
         if (settings.aspectRatio() != null && !settings.aspectRatio().isOriginal()) {
             double targetRatio = settings.aspectRatio().getRatio();
-
-            // setdar: Set Display Aspect Ratio metadata
-            filters.add(String.format("setdar=%s", formatRatio(targetRatio)));
 
             // pad: Add letterboxing/pillarboxing if needed
             String padFilter = buildPaddingFilter(targetRatio, settings.resolution());
             if (!padFilter.isEmpty()) {
                 filters.add(padFilter);
             }
+
+            // setdar: Set Display Aspect Ratio metadata on the final dimensions
+            filters.add(String.format("setdar=%s", formatRatio(targetRatio)));
         }
 
         return String.join(",", filters);
@@ -1099,6 +1117,25 @@ public class FFmpegService {
             case "copy" -> "copy"; // Requirement REQ-AUD-1.1: Stream copy without re-encoding
             default -> codec; // Pass through unknown codecs
         };
+    }
+
+    /**
+     * Resolves the audio codec for a video conversion based on the target
+     * output format's container compatibility.
+     * 
+     * Returns a container-native codec (forcing a transcode) when the target
+     * container cannot safely hold audio codecs common in other containers,
+     * e.g. WebM has no AAC support. Returns "copy" for all other targets to
+     * preserve source audio quality.
+     * 
+     * @param outputFormat target output format (may be null)
+     * @return FFmpeg audio codec identifier
+     */
+    private String resolveAudioCodec(FileFormat outputFormat) {
+        if (outputFormat == null) {
+            return "copy";
+        }
+        return CONTAINER_NATIVE_AUDIO_CODECS.getOrDefault(outputFormat, "copy");
     }
 
     /**

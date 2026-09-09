@@ -70,6 +70,24 @@ public class SettingsDialogJavaGi {
     private static final String[] VIDEO_PRESETS = { "ultrafast", "superfast", "veryfast", "faster", "fast", "medium",
             "slow", "slower", "veryslow" };
 
+    /**
+     * Returns the native byte length of a UI definition string as marshaled to
+     * GtkBuilder.
+     *
+     * <p>
+     * java-gi marshals Java strings to NUL-terminated UTF-8 native buffers, so
+     * the length GtkBuilder expects is the UTF-8 byte count — NOT
+     * {@code String.length()}, which counts UTF-16 chars and truncates the XML
+     * whenever the UI definition contains multi-byte characters.
+     * </p>
+     *
+     * @param ui the UI definition string
+     * @return the length in bytes to pass to GtkBuilder
+     */
+    static long uiByteLength(String ui) {
+        return ui.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+    }
+
     // UI Components from Builder
     private GtkBuilder builder;
 
@@ -265,11 +283,11 @@ public class SettingsDialogJavaGi {
             // Read UI content
             String uiContent;
             try (uiStream) {
-                uiContent = new String(uiStream.readAllBytes());
+                uiContent = new String(uiStream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
             }
 
             // Create builder and load from string
-            builder = GtkBuilder.fromString(uiContent, uiContent.length());
+            builder = GtkBuilder.fromString(uiContent, uiByteLength(uiContent));
 
             // Get the dialog from builder - use it directly instead of trying to reparent
             // widgets

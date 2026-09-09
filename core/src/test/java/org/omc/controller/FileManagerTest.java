@@ -435,35 +435,95 @@ class FileManagerTest {
 
     // 11. Thread safety - concurrent adds/removes
     @Test
-    void fileManager_ShouldBeThreadSafeForConcurrentOperations() throws InterruptedException {
+    void fileManager_ShouldBeThreadSafeForConcurrentOperations() throws Exception {
+        when(validationEngine.validateFile(any())).thenReturn(ValidationResult.success());
+        when(fileHandler.detectFormat(any())).thenReturn(FileFormat.MP4);
+        when(fileHandler.getFileSize(any())).thenReturn(1000L);
+
         ExecutorService executor = Executors.newFixedThreadPool(10);
-        CountDownLatch latch = new CountDownLatch(1);
+        try {
+            CountDownLatch start = new CountDownLatch(1);
+            List<Future<?>> results = new ArrayList<>();
 
-        Runnable addTask = () -> {
-            try {
-                latch.await();
-                for (int i = 0; i < 10; i++) {
-                    Path path = Paths.get("file" + Thread.currentThread().getName() + "_" + i + ".mp4");
-                    when(validationEngine.validateFile(path)).thenReturn(ValidationResult.success());
-                    when(fileHandler.detectFormat(path)).thenReturn(FileFormat.MP4);
-                    when(fileHandler.getFileSize(path)).thenReturn(1000L);
-                    fileManager.addFiles(List.of(path));
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } catch (Exception e) {
-                throw new RuntimeException(e);
+            for (int t = 0; t < 10; t++) {
+                results.add(executor.submit(() -> {
+                    start.await();
+                    for (int i = 0; i < 10; i++) {
+                        Path path = Paths.get("file" + Thread.currentThread().getName() + "_" + i + ".mp4");
+                        fileManager.addFiles(List.of(path));
+                    }
+                    return null;
+                }));
             }
-        };
 
-        for (int i = 0; i < 10; i++) {
-            executor.submit(addTask);
+            start.countDown();
+            executor.shutdown();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+
+            for (Future<?> result : results) {
+                result.get(1, TimeUnit.SECONDS);
+            }
+            assertEquals(100, fileManager.getFileCount());
+        } finally {
+            executor.shutdownNow();
         }
+    }
 
-        latch.countDown();
-        executor.shutdown();
-        assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+    @Test
+    void updateFile_ShouldBeAtomicWithConcurrentRemoval() throws Exception {
+        when(validationEngine.validateFile(any())).thenReturn(ValidationResult.success());
+        when(fileHandler.detectFormat(any())).thenReturn(FileFormat.MP4);
+        when(fileHandler.getFileSize(any())).thenReturn(1000L);
 
-        assertTrue(fileManager.getFileCount() > 0);
+        List<Path> paths = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            paths.add(Paths.get("race" + i + ".mp4"));
+        }
+        List<ConversionFile> added = fileManager.addFiles(paths);
+        assertEquals(100, added.size());
+
+        List<String> idsToRemove = added.subList(0, 50).stream().map(ConversionFile::id).toList();
+        List<ConversionFile> survivors = List.copyOf(added.subList(50, 100));
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            CountDownLatch start = new CountDownLatch(1);
+
+            Future<?> remover = executor.submit(() -> {
+                start.await();
+                for (String id : idsToRemove) {
+                    fileManager.removeFiles(List.of(id));
+                }
+                return null;
+            });
+
+            Future<?> updater = executor.submit(() -> {
+                start.await();
+                for (int round = 0; round < 200; round++) {
+                    for (ConversionFile file : survivors) {
+                        fileManager.updateFile(file.withStatus(ConversionStatus.COMPLETED));
+                    }
+                }
+                return null;
+            });
+
+            start.countDown();
+            executor.shutdown();
+            assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+            remover.get(5, TimeUnit.SECONDS);
+            updater.get(5, TimeUnit.SECONDS);
+
+            assertEquals(50, fileManager.getFileCount());
+            List<ConversionFile> remaining = fileManager.getFiles();
+            assertEquals(50, remaining.stream().map(ConversionFile::id).distinct().count());
+            for (ConversionFile survivor : survivors) {
+                Optional<ConversionFile> retrieved = fileManager.getFile(survivor.id());
+                assertTrue(retrieved.isPresent(), "Survivor lost from list: " + survivor.id());
+                assertEquals(ConversionStatus.COMPLETED, retrieved.get().status(),
+                        "Newest update lost for: " + survivor.id());
+            }
+        } finally {
+            executor.shutdownNow();
+        }
     }
 }

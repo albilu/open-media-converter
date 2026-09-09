@@ -63,6 +63,8 @@ public class ConversionEngine implements ProcessRegistry {
     private static final Logger logger = LoggerFactory.getLogger(ConversionEngine.class);
     private static final long DISK_SPACE_THRESHOLD_BYTES = 500L * 1024 * 1024; // 500 MB
     private static final long DISK_SPACE_CHECK_INTERVAL_MS = 5000; // Check every 5 seconds
+    private static final long CANCEL_DRAIN_POLL_MS = 10; // Poll interval while waiting for tasks to drain
+    private static final long CANCEL_DRAIN_TIMEOUT_MS = 2000; // Must exceed the 1s pause-wait poll worst case
 
     private final ToolManager toolManager;
     private final ValidationEngine validationEngine;
@@ -78,7 +80,9 @@ public class ConversionEngine implements ProcessRegistry {
     private final Map<String, ConversionResult> conversionResults; // Store conversion results (REQ-FL-2.2)
     private final AtomicBoolean paused;
     private final AtomicBoolean shuttingDown;
+    private final AtomicBoolean cancelRequested;
     private final AtomicBoolean diskSpacePaused;
+    private final AtomicInteger inFlightTasks;
     private volatile Path currentOutputDirectory;
 
     // Event handlers
@@ -142,6 +146,8 @@ public class ConversionEngine implements ProcessRegistry {
         this.conversionResults = new ConcurrentHashMap<>();
         this.paused = new AtomicBoolean(false);
         this.shuttingDown = new AtomicBoolean(false);
+        this.cancelRequested = new AtomicBoolean(false);
+        this.inFlightTasks = new AtomicInteger(0);
         this.diskSpacePaused = new AtomicBoolean(false);
         this.currentOutputDirectory = null;
 
@@ -171,6 +177,9 @@ public class ConversionEngine implements ProcessRegistry {
             throw new IllegalStateException("ConversionEngine is shutting down");
         }
 
+        // New batch: clear any stale cancel request from a previous run
+        cancelRequested.set(false);
+
         logger.info("Starting batch conversion of {} files", files.size());
         Instant batchStart = Instant.now();
 
@@ -188,15 +197,28 @@ public class ConversionEngine implements ProcessRegistry {
         }
         progressEngine.startBatch(fileIds, fileSizes);
 
-        // Submit all files for conversion
+        // Submit all files for conversion. Uses the internal submitter (not
+        // convertSingle) so a cancel arriving mid-loop is never cleared by the
+        // remaining submissions.
         List<CompletableFuture<ConversionResult>> futures = new ArrayList<>();
         for (ConversionFile file : files) {
-            CompletableFuture<ConversionResult> future = convertSingle(file, settings);
+            CompletableFuture<ConversionResult> future = submitConversion(file, settings);
             futures.add(future);
         }
 
-        // Combine all futures and create batch result
+        // Combine all futures and create batch result. allOf completes
+        // exceptionally when any constituent future was cancelled directly by
+        // cancelConversion(); handle() neutralizes that so the aggregation
+        // below runs and translates each cancelled future into a cancelled
+        // result instead of failing the whole batch future.
         return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .handle((v, ex) -> {
+                    if (ex != null) {
+                        logger.debug("Batch aggregation proceeding after aggregate completion exception: {}",
+                                ex.toString());
+                    }
+                    return v;
+                })
                 .thenApply(v -> {
                     List<ConversionResult> results = new ArrayList<>();
 
@@ -208,6 +230,19 @@ public class ConversionEngine implements ProcessRegistry {
 
                         try {
                             results.add(future.get());
+                        } catch (CancellationException e) {
+                            // The future was cancelled directly by cancelConversion()
+                            // instead of completing through a cancellation gate (e.g. the
+                            // task was queued or blocked in a tool when cancelled).
+                            // Record a cancelled result so the batch future still completes
+                            // normally and the file is not lost from the batch results.
+                            logger.info("Conversion future was cancelled for file: {}", file.fileName());
+                            results.add(ConversionResult.cancelled(
+                                    file.id(),
+                                    "", // No tool output available for a cancelled future
+                                    Duration.ZERO,
+                                    file.size(),
+                                    ConversionTool.FFMPEG));
                         } catch (InterruptedException | ExecutionException e) {
                             // Requirement REQ-004.2: Handle exceptional future completion
                             // This can happen if executor is shut down or task submission fails
@@ -255,7 +290,14 @@ public class ConversionEngine implements ProcessRegistry {
     /**
      * Converts a single file with the specified settings.
      * Requirement REQ-004.1: Tool selection and single file conversion.
-     * 
+     *
+     * <p>
+     * A leftover cancel request from a previous run is cleared only when it is
+     * stale: no conversions are active and none of the cancelled run's tasks
+     * are still executing. Otherwise the request stands and this submission
+     * completes as cancelled.
+     * </p>
+     *
      * @param file     the file to convert
      * @param settings the conversion settings
      * @return a CompletableFuture that completes with the conversion result
@@ -272,6 +314,35 @@ public class ConversionEngine implements ProcessRegistry {
             throw new IllegalStateException("ConversionEngine is shutting down");
         }
 
+        // New standalone submission: a pending cancel request is stale only
+        // once the cancelled run has fully drained (no active conversions and
+        // no conversion tasks still executing). While tasks from that run are
+        // still in flight (e.g. blocked inside a tool) the request stands, so
+        // this submission is cancelled instead of clearing the flag - clearing
+        // it unconditionally would let a cancel that interleaves with an
+        // active batch be undone by a later submission.
+        if (cancelRequested.get() && activeConversions.isEmpty() && waitForCancelDrain()) {
+            cancelRequested.set(false);
+        }
+
+        return submitConversion(file, settings);
+    }
+
+    /**
+     * Submits a conversion task without modifying the cancel flag.
+     * Used by {@link #convertSingle} (after stale-cancel handling) and by
+     * {@link #convertBatch} (which resets the cancel flag once before its
+     * submission loop, so a cancel arriving mid-loop is never cleared by the
+     * remaining submissions).
+     *
+     * @param file     the file to convert
+     * @param settings the conversion settings
+     * @return a CompletableFuture that completes with the conversion result
+     */
+    private CompletableFuture<ConversionResult> submitConversion(
+            ConversionFile file,
+            ConversionSettings settings) {
+
         String fileId = file.id();
         logger.debug("Submitting conversion for file: {} ({})", file.fileName(), fileId);
 
@@ -281,50 +352,74 @@ public class ConversionEngine implements ProcessRegistry {
 
         CompletableFuture<ConversionResult> future = CompletableFuture.supplyAsync(
                 () -> {
-                    // Wait if paused
-                    waitIfPaused();
-
-                    // Check if cancelled during pause
-                    if (shuttingDown.get()) {
-                        logger.info("Conversion cancelled during pause: {}", file.fileName());
-                        return ConversionResult.failure(
-                                fileId,
-                                "Conversion cancelled",
-                                "", // No tool output for cancellation during pause
-                                Duration.ZERO,
-                                file.size(),
-                                ConversionTool.FFMPEG);
-                    }
-
-                    // Resolve output format for logging
-                    FormatCategory category = file.format().getCategory();
-                    Object resolvedSettings = resolveSettingsForFile(file, settings);
-                    FileFormat outputFormat = getOutputFormatFromSettings(resolvedSettings, category);
-
-                    logger.info("Starting conversion: {} -> {}",
-                            file.fileName(), outputFormat);
-
-                    // Requirement REQ-004.1: Validate conversion request
+                    inFlightTasks.incrementAndGet();
                     try {
-                        return performConversion(file, settings);
-                    } catch (CancellationException e) {
-                        // User-initiated cancellation - log at info level, not error
-                        logger.info("Conversion cancelled: {}", file.fileName());
-                        return ConversionResult.cancelled(
-                                fileId,
-                                "", // No tool output for cancelled conversion
-                                Duration.ZERO,
-                                file.size(),
-                                ConversionTool.FFMPEG);
-                    } catch (Exception e) {
-                        logger.error("Conversion failed with exception: {}", file.fileName(), e);
-                        return ConversionResult.failure(
-                                fileId,
-                                "Conversion failed: " + e.getMessage(),
-                                "", // No tool output for exception
-                                Duration.ZERO,
-                                file.size(),
-                                ConversionTool.FFMPEG);
+                        // Abort if cancellation was requested before the task started
+                        if (cancelRequested.get()) {
+                            logger.info("Conversion cancelled before start: {}", file.fileName());
+                            // Mark the file CANCELLED in progress tracking; startTracking
+                            // never runs for this file, so it would leak as PENDING
+                            progressEngine.cancelTracking(fileId);
+                            return ConversionResult.cancelled(
+                                    fileId,
+                                    "", // No tool output for cancelled conversion
+                                    Duration.ZERO,
+                                    file.size(),
+                                    ConversionTool.FFMPEG);
+                        }
+
+                        // Wait if paused
+                        waitIfPaused();
+
+                        // Check if cancelled during pause
+                        if (shuttingDown.get() || cancelRequested.get()) {
+                            logger.info("Conversion cancelled during pause: {}", file.fileName());
+                            // Mark the file CANCELLED in progress tracking; startTracking
+                            // never runs for this file, so it would leak as PENDING
+                            progressEngine.cancelTracking(fileId);
+                            return ConversionResult.cancelled(
+                                    fileId,
+                                    "", // No tool output for cancellation during pause
+                                    Duration.ZERO,
+                                    file.size(),
+                                    ConversionTool.FFMPEG);
+                        }
+
+                        // Resolve output format for logging
+                        FormatCategory category = file.format().getCategory();
+                        Object resolvedSettings = resolveSettingsForFile(file, settings);
+                        FileFormat outputFormat = getOutputFormatFromSettings(resolvedSettings, category);
+
+                        logger.info("Starting conversion: {} -> {}",
+                                file.fileName(), outputFormat);
+
+                        // Requirement REQ-004.1: Validate conversion request
+                        try {
+                            return performConversion(file, settings);
+                        } catch (CancellationException e) {
+                            // User-initiated cancellation - log at info level, not error
+                            logger.info("Conversion cancelled: {}", file.fileName());
+                            // Mark the file CANCELLED in progress tracking (the tracking
+                            // state would otherwise leak as PENDING/IN_PROGRESS)
+                            progressEngine.cancelTracking(fileId);
+                            return ConversionResult.cancelled(
+                                    fileId,
+                                    "", // No tool output for cancelled conversion
+                                    Duration.ZERO,
+                                    file.size(),
+                                    ConversionTool.FFMPEG);
+                        } catch (Exception e) {
+                            logger.error("Conversion failed with exception: {}", file.fileName(), e);
+                            return ConversionResult.failure(
+                                    fileId,
+                                    "Conversion failed: " + e.getMessage(),
+                                    "", // No tool output for exception
+                                    Duration.ZERO,
+                                    file.size(),
+                                    ConversionTool.FFMPEG);
+                        }
+                    } finally {
+                        inFlightTasks.decrementAndGet();
                     }
                 },
                 executorService);
@@ -482,7 +577,11 @@ public class ConversionEngine implements ProcessRegistry {
         logger.info("Cancelling all active conversions - {} active, {} running processes",
                 activeConversions.size(), activeProcesses.size());
 
-        // Resume if paused to allow cancellation to proceed
+        // Request cooperative cancellation first so paused and queued tasks abort
+        // instead of proceeding into performConversion
+        cancelRequested.set(true);
+
+        // Resume if paused so paused tasks wake, observe the cancel request and abort
         if (paused.get()) {
             resumeConversion();
         }
@@ -498,7 +597,9 @@ public class ConversionEngine implements ProcessRegistry {
         }
         activeProcesses.clear();
 
-        // Then cancel all active futures (this interrupts threads)
+        // Then cancel all active futures. Note: CompletableFuture.cancel does NOT
+        // interrupt worker threads; running tasks abort cooperatively by observing
+        // cancelRequested.
         for (Map.Entry<String, CompletableFuture<ConversionResult>> entry : activeConversions.entrySet()) {
             CompletableFuture<ConversionResult> future = entry.getValue();
             if (!future.isDone()) {
@@ -885,7 +986,11 @@ public class ConversionEngine implements ProcessRegistry {
                 // Step 11.5: Delete original file if requested
                 // Requirement REQ-GEN-1.2: Delete original file after successful conversion
                 if (settings.deleteOriginalFile()) {
-                    deleteOriginalFile(file.path(), file.fileName());
+                    if (cancelRequested.get()) {
+                        logger.info("Skipping original file deletion after cancellation: {}", file.fileName());
+                    } else {
+                        deleteOriginalFile(file.path(), file.fileName());
+                    }
                 }
             } else {
                 // Conversion failed - temp file will be cleaned up in finally block
@@ -965,8 +1070,10 @@ public class ConversionEngine implements ProcessRegistry {
         ConversionResult lastResult = null;
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            // Check for cancellation before each attempt
-            if (Thread.currentThread().isInterrupted()) {
+            // Check for cancellation before each attempt. The cancel flag matters
+            // for the retry case: a cancel during the 500ms retry sleep must not
+            // spawn a second (orphan) tool process.
+            if (Thread.currentThread().isInterrupted() || cancelRequested.get()) {
                 logger.info("Conversion cancelled before attempt {} for {}", attempt, file.fileName());
                 return ConversionResult.cancelled(
                         fileId,
@@ -1230,13 +1337,14 @@ public class ConversionEngine implements ProcessRegistry {
     /**
      * Waits while the engine is paused.
      * This is called by conversion tasks before starting work.
+     * Returns early if the engine is shutting down or cancellation is requested.
      */
     private void waitIfPaused() {
-        while (paused.get() && !shuttingDown.get()) {
+        while (paused.get() && !shuttingDown.get() && !cancelRequested.get()) {
             synchronized (paused) {
                 try {
                     logger.debug("Conversion task waiting - engine is paused");
-                    paused.wait(1000); // Wake up periodically to check shutdown
+                    paused.wait(1000); // Wake up periodically to check shutdown/cancel
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     logger.warn("Conversion task interrupted while paused");
@@ -1244,6 +1352,31 @@ public class ConversionEngine implements ProcessRegistry {
                 }
             }
         }
+    }
+
+    /**
+     * Waits briefly for all in-flight conversion tasks to finish.
+     * Used to decide whether a pending cancel request is stale (the cancelled
+     * run has fully drained) or still active (tasks from that run are still
+     * executing, e.g. blocked inside a tool).
+     *
+     * @return true if no conversion tasks are in flight; false if the drain
+     *         timeout was reached or the waiting thread was interrupted
+     */
+    private boolean waitForCancelDrain() {
+        long deadline = System.currentTimeMillis() + CANCEL_DRAIN_TIMEOUT_MS;
+        while (inFlightTasks.get() > 0) {
+            if (System.currentTimeMillis() >= deadline) {
+                return false;
+            }
+            try {
+                Thread.sleep(CANCEL_DRAIN_POLL_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

@@ -656,10 +656,18 @@ public class FileListView {
         // Get the selection bitset from MultiSelection
         var selection = selectionModel.getSelection();
 
-        // Iterate through all files and check if selected
-        for (int i = 0; i < files.size(); i++) {
+        // Selection positions refer to the selection model's own (visual/sorted)
+        // order, which differs from the insertion-ordered files list whenever the
+        // GTK model is sorted (e.g. after a column header click). Resolve each
+        // position through the model's item at that position instead of files.get(i).
+        int nItems = selectionModel.getNItems();
+        for (int i = 0; i < nItems; i++) {
             if (selection.contains(i)) {
-                selectedIds.add(files.get(i).id());
+                var item = selectionModel.getItem(i);
+                if (item instanceof org.gnome.gtk.StringObject stringObject
+                        && stringObject.getString() != null) {
+                    selectedIds.add(stringObject.getString());
+                }
             }
         }
 

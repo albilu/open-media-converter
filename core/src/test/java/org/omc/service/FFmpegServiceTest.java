@@ -23,6 +23,7 @@ import org.omc.exception.ToolExecutionException;
 import org.omc.model.AspectRatio;
 import org.omc.model.AudioSettings;
 import org.omc.model.ConversionResult;
+import org.omc.model.FileFormat;
 import org.omc.model.ImageSettings;
 import org.omc.model.ResizeMode;
 import org.omc.model.Resolution;
@@ -1838,7 +1839,7 @@ class FFmpegServiceTest {
 
         /**
          * Test aspect ratio filter chain for 16:9 ratio.
-         * Verifies scale → setdar=16/9 → pad filter chain.
+         * Verifies scale → pad → setdar=16/9 filter chain.
          * Requirements: REQ-VID-2.2, REQ-VID-2.3
          */
         @Test
@@ -1964,6 +1965,81 @@ class FFmpegServiceTest {
                                 "Filter chain should contain scale filter");
                 assertFalse(filterChain.contains("setdar"),
                                 "Filter chain should NOT contain setdar when keeping original aspect ratio");
+                assertFalse(filterChain.contains("pad="),
+                                "Filter chain should NOT contain pad when keeping original aspect ratio");
+        }
+
+        // ========== Aspect Ratio Filter Order Tests (H1) ==========
+
+        /**
+         * Test that pad comes before setdar in the filter chain when a target
+         * resolution is specified.
+         * setdar derives the sample aspect ratio from the frame dimensions it
+         * sees; if pad runs after setdar, the enlarged frame dimensions break
+         * the final display aspect ratio (e.g. 640x480 → 16:9 ends up ~2.97:1).
+         * Requirements: REQ-VID-2.2, REQ-VID-2.3
+         */
+        @Test
+        void testAspectRatioFilterChain_PadBeforeSetdar_WithResolution() throws Exception {
+                VideoSettings settings = VideoSettings.builder()
+                                .codec("H264")
+                                .crf(23)
+                                .resolution(new Resolution(640, 480))
+                                .aspectRatio(AspectRatio.RATIO_16_9)
+                                .build();
+
+                List<String> command = service.buildVideoCommand(
+                                inputPath,
+                                outputPath,
+                                settings);
+
+                int vfIndex = command.indexOf("-vf");
+                assertTrue(vfIndex >= 0, "Command should contain -vf flag");
+
+                String filterChain = command.get(vfIndex + 1);
+
+                int scaleIndex = filterChain.indexOf("scale=");
+                int padIndex = filterChain.indexOf("pad=");
+                int setdarIndex = filterChain.indexOf("setdar=");
+
+                assertTrue(scaleIndex >= 0, "Filter chain should contain scale filter");
+                assertTrue(padIndex >= 0, "Filter chain should contain pad filter for 4:3 → 16:9 change");
+                assertTrue(setdarIndex >= 0, "Filter chain should contain setdar filter");
+
+                assertTrue(scaleIndex < padIndex, "scale should come before pad");
+                assertTrue(padIndex < setdarIndex, "pad must come before setdar so DAR is set on final dimensions");
+        }
+
+        /**
+         * Test that pad comes before setdar when no resolution is specified
+         * (dynamic padding via iw/ih expressions).
+         * Requirements: REQ-VID-2.2, REQ-VID-2.3
+         */
+        @Test
+        void testAspectRatioFilterChain_PadBeforeSetdar_WithoutResolution() throws Exception {
+                VideoSettings settings = VideoSettings.builder()
+                                .codec("H264")
+                                .crf(23)
+                                .aspectRatio(AspectRatio.RATIO_16_9)
+                                .build();
+
+                List<String> command = service.buildVideoCommand(
+                                inputPath,
+                                outputPath,
+                                settings);
+
+                int vfIndex = command.indexOf("-vf");
+                assertTrue(vfIndex >= 0, "Command should contain -vf flag");
+
+                String filterChain = command.get(vfIndex + 1);
+
+                int padIndex = filterChain.indexOf("pad=");
+                int setdarIndex = filterChain.indexOf("setdar=");
+
+                assertTrue(padIndex >= 0, "Filter chain should contain dynamic pad filter");
+                assertTrue(setdarIndex >= 0, "Filter chain should contain setdar filter");
+
+                assertTrue(padIndex < setdarIndex, "pad must come before setdar so DAR is set on final dimensions");
         }
 
         // ========== Audio Copy Codec Tests ==========
@@ -2046,6 +2122,63 @@ class FFmpegServiceTest {
                                 "Non-copy codec should include channels flag");
                 assertTrue(command.contains("-q:a"),
                                 "MP3 codec should include quality flag");
+        }
+
+        // ========== Video Audio Codec Compatibility Tests (H2) ==========
+
+        /**
+         * Test that converting to WebM does not blindly copy the audio stream.
+         * The WebM container cannot hold common source codecs such as AAC
+         * (MP4→WebM fails with "Could not find tag for codec aac"), so audio
+         * must be transcoded to a container-native codec (libopus).
+         */
+        @Test
+        void testBuildVideoCommand_ToWebM_TranscodesAudioToLibOpus() throws Exception {
+                Path webmOutput = tempDir.resolve("output.webm");
+                VideoSettings settings = VideoSettings.builder()
+                                .codec("VP9")
+                                .crf(31)
+                                .outputFormat(FileFormat.WEBM)
+                                .build();
+
+                List<String> command = service.buildVideoCommand(
+                                inputPath,
+                                webmOutput,
+                                settings);
+
+                int codecIndex = command.indexOf("-c:a");
+                assertTrue(codecIndex >= 0, "Video command should contain -c:a flag");
+                assertEquals("libopus", command.get(codecIndex + 1),
+                                "WebM target must transcode audio to container-native libopus");
+                assertFalse(command.contains("-b:a"),
+                                "-b:a must not be emitted without an explicit audio bitrate");
+        }
+
+        /**
+         * Test that same-container video conversion keeps audio stream copy.
+         * Copy preserves quality for targets (like MP4) that accept common
+         * source codecs, and "-b:a" must never accompany "-c:a copy" since it
+         * is ignored with stream copy.
+         */
+        @Test
+        void testBuildVideoCommand_SameContainer_KeepsAudioCopyWithoutBitrateFlag() throws Exception {
+                VideoSettings settings = VideoSettings.builder()
+                                .codec("H264")
+                                .crf(23)
+                                .outputFormat(FileFormat.MP4)
+                                .build();
+
+                List<String> command = service.buildVideoCommand(
+                                inputPath,
+                                outputPath,
+                                settings);
+
+                int codecIndex = command.indexOf("-c:a");
+                assertTrue(codecIndex >= 0, "Video command should contain -c:a flag");
+                assertEquals("copy", command.get(codecIndex + 1),
+                                "MP4 target should keep audio stream copy to preserve quality");
+                assertFalse(command.contains("-b:a"),
+                                "-b:a is a dead argument next to -c:a copy and must not be emitted");
         }
 
         // ========== Multi-Threading Flag Tests ==========

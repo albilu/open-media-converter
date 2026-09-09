@@ -40,7 +40,10 @@ import org.slf4j.LoggerFactory;
  * detection,
  * and event notifications.
  * 
- * Thread-safe using CopyOnWriteArrayList for the file list.
+ * Thread-safe using CopyOnWriteArrayList for the file list. Structural
+ * mutations (remove/clear) and positional replacement (updateFile) are
+ * mutually excluded via the list monitor; append-only additions rely on
+ * CopyOnWriteArrayList's atomic add.
  * 
  * Requirements: REQ-002.1, REQ-002.2
  */
@@ -258,23 +261,25 @@ public class FileManager {
         Set<String> idsToRemove = new HashSet<>(fileIds);
         List<ConversionFile> removedFiles = new ArrayList<>();
 
-        Iterator<ConversionFile> iterator = files.iterator();
-        while (iterator.hasNext()) {
-            ConversionFile file = iterator.next();
-            if (idsToRemove.contains(file.id())) {
-                files.remove(file);
-                removedFiles.add(file);
-                String hash = fileHashMap.remove(file.path().toString());
-                if (hash != null) {
-                    fileHashes.remove(hash);
+        synchronized (files) {
+            Iterator<ConversionFile> iterator = files.iterator();
+            while (iterator.hasNext()) {
+                ConversionFile file = iterator.next();
+                if (idsToRemove.contains(file.id())) {
+                    files.remove(file);
+                    removedFiles.add(file);
+                    String hash = fileHashMap.remove(file.path().toString());
+                    if (hash != null) {
+                        fileHashes.remove(hash);
+                    }
+                    removedCount++;
+                    logger.debug("Removed file: {}", file.path());
                 }
-                removedCount++;
-
-                // Notify listeners
-                notifyListeners(new FileEvent(EventType.FILE_REMOVED, file));
-
-                logger.debug("Removed file: {}", file.path());
             }
+        }
+
+        for (ConversionFile file : removedFiles) {
+            notifyListeners(new FileEvent(EventType.FILE_REMOVED, file));
         }
 
         logger.info("Removed {} files", removedCount);
@@ -288,10 +293,13 @@ public class FileManager {
     public void clearFiles() {
         logger.info("Clearing all files from conversion list");
 
-        List<ConversionFile> clearedFiles = new ArrayList<>(files);
-        files.clear();
-        fileHashMap.clear();
-        fileHashes.clear();
+        List<ConversionFile> clearedFiles;
+        synchronized (files) {
+            clearedFiles = new ArrayList<>(files);
+            files.clear();
+            fileHashMap.clear();
+            fileHashes.clear();
+        }
 
         // Notify listeners
         notifyListeners(new FileEvent(EventType.FILES_CLEARED, clearedFiles));
@@ -337,19 +345,27 @@ public class FileManager {
             throw new IllegalArgumentException("Updated file cannot be null");
         }
 
-        for (int i = 0; i < files.size(); i++) {
-            if (files.get(i).id().equals(updatedFile.id())) {
-                files.set(i, updatedFile);
-
-                // Notify listeners
-                notifyListeners(new FileEvent(EventType.STATUS_CHANGED, updatedFile));
-
-                logger.debug("Updated file: {} (status: {})", updatedFile.path(), updatedFile.status());
-                return;
+        // Positional replacement must be atomic with structural mutations:
+        // a concurrent remove/clear shifts indices and would corrupt the list
+        boolean updated = false;
+        synchronized (files) {
+            for (int i = 0; i < files.size(); i++) {
+                if (files.get(i).id().equals(updatedFile.id())) {
+                    files.set(i, updatedFile);
+                    updated = true;
+                    break;
+                }
             }
         }
 
-        throw new IllegalArgumentException("File not found in list: " + updatedFile.id());
+        if (!updated) {
+            throw new IllegalArgumentException("File not found in list: " + updatedFile.id());
+        }
+
+        // Notify listeners
+        notifyListeners(new FileEvent(EventType.STATUS_CHANGED, updatedFile));
+
+        logger.debug("Updated file: {} (status: {})", updatedFile.path(), updatedFile.status());
     }
 
     /**

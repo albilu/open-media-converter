@@ -14,9 +14,11 @@ import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -33,6 +35,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
@@ -145,6 +148,8 @@ class ConversionEngineTest {
                 Files.deleteIfExists(Paths.get("/tmp/test.mp4")); // testPath used by deletion tests
                 Files.deleteIfExists(Paths.get("/tmp/conversion-temp-12345.avi"));
                 Files.deleteIfExists(Paths.get("/custom/output/test.avi"));
+                Files.deleteIfExists(Paths.get("/tmp/omm-test-blocked-tool.avi"));
+                Files.deleteIfExists(Paths.get("/tmp/omm-test-quick-tool.avi"));
 
                 // Clean up temp files created by the mock
                 for (int i = 0; i < tempFileIndex; i++) {
@@ -2313,6 +2318,499 @@ class ConversionEngineTest {
                 // conversion would succeed
                 // The key assertion is that result.success() is true regardless of deletion
                 // outcome
+        }
+
+        // ==================== Cancellation Safety Tests (REQ-004.2, REQ-GEN-1.2)
+        // ====================
+
+        /**
+         * Cancelling while a task is paused must stop the task before it runs any
+         * conversion work. The task must produce a cancelled result and never
+         * invoke the conversion tool.
+         */
+        @Test
+        void cancelWhilePaused_TaskMustNotRunConversion() throws Exception {
+                // Given - mocks that would succeed if (defectively) executed
+                setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                conversionEngine.onConversionComplete(completionHandler);
+
+                // Given - paused before submission so the task blocks in waitIfPaused
+                conversionEngine.pauseConversion();
+                conversionEngine.convertSingle(testFile, testSettings);
+                waitForActiveConversions(1);
+                Thread.sleep(300); // Allow the task to reach the pause gate
+
+                // When - cancel while the task is paused
+                conversionEngine.cancelConversion();
+
+                // Then - the task must report cancellation and never invoke the tool
+                verify(completionHandler, timeout(2000)).accept(eq(testFile.id()),
+                                argThat(ConversionResult::isCancelled));
+                // Review fix 3: the file must also be marked CANCELLED in progress
+                // tracking instead of leaking as PENDING
+                verify(progressEngine, timeout(2000)).cancelTracking(eq(testFile.id()));
+                Thread.sleep(300); // Grace period: a defective task would invoke the tool within this window
+                verify(toolManager, never()).executeTool(any(ConversionTool.class), any(Path.class),
+                                any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                any(ProgressCallback.class),
+                                any(String.class), any(ProcessRegistry.class));
+        }
+
+        /**
+         * Review fix 3 (progress leak, gate at task start): a task that starts
+         * after a cancel request (post-cancel submission) must be reported as
+         * CANCELLED in progress tracking - startTracking never runs for it, so
+         * without cancelTracking it would leak as PENDING.
+         *
+         * Note: a task that is still QUEUED when cancelConversion runs never
+         * reaches this gate - CompletableFuture.supplyAsync skips the supplier
+         * of an already-cancelled future - so the gate is exercised through a
+         * submission made after the cancel.
+         */
+        @Test
+        void cancelBeforeTaskStart_MarksProgressCancelled() throws Exception {
+                // Single-threaded engine so the first task holds the only thread
+                ConversionEngine singleThreadEngine = new ConversionEngine(toolManager, validationEngine,
+                                progressEngine, fileHandler, 1);
+                CountDownLatch toolStarted = new CountDownLatch(1);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                Path outputDir = Files.createTempDirectory("omm-gate-start-out");
+                try {
+                        ConversionFile firstFile = ConversionFile.create(
+                                        Files.createTempFile("omm-gate-start-1", ".mp4"), FileFormat.MP4, 100L);
+                        ConversionFile secondFile = ConversionFile.create(
+                                        Files.createTempFile("omm-gate-start-2", ".mp4"), FileFormat.MP4, 200L);
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .build();
+
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+
+                        // Block tool execution so the first task occupies the only thread
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> blockedToolExecution(toolStarted, releaseTool));
+
+                        // Given - first task blocked in the tool
+                        singleThreadEngine.convertSingle(firstFile, settings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS), "First task should reach the tool");
+
+                        // When - cancel while the first task is still executing (the cancel
+                        // request stands because the cancelled run has not drained)
+                        singleThreadEngine.cancelConversion();
+
+                        // And - a new file is submitted after the cancel; it queues behind
+                        // the still-running first task
+                        CompletableFuture<ConversionResult> secondFuture = singleThreadEngine.convertSingle(
+                                        secondFile, settings);
+
+                        // Release the first task so the second task starts and hits the
+                        // task-start cancellation gate
+                        releaseTool.countDown();
+
+                        // Then - the second file must complete as cancelled and be marked
+                        // CANCELLED in progress tracking
+                        ConversionResult secondResult = secondFuture.get(10, TimeUnit.SECONDS);
+                        assertTrue(secondResult.isCancelled(), "Post-cancel submission must be cancelled");
+                        verify(progressEngine, timeout(2000)).cancelTracking(eq(secondFile.id()));
+                } finally {
+                        releaseTool.countDown();
+                        singleThreadEngine.shutdown();
+                        deleteRecursively(outputDir);
+                }
+        }
+
+        /**
+         * A task cancelled while paused must not delete the original file even
+         * when deleteOriginalFile=true.
+         */
+        @Test
+        void cancelWhilePaused_DoesNotDeleteOriginalFile() throws Exception {
+                Path originalPath = Files.createTempFile("omm-cancel-paused", ".mp4");
+                Path outputDir = Files.createTempDirectory("omm-cancel-paused-out");
+                try {
+                        ConversionFile file = ConversionFile.create(originalPath, FileFormat.MP4,
+                                        Files.size(originalPath));
+                        ConversionSettings deleteSettings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .deleteOriginalFile(true)
+                                        .build();
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        conversionEngine.onConversionComplete(completionHandler);
+
+                        // Given - paused before submission so the task blocks before conversion
+                        conversionEngine.pauseConversion();
+                        conversionEngine.convertSingle(file, deleteSettings);
+                        waitForActiveConversions(1);
+                        Thread.sleep(300);
+
+                        // When - cancel while the task is paused
+                        conversionEngine.cancelConversion();
+
+                        // Then - the original file must survive the cancellation
+                        verify(completionHandler, timeout(2000)).accept(eq(file.id()),
+                                        argThat(ConversionResult::isCancelled));
+                        Thread.sleep(300); // Grace period: a defective task would complete and delete by now
+                        assertTrue(Files.exists(originalPath),
+                                        "Original file must not be deleted after cancellation while paused");
+                } finally {
+                        deleteRecursively(outputDir);
+                        Files.deleteIfExists(originalPath);
+                }
+        }
+
+        /**
+         * A cancellation requested after the tool succeeded but before the
+         * delete-original step must skip deletion of the original file.
+         */
+        @Test
+        void cancel_DoesNotDeleteOriginalFile() throws Exception {
+                Path originalPath = Files.createTempFile("omm-cancel-delete", ".mp4");
+                Path outputDir = Files.createTempDirectory("omm-cancel-delete-out");
+                try {
+                        ConversionFile file = ConversionFile.create(originalPath, FileFormat.MP4,
+                                        Files.size(originalPath));
+                        String baseName = originalPath.getFileName().toString().replaceFirst("\\.mp4$", "");
+                        Path finalOutputPath = outputDir.resolve(baseName + ".avi");
+                        ConversionSettings deleteSettings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .deleteOriginalFile(true)
+                                        .build();
+
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        conversionEngine.onConversionComplete(completionHandler);
+
+                        // Re-stub executeTool: request cancellation AFTER the tool succeeded but
+                        // BEFORE the engine's delete-original step (deterministic interleaving)
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> {
+                                                Path tempPath = invocation.getArgument(2);
+                                                Files.createDirectories(tempPath.getParent());
+                                                Files.write(tempPath, "test content".getBytes());
+                                                conversionEngine.cancelConversion();
+                                                return ConversionResult.success(file.id(), finalOutputPath, null,
+                                                                Duration.ofSeconds(1), file.size(), 800L,
+                                                                ConversionTool.FFMPEG);
+                                        });
+
+                        // When
+                        conversionEngine.convertSingle(file, deleteSettings);
+
+                        // Then - completeTracking runs after the delete step, so this verify
+                        // proves the delete step was passed
+                        verify(progressEngine, timeout(2000)).completeTracking(eq(file.id()),
+                                        any(ConversionResult.class));
+                        assertTrue(Files.exists(originalPath),
+                                        "Original file must not be deleted when cancellation is requested");
+                        verify(completionHandler, timeout(2000)).accept(eq(file.id()),
+                                        argThat(ConversionResult::isCancelled));
+                } finally {
+                        deleteRecursively(outputDir);
+                        Files.deleteIfExists(originalPath);
+                }
+        }
+
+        /**
+         * Review fix 1 (reset race): when cancelConversion interleaves with an
+         * active batch conversion, a subsequent convertSingle submission must
+         * not clear the cancel request and run to completion (including
+         * deleting the original file). The cancel request must stand while
+         * conversions from the cancelled run are still executing.
+         */
+        @Test
+        void cancelDuringActiveBatch_NewSingleSubmissionMustNotRun() throws Exception {
+                Path outputDir = Files.createTempDirectory("omm-interleave-out");
+                Path batchFile1Path = Files.createTempFile("omm-interleave-1", ".mp4");
+                Path batchFile2Path = Files.createTempFile("omm-interleave-2", ".mp4");
+                Path extraFilePath = Files.createTempFile("omm-interleave-extra", ".mp4");
+                CountDownLatch toolStarted = new CountDownLatch(2);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                try {
+                        ConversionFile batchFile1 = ConversionFile.create(batchFile1Path, FileFormat.MP4,
+                                        Files.size(batchFile1Path));
+                        ConversionFile batchFile2 = ConversionFile.create(batchFile2Path, FileFormat.MP4,
+                                        Files.size(batchFile2Path));
+                        ConversionFile extraFile = ConversionFile.create(extraFilePath, FileFormat.MP4,
+                                        Files.size(extraFilePath));
+
+                        ConversionSettings deleteSettings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .deleteOriginalFile(true)
+                                        .build();
+
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+
+                        // Slow tool execution for the batch files: block until released
+                        when(toolManager.executeTool(any(ConversionTool.class), eq(batchFile1Path),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> blockedToolExecution(toolStarted, releaseTool));
+                        when(toolManager.executeTool(any(ConversionTool.class), eq(batchFile2Path),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> blockedToolExecution(toolStarted, releaseTool));
+                        // A quick success stub for the extra file so a defective run (which
+                        // invokes the tool) completes fast and fails the assertions crisply;
+                        // lenient because a correct run never invokes the tool for this file
+                        lenient().when(toolManager.executeTool(any(ConversionTool.class), eq(extraFilePath),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> quickSuccessExecution(outputDir));
+
+                        // Given - a batch whose conversions are still in progress
+                        conversionEngine.convertBatch(Arrays.asList(batchFile1, batchFile2), deleteSettings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS), "Batch conversions should reach the tool");
+
+                        // When - cancel is requested from another thread while conversions run
+                        Thread cancelThread = new Thread(conversionEngine::cancelConversion);
+                        cancelThread.start();
+                        cancelThread.join(5000);
+
+                        // And - an additional file is submitted via convertSingle after the cancel
+                        CompletableFuture<ConversionResult> extraFuture = conversionEngine.convertSingle(extraFile,
+                                        deleteSettings);
+                        ConversionResult extraResult = extraFuture.get(10, TimeUnit.SECONDS);
+
+                        // Then - the additional file must be cancelled, never converted
+                        assertTrue(extraResult.isCancelled(),
+                                        "Post-cancel submission must be cancelled, but was: "
+                                                        + extraResult.errorMessage().orElse("success"));
+                        verify(toolManager, never()).executeTool(any(ConversionTool.class), eq(extraFilePath),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class));
+                        assertTrue(Files.exists(extraFilePath),
+                                        "Original of the post-cancel submission must not be deleted");
+                } finally {
+                        releaseTool.countDown();
+                        deleteRecursively(outputDir);
+                        Files.deleteIfExists(batchFile1Path);
+                        Files.deleteIfExists(batchFile2Path);
+                        Files.deleteIfExists(extraFilePath);
+                }
+        }
+
+        /**
+         * Review fix 2 (retry gate): a cancel requested during the 500ms retry
+         * sleep must abort the retry - the tool must not be invoked a second
+         * time (which would spawn an orphan process attempt).
+         */
+        @Test
+        void cancelDuringRetrySleep_DoesNotSpawnSecondAttempt() throws Exception {
+                // Given - validations pass
+                when(validationEngine.validateConversionRequest(any(ConversionFile.class),
+                                any(ConversionSettings.class)))
+                                .thenReturn(ValidationResult.success());
+                when(toolManager.selectTool(any(FileFormat.class), any(FileFormat.class)))
+                                .thenReturn(ConversionTool.FFMPEG);
+                when(validationEngine.validateToolAvailability(any(ConversionTool.class)))
+                                .thenReturn(ValidationResult.success());
+                when(validationEngine.validateOutputDirectory(any(Path.class)))
+                                .thenReturn(ValidationResult.success());
+                when(validationEngine.validateDiskSpace(any(Path.class), anyLong()))
+                                .thenReturn(ValidationResult.success());
+
+                doNothing().when(progressEngine).startTracking(anyString(), anyLong());
+                doNothing().when(progressEngine).completeTracking(anyString(), any(ConversionResult.class));
+
+                // First attempt fails with a transient error AND requests cancellation
+                // (deterministically interleaved before the retry sleep begins)
+                ConversionResult transientFailure = ConversionResult.failure(testFile.id(),
+                                "FFmpeg conversion failed (exit code 255): transient network error", null,
+                                Duration.ofSeconds(1), testFile.size(), ConversionTool.FFMPEG);
+                when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                any(ProgressCallback.class),
+                                any(String.class), any(ProcessRegistry.class)))
+                                .thenAnswer(invocation -> {
+                                        conversionEngine.cancelConversion();
+                                        return transientFailure;
+                                })
+                                .thenAnswer(invocation -> {
+                                        // Second attempt: must never run
+                                        Path tempPath = invocation.getArgument(2);
+                                        Files.write(tempPath, "content".getBytes());
+                                        return ConversionResult.success(testFile.id(),
+                                                        Paths.get("/tmp/output/test.avi"), null,
+                                                        Duration.ofSeconds(1), testFile.size(), 800L,
+                                                        ConversionTool.FFMPEG);
+                                });
+
+                // When
+                CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(testFile, testSettings);
+
+                // Then - the future was cancelled by cancelConversion ...
+                assertThrows(CancellationException.class, () -> future.get(5, TimeUnit.SECONDS));
+                // ... and the retry attempt was never spawned despite the transient
+                // error. Wait past the 500ms retry sleep so a defective attempt 2
+                // is observed deterministically.
+                verify(toolManager, after(1000).times(1)).executeTool(any(ConversionTool.class),
+                                any(Path.class),
+                                any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                any(ProgressCallback.class),
+                                any(String.class), any(ProcessRegistry.class));
+        }
+
+        /**
+         * Review fix 4 (batch aggregation): when cancelConversion cancels
+         * futures directly, the batch result loop's future.get() throws
+         * CancellationException. The batch future must still complete normally
+         * and record a cancelled result for each affected file instead of
+         * completing exceptionally.
+         */
+        @Test
+        void cancelDuringBatch_BatchFutureCompletesWithCancelledResults() throws Exception {
+                Path outputDir = Files.createTempDirectory("omm-batch-cancel-out");
+                Path file1Path = Files.createTempFile("omm-batch-cancel-1", ".mp4");
+                Path file2Path = Files.createTempFile("omm-batch-cancel-2", ".mp4");
+                CountDownLatch toolStarted = new CountDownLatch(2);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                try {
+                        ConversionFile file1 = ConversionFile.create(file1Path, FileFormat.MP4,
+                                        Files.size(file1Path));
+                        ConversionFile file2 = ConversionFile.create(file2Path, FileFormat.MP4,
+                                        Files.size(file2Path));
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .build();
+
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+
+                        // Both conversions block inside the tool until released
+                        when(toolManager.executeTool(any(ConversionTool.class), eq(file1Path),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> blockedToolExecution(toolStarted, releaseTool));
+                        when(toolManager.executeTool(any(ConversionTool.class), eq(file2Path),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> blockedToolExecution(toolStarted, releaseTool));
+
+                        // Given - a running batch with both conversions in the tool
+                        CompletableFuture<BatchConversionResult> batchFuture = conversionEngine.convertBatch(
+                                        Arrays.asList(file1, file2), settings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS), "Batch conversions should reach the tool");
+
+                        // When - cancel cancels both futures directly
+                        conversionEngine.cancelConversion();
+                        // And - the blocked tasks eventually finish their lambdas
+                        releaseTool.countDown();
+
+                        // Then - the batch future must complete normally with cancelled results
+                        BatchConversionResult batchResult = batchFuture.get(10, TimeUnit.SECONDS);
+                        assertEquals(2, batchResult.totalCount(), "Both files must have results");
+                        assertTrue(batchResult.results().stream().allMatch(ConversionResult::isCancelled),
+                                        "All results must be cancelled, but were: " + batchResult.results());
+                } finally {
+                        releaseTool.countDown();
+                        deleteRecursively(outputDir);
+                        Files.deleteIfExists(file1Path);
+                        Files.deleteIfExists(file2Path);
+                }
+        }
+
+        /**
+         * The engine must remain usable after cancelConversion: submitting and
+         * running a new conversion must work (cancelConversion must not flip
+         * shuttingDown or leave a stale cancel request).
+         */
+        @Test
+        void engineReusableAfterCancel() throws Exception {
+                // Given - a conversion cancelled while paused
+                conversionEngine.onConversionComplete(completionHandler);
+                conversionEngine.pauseConversion();
+                conversionEngine.convertSingle(testFile, testSettings);
+                waitForActiveConversions(1);
+                Thread.sleep(300);
+                conversionEngine.cancelConversion();
+
+                // Then - cancelled but not permanently shut down
+                assertFalse(conversionEngine.isShuttingDown(),
+                                "cancelConversion must not permanently shut down the engine");
+
+                // When - a new conversion is submitted after cancellation
+                setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(testFile, testSettings);
+                ConversionResult result = future.get(5, TimeUnit.SECONDS);
+
+                // Then - the new conversion must complete successfully
+                assertTrue(result.success(), "Engine must be reusable after cancelConversion: "
+                                + result.errorMessage().orElse("unknown error"));
+        }
+
+        /**
+         * Tool answer that signals start, blocks until released (bounded), then
+         * reports success with a written temp file.
+         */
+        private ConversionResult blockedToolExecution(CountDownLatch toolStarted, CountDownLatch releaseTool)
+                        throws Exception {
+                toolStarted.countDown();
+                try {
+                        releaseTool.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                }
+                Path tempPath = Paths.get("/tmp/omm-test-blocked-tool.avi");
+                Files.write(tempPath, "content".getBytes());
+                return ConversionResult.success(
+                                "blocked-tool", tempPath, null, Duration.ofSeconds(1), 1000L, 800L,
+                                ConversionTool.FFMPEG);
+        }
+
+        /**
+         * Tool answer that succeeds immediately without blocking.
+         */
+        private ConversionResult quickSuccessExecution(Path outputDir) throws Exception {
+                Path tempPath = Paths.get("/tmp/omm-test-quick-tool.avi");
+                Files.write(tempPath, "content".getBytes());
+                return ConversionResult.success(
+                                "quick-tool", outputDir.resolve("out.avi"), null, Duration.ofSeconds(1), 1000L,
+                                800L, ConversionTool.FFMPEG);
+        }
+
+        private void waitForActiveConversions(int expected) throws InterruptedException {
+                int count = 0;
+                for (int i = 0; i < 100 && count != expected; i++) {
+                        count = conversionEngine.getActiveConversionCount();
+                        if (count != expected) {
+                                Thread.sleep(10); // Wait up to 1 second total
+                        }
+                }
+                assertEquals(expected, count);
+        }
+
+        private void deleteRecursively(Path directory) {
+                try {
+                        if (Files.exists(directory)) {
+                                Files.walk(directory)
+                                                .sorted((a, b) -> b.compareTo(a)) // Reverse order to delete
+                                                                                  // files before dirs
+                                                .forEach(path -> {
+                                                        try {
+                                                                Files.deleteIfExists(path);
+                                                        } catch (IOException e) {
+                                                                // Ignore cleanup errors
+                                                        }
+                                                });
+                        }
+                } catch (IOException e) {
+                        // Ignore cleanup errors
+                }
         }
 
 }

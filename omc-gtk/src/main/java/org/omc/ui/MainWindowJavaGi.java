@@ -142,19 +142,20 @@ public class MainWindowJavaGi extends ApplicationWindow {
         try {
             logger.debug("Loading UI from main_window.ui");
 
-            // Load UI file from classpath as string
-            InputStream inputStream = getClass().getResourceAsStream("/ui/main_window.ui");
-            if (inputStream == null) {
-                throw new RuntimeException("Could not find /ui/main_window.ui in classpath");
+            // Load UI file from classpath as string (try-with-resources closes the stream)
+            String uiXml;
+            try (InputStream inputStream = getClass().getResourceAsStream("/ui/main_window.ui")) {
+                if (inputStream == null) {
+                    throw new RuntimeException("Could not find /ui/main_window.ui in classpath");
+                }
+                uiXml = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))
+                        .lines()
+                        .collect(Collectors.joining("\n"));
             }
-
-            String uiXml = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))
-                    .lines()
-                    .collect(Collectors.joining("\n"));
 
             // Create builder and load from string
             builder = new GtkBuilder();
-            builder.addFromString(uiXml, uiXml.length());
+            builder.addFromString(uiXml, SettingsDialogJavaGi.uiByteLength(uiXml));
 
             // Get the main window from builder and copy its properties
             ApplicationWindow window = (ApplicationWindow) builder.getObject("mainWindow");

@@ -10,6 +10,7 @@ import org.omc.model.PresetsBySection;
 import org.omc.controller.SettingsManager;
 import org.omc.model.AudioSettings;
 import org.omc.model.SectionPreset;
+import org.omc.model.SettingsPreset;
 import org.omc.core.ConfigurationManager;
 import org.omc.core.ValidationEngine;
 import org.omc.exception.InvalidSettingsException;
@@ -25,8 +26,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Unit tests for SettingsManager.
@@ -301,8 +304,9 @@ class SettingsManagerTest {
         assertEquals(4, settings.parallelConversions());
 
         // And: Corrupted file should be backed up
-        assertTrue(Files.list(configDir)
-                .anyMatch(p -> p.getFileName().toString().contains(".backup")));
+        try (var files = Files.list(configDir)) {
+            assertTrue(files.anyMatch(p -> p.getFileName().toString().contains(".backup")));
+        }
     }
 
     @Test
@@ -737,5 +741,227 @@ class SettingsManagerTest {
         assertEquals("Video 2", updated.videoPresets().get(0).name());
         assertEquals(1, updated.audioPresets().size());
         assertEquals("Audio 1", updated.audioPresets().get(0).name());
+    }
+
+    // ========== Legacy preset format data-loss regression tests ==========
+
+    @Test
+    void testLoadPresetsBySection_MigratesLegacyPresetContainer() throws IOException {
+        // Given: Legacy {"presets":[...]} container file written by the old savePreset() API
+        Path outputDir = tempDir.resolve("output");
+        Files.createDirectories(outputDir);
+
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        JsonUtils.writeJsonFile(
+                Map.of("presets", List.of(createLegacyPreset(outputDir))),
+                presetsPath.toFile());
+
+        // When: Load presets (triggers migration)
+        PresetsBySection loaded = settingsManager.loadPresetsBySection();
+
+        // Then: Legacy preset is migrated into the video section, not dropped
+        assertEquals(1, loaded.videoPresets().size());
+        assertEquals("Legacy Video", loaded.videoPresets().get(0).name());
+
+        // And: File is rewritten in new format so subsequent loads work
+        PresetsBySection reread = JsonUtils.readJsonFile(presetsPath.toFile(), PresetsBySection.class);
+        assertEquals(1, reread.videoPresets().size());
+        assertEquals("Legacy Video", reread.videoPresets().get(0).name());
+    }
+
+    @Test
+    void testLoadPresetsBySection_LegacyPresetContainer_BackedUpWithOriginalContent() throws IOException {
+        // Given: Legacy {"presets":[...]} container file
+        Path outputDir = tempDir.resolve("output");
+        Files.createDirectories(outputDir);
+
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        JsonUtils.writeJsonFile(
+                Map.of("presets", List.of(createLegacyPreset(outputDir))),
+                presetsPath.toFile());
+        String originalContent = Files.readString(presetsPath);
+
+        // When: Load presets (triggers migration)
+        settingsManager.loadPresetsBySection();
+
+        // Then: A timestamped backup of the original content exists before any overwrite
+        List<Path> backups;
+        try (var files = Files.list(configDir)) {
+            backups = files
+                    .filter(p -> p.getFileName().toString().startsWith("presets.json.old."))
+                    .filter(p -> p.getFileName().toString().endsWith(".bak"))
+                    .toList();
+        }
+        assertEquals(1, backups.size());
+        assertEquals(originalContent, Files.readString(backups.get(0)));
+    }
+
+    @Test
+    void testLoadPresetsBySection_CorruptFile_ReturnsEmptyWithBackup() throws IOException {
+        // Given: A truly corrupt presets file
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        Files.writeString(presetsPath, "{ not valid json");
+
+        // When: Load presets
+        PresetsBySection loaded = settingsManager.loadPresetsBySection();
+
+        // Then: Falls back to empty presets
+        assertEquals(0, loaded.totalPresetCount());
+
+        // And: The unreadable content is backed up before any destructive write
+        try (var files = Files.list(configDir)) {
+            assertTrue(files.anyMatch(p -> p.getFileName().toString().startsWith("presets.json.old.")
+                    && p.getFileName().toString().endsWith(".bak")),
+                    "Corrupt presets file should be backed up");
+        }
+    }
+
+    @Test
+    void testOldPresetApi_OnNewFormatFile_DoesNotWipeSectionPresets() throws IOException {
+        // Given: A new-format file with a section preset
+        Path outputDir = tempDir.resolve("output");
+        Files.createDirectories(outputDir);
+
+        VideoSettings videoSettings = VideoSettings.builder()
+                .outputFormat(FileFormat.MP4)
+                .build();
+        SectionPreset sectionPreset = SectionPreset.forVideo("Section Video", null, videoSettings, false);
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        JsonUtils.writeJsonFile(
+                new PresetsBySection(List.of(sectionPreset), List.of(), List.of(), List.of()),
+                presetsPath.toFile());
+
+        // When: Old API reads the new-format file
+        List<SettingsPreset> customPresets = assertDoesNotThrow(() -> settingsManager.getPresets())
+                .stream().filter(p -> !p.builtIn()).toList();
+
+        // Then: No custom presets reported, no exception thrown
+        assertEquals(0, customPresets.size());
+
+        // When: Old API saves a preset
+        settingsManager.savePreset(createLegacyPreset(outputDir));
+
+        // Then: Existing section presets must survive the save
+        PresetsBySection after = settingsManager.loadPresetsBySection();
+        assertTrue(after.videoPresets().stream().anyMatch(p -> p.name().equals("Section Video")),
+                "savePreset must not wipe existing section presets");
+    }
+
+    @Test
+    void testLoadPresetsBySection_MigratesBareArrayFormat() throws IOException {
+        // Given: Ancient bare-array [...] presets file
+        Path outputDir = tempDir.resolve("output");
+        Files.createDirectories(outputDir);
+
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        JsonUtils.writeJsonFile(List.of(createLegacyPreset(outputDir)), presetsPath.toFile());
+
+        // When: Load presets (triggers migration)
+        PresetsBySection loaded = settingsManager.loadPresetsBySection();
+
+        // Then: Bare-array preset is migrated into the video section
+        assertEquals(1, loaded.videoPresets().size());
+        assertEquals("Legacy Video", loaded.videoPresets().get(0).name());
+    }
+
+    @Test
+    void testLoadPresetsBySection_MigratesLegacyGlobalOutputFormatPreset() throws IOException {
+        // Given: Genuinely-old preset file whose settings only carry the global
+        // outputFormat field written by versions before section-based settings
+        Path outputDir = tempDir.resolve("output");
+        Files.createDirectories(outputDir);
+
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        String legacyJson = """
+                {
+                  "presets": [
+                    {
+                      "name": "Legacy MP4",
+                      "description": "Old global outputFormat preset",
+                      "settings": {
+                        "outputDirectory": "%s",
+                        "overwriteExisting": false,
+                        "createSubdirectory": false,
+                        "parallelConversions": 4,
+                        "outputFormat": "MP4"
+                      },
+                      "builtIn": false,
+                      "createdAt": 1700000000000
+                    }
+                  ]
+                }
+                """.formatted(outputDir);
+        Files.writeString(presetsPath, legacyJson);
+
+        // When: Load presets (triggers migration)
+        PresetsBySection loaded = settingsManager.loadPresetsBySection();
+
+        // Then: The preset survives with video settings mapped from the global format
+        assertEquals(1, loaded.videoPresets().size());
+        SectionPreset migrated = loaded.videoPresets().get(0);
+        assertEquals("Legacy MP4", migrated.name());
+        assertNotNull(migrated.videoSettings(), "video settings must be mapped from global outputFormat");
+        assertEquals(FileFormat.MP4, migrated.videoSettings().outputFormat());
+    }
+
+    @Test
+    void testSavePreset_BackupFailure_DoesNotOverwriteUnparseablePresetsFile() throws IOException {
+        // Given: An unparseable presets file that also cannot be backed up
+        // (read permission removed so Files.copy fails on the source)
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        Files.writeString(presetsPath, "{ not valid json");
+
+        Path outputDir = tempDir.resolve("output");
+        Files.createDirectories(outputDir);
+
+        assumeTrue(presetsPath.toFile().setReadable(false),
+                "POSIX permissions required for this test");
+
+        try {
+            // When: Saving a preset would back up then overwrite the file
+            IOException error = assertThrows(IOException.class,
+                    () -> settingsManager.savePreset(createLegacyPreset(outputDir)),
+                    "savePreset must fail closed when backup fails");
+
+            // Then: The original content must not be destroyed
+            assertTrue(presetsPath.toFile().setReadable(true), "restore read permission");
+            assertEquals("{ not valid json", Files.readString(presetsPath));
+        } finally {
+            presetsPath.toFile().setReadable(true);
+        }
+    }
+
+    @Test
+    void testMigration_SameSecondBackups_DoNotOverwriteEachOther() throws IOException {
+        // Given: A corrupt presets file that triggers two migration attempts
+        // within the same second (parse always fails, file is never rewritten)
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        Files.writeString(presetsPath, "{ not valid json");
+
+        // When: Two migration attempts run back to back
+        settingsManager.loadPresetsBySection();
+        settingsManager.loadPresetsBySection();
+
+        // Then: Both backups must survive (distinct names, not overwriting)
+        List<Path> backups;
+        try (var files = Files.list(configDir)) {
+            backups = files
+                    .filter(p -> p.getFileName().toString().startsWith("presets.json.old."))
+                    .filter(p -> p.getFileName().toString().endsWith(".bak"))
+                    .toList();
+        }
+        assertEquals(2, backups.size(), "same-second backups must not overwrite each other");
+    }
+
+    private SettingsPreset createLegacyPreset(Path outputDir) {
+        VideoSettings videoSettings = VideoSettings.builder()
+                .outputFormat(FileFormat.MP4)
+                .codec("libx264")
+                .build();
+        ConversionSettings settings = ConversionSettings.builder()
+                .outputDirectory(outputDir)
+                .videoSettings(videoSettings)
+                .build();
+        return SettingsPreset.createUserPreset("Legacy Video", "Old flat-format preset", settings);
     }
 }

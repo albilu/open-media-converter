@@ -20,11 +20,14 @@
         <!-- Dependency versions: pinned here via dependencyManagement;
              child modules must reference these deps without versions -->
         <java-gi.version>0.12.2</java-gi.version>
-        <jackson.version>2.17.0</jackson.version>
-        <slf4j.version>2.0.12</slf4j.version>
-        <logback.version>1.5.3</logback.version>
-        <junit.version>5.10.2</junit.version>
-        <mockito.version>5.11.0</mockito.version>
+        <!-- jackson-annotations skips micro releases (latest 2.x is 2.22);
+              databind and jsr310 are pinned to the latest micro patch -->
+        <jackson.version>2.22.2</jackson.version>
+        <jackson-annotations.version>2.22</jackson-annotations.version>
+        <slf4j.version>2.0.19</slf4j.version>
+        <logback.version>1.5.38</logback.version>
+        <junit.version>5.14.4</junit.version>
+        <mockito.version>5.23.0</mockito.version>
     </properties>
 
     <!-- Central version management for all modules (versions kept exactly
@@ -47,7 +50,7 @@
             <dependency>
                 <groupId>com.fasterxml.jackson.core</groupId>
                 <artifactId>jackson-annotations</artifactId>
-                <version>${jackson.version}</version>
+                <version>${jackson-annotations.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.fasterxml.jackson.datatype</groupId>

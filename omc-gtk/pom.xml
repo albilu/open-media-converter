@@ -87,37 +87,65 @@
                 </configuration>
             </plugin>
 
-            <!-- Maven Assembly Plugin for creating fat JAR -->
+            <!-- Maven Shade Plugin for creating the fat JAR (replaces the
+                 former maven-assembly jar-with-dependencies build) -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-assembly-plugin</artifactId>
-                <version>3.7.1</version>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.2</version>
                 <configuration>
-                    <archive>
-                        <manifest>
-                            <mainClass>org.omc.ui.MainApplicationJavaGi</mainClass>
-                            <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
-                            <addDefaultSpecificationEntries>true</addDefaultSpecificationEntries>
-                        </manifest>
-                        <manifestEntries>
-                            <Built-By>Open Media Converter Team</Built-By>
-                            <Build-Time>${maven.build.timestamp}</Build-Time>
-                            <Application-Name>Open Media Converter</Application-Name>
-                            <Application-Version>${project.version}</Application-Version>
-                        </manifestEntries>
-                    </archive>
-                    <descriptorRefs>
-                        <descriptorRef>jar-with-dependencies</descriptorRef>
-                    </descriptorRefs>
+                    <!-- Reproduces the assembly output layout: the fat jar is
+                         written to target/open-media-converter-<version>.jar
+                         while the plain module jar is left untouched (because
+                         this finalName differs from the build finalName, no
+                         main-artifact replacement is performed). -->
                     <finalName>open-media-converter-${project.version}</finalName>
-                    <appendAssemblyId>false</appendAssemblyId>
+                    <createDependencyReducedPom>false</createDependencyReducedPom>
+                    <filters>
+                        <!-- Strip jar signatures: a signed entry inside an
+                             uber-jar breaks the JAR verifier -->
+                        <filter>
+                            <artifact>*:*</artifact>
+                            <excludes>
+                                <exclude>META-INF/*.SF</exclude>
+                                <exclude>META-INF/*.DSA</exclude>
+                                <exclude>META-INF/*.RSA</exclude>
+                            </excludes>
+                        </filter>
+                    </filters>
+                    <transformers>
+                        <!-- Merge META-INF/services descriptors across jars -->
+                        <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                        <!-- shade 3.6.x has no <archive> parameter; the
+                             ManifestResourceTransformer reproduces the
+                             manifest the assembly plugin used to emit
+                             (Main-Class plus implementation/specification
+                             and application entries). Applied last so its
+                             entries win merge conflicts. -->
+                        <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                            <mainClass>org.omc.ui.MainApplicationJavaGi</mainClass>
+                            <manifestEntries>
+                                <Specification-Title>${project.name}</Specification-Title>
+                                <Specification-Version>${project.artifact.selectedVersion.majorVersion}.${project.artifact.selectedVersion.minorVersion}</Specification-Version>
+                                <Implementation-Title>${project.name}</Implementation-Title>
+                                <Implementation-Version>${project.version}</Implementation-Version>
+                                <Built-By>Open Media Converter Team</Built-By>
+                                <Build-Time>${maven.build.timestamp}</Build-Time>
+                                <Application-Name>Open Media Converter</Application-Name>
+                                <Application-Version>${project.version}</Application-Version>
+                            </manifestEntries>
+                        </transformer>
+                    </transformers>
+                    <!-- minimizeJar intentionally NOT used: it breaks
+                         reflection-heavy code (Jackson, java-gi). No
+                         relocations: no conflicting deps on the classpath. -->
                 </configuration>
                 <executions>
                     <execution>
-                        <id>make-assembly</id>
+                        <id>make-shaded-jar</id>
                         <phase>package</phase>
                         <goals>
-                            <goal>single</goal>
+                            <goal>shade</goal>
                         </goals>
                     </execution>
                 </executions>

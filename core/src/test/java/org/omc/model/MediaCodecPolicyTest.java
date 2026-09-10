@@ -70,4 +70,37 @@ class MediaCodecPolicyTest {
         assertEquals("libx264", MediaCodecPolicy.videoCodec(FileFormat.MP4, "libx264"));
         assertEquals("mpeg4", MediaCodecPolicy.videoCodec(FileFormat.AVI, "mpeg4"));
     }
+
+    // ===== idempotency: re-applying the policy must be a no-op =====
+    // AudioSettings applies audioCodec in outputFormat() and again in build();
+    // VideoSettings applies videoCodec in outputFormat() and withOutputFormat().
+    // A second application must never flip an already-compatible codec.
+
+    @Test
+    void audioCodec_applyingTwice_equalsApplyingOnce() {
+        String[] representativeCodecs = {
+                "aac", "libmp3lame", "pcm_s16le", "flac", "libopus",
+                "libvorbis", "alac", "opus", "copy", "ac3", null };
+        for (FileFormat format : FileFormat.values()) {
+            for (String codec : representativeCodecs) {
+                String appliedOnce = MediaCodecPolicy.audioCodec(format, codec);
+                assertEquals(appliedOnce, MediaCodecPolicy.audioCodec(format, appliedOnce),
+                        () -> "audioCodec not idempotent for " + format + " x " + codec);
+            }
+        }
+    }
+
+    @Test
+    void videoCodec_applyingTwice_equalsApplyingOnce() {
+        String[] representativeCodecs = {
+                "libx264", "libvpx-vp9", "wmv2", "flv", "mpeg4",
+                "h264_nvenc", "hevc_nvenc", "libx265", null };
+        for (FileFormat format : FileFormat.values()) {
+            for (String codec : representativeCodecs) {
+                String appliedOnce = MediaCodecPolicy.videoCodec(format, codec);
+                assertEquals(appliedOnce, MediaCodecPolicy.videoCodec(format, appliedOnce),
+                        () -> "videoCodec not idempotent for " + format + " x " + codec);
+            }
+        }
+    }
 }

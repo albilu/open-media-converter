@@ -166,6 +166,98 @@ class StateManagerTest {
     }
 
     @Test
+    void loadState_BindFailureWithBadPendingFile_SalvagesWindowSortAndDropsOnlyBadFile() throws IOException {
+        // Given: A parseable state.json with valid windowState and sortState,
+        // but ONE pendingFile entry carrying an unknown status enum ("WAT")
+        Path realFile = tempDir.resolve("video1.mp4");
+        Files.createFile(realFile);
+
+        String json = """
+                {
+                  "windowState": {"width": 1200, "height": 800, "x": 40, "y": 60, "maximized": false, "fullscreen": false},
+                  "sessionState": {
+                    "recentFilePaths": [],
+                    "lastInputDirectory": null,
+                    "lastOutputDirectory": null,
+                    "pendingFiles": [
+                      {"id": "file-1", "path": "%s", "format": "MP4", "size": 100, "status": "PENDING", "progress": 0},
+                      {"id": "file-2", "path": "/nonexistent/video2.mp4", "format": "MP4", "size": 200, "status": "WAT", "progress": 0}
+                    ],
+                    "lastUsedPreset": null
+                  },
+                  "conversionSettings": null,
+                  "fileListSortState": {"sortField": "NAME", "sortDirection": "ASCENDING"},
+                  "version": "1.0.0",
+                  "lastSaved": 1700000000000
+                }
+                """.formatted(realFile.toString().replace("\\", "\\\\"));
+        Files.writeString(stateManager.getStateFilePath(), json, StandardOpenOption.CREATE);
+
+        // When: Load state (whole-file bind fails on the bad enum)
+        ApplicationState state = stateManager.loadState();
+
+        // Then: Window state is preserved (not full defaults)
+        assertEquals(1200, state.windowState().width());
+        assertEquals(800, state.windowState().height());
+
+        // And: Sort state is preserved
+        assertEquals(SortField.NAME, state.fileListSortState().sortField());
+        assertEquals(SortDirection.ASCENDING, state.fileListSortState().sortDir());
+
+        // And: Only the unreadable pendingFile is dropped; the valid one survives
+        assertEquals(1, state.sessionState().pendingFiles().size());
+        assertEquals("file-1", state.sessionState().pendingFiles().get(0).id());
+    }
+
+    @Test
+    void loadState_BindFailureWithMalformedRecentFilePath_DropsOnlyBadEntryAndSalvagesRest()
+            throws IOException {
+        // Given: A parseable state.json with valid windowState, one existing
+        // and one malformed (NUL byte) recent file path, and one valid
+        // pendingFile; whole-file binding fails on the malformed path, so
+        // loading takes the per-field salvage path
+        Path realFile = tempDir.resolve("video1.mp4");
+        Files.createFile(realFile);
+
+        String json = """
+                {
+                  "windowState": {"width": 1200, "height": 800, "x": 40, "y": 60, "maximized": false, "fullscreen": false},
+                  "sessionState": {
+                    "recentFilePaths": ["%s", "\\u0000bad"],
+                    "lastInputDirectory": null,
+                    "lastOutputDirectory": null,
+                    "pendingFiles": [
+                      {"id": "file-1", "path": "%s", "format": "MP4", "size": 100, "status": "PENDING", "progress": 0}
+                    ],
+                    "lastUsedPreset": "My Preset"
+                  },
+                  "conversionSettings": null,
+                  "fileListSortState": {"sortField": "NAME", "sortDirection": "ASCENDING"},
+                  "version": "1.0.0",
+                  "lastSaved": 1700000000000
+                }
+                """.formatted(realFile.toString().replace("\\", "\\\\"),
+                        realFile.toString().replace("\\", "\\\\"));
+        Files.writeString(stateManager.getStateFilePath(), json, StandardOpenOption.CREATE);
+
+        // When: Load state (salvage must not abort on the malformed path)
+        ApplicationState state = stateManager.loadState();
+
+        // Then: Window state is preserved (not full defaults)
+        assertEquals(1200, state.windowState().width());
+        assertEquals(800, state.windowState().height());
+
+        // And: Only the malformed recent path is dropped; the existing one survives
+        assertEquals(1, state.sessionState().recentFilePaths().size());
+        assertEquals(realFile, state.sessionState().recentFilePaths().get(0));
+
+        // And: Other salvaged session fields are kept
+        assertEquals("My Preset", state.sessionState().lastUsedPreset());
+        assertEquals(1, state.sessionState().pendingFiles().size());
+        assertEquals("file-1", state.sessionState().pendingFiles().get(0).id());
+    }
+
+    @Test
     void loadState_ShouldValidateAndCleanState() throws IOException {
         // Given: State with invalid window dimensions
         WindowState invalidWindow = new WindowState(-100, -100, 0, 0, false, false);
@@ -698,7 +790,7 @@ class StateManagerTest {
                     int expectedRecentCount = i + 1;
                     List<Path> recentFilePaths = phantomRecentPaths(expectedRecentCount);
                     startIteration.await();
-                    handler.saveApplicationState(recentFilePaths, null, null, null);
+                    handler.saveApplicationState(recentFilePaths, null, null, null, null);
                     iterationDone.await();
                     if (stateManager.getCurrentState().sessionState().recentFilePaths().size()
                             != expectedRecentCount) {

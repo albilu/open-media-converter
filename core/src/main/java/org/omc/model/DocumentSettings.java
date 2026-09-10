@@ -185,7 +185,8 @@ public final class DocumentSettings {
      * Validates document settings.
      * Requirement REQ-2.5: Validate output format is DOCUMENT category.
      * 
-     * @return true if settings are valid
+     * @return true if settings are valid, including that a configured
+     *         template file currently exists on disk
      */
     @JsonIgnore
     public boolean isValid() {
@@ -194,6 +195,26 @@ public final class DocumentSettings {
             return false;
         }
 
+        return isStructurallyValid();
+    }
+
+    /**
+     * Validates document settings without touching the filesystem.
+     *
+     * <p>
+     * Checks everything {@link #isValid()} checks <em>except</em> the
+     * existence of {@code templatePath}: margins must be within 0-100mm and
+     * the output format must belong to the DOCUMENT category. The template
+     * path may reference removable or offline storage, so transient
+     * filesystem state must not decide whether persisted settings data is
+     * structurally sound (e.g. when retaining loaded presets).
+     * </p>
+     *
+     * @return true if the settings are structurally valid, independent of
+     *         any file existing on disk
+     */
+    @JsonIgnore
+    public boolean isStructurallyValid() {
         // Margin validation (0-100mm)
         if (marginTop < 0 || marginTop > 100) {
             return false;

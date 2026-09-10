@@ -251,12 +251,12 @@ class ProgressUpdateThrottlingTest {
         // Start tracking
         progressEngine.startTracking(fileId, totalSize);
 
-        // Send slow updates (every 150ms)
+        // Send slow updates (every 600ms, above the 500ms batch throttle interval)
         int updatesSent = 0;
         for (int i = 0; i <= 10; i++) {
             progressEngine.updateProgress(fileId, (totalSize * i) / 10);
             updatesSent++;
-            Thread.sleep(150); // 150ms between updates
+            Thread.sleep(600); // 600ms between updates (> 500ms throttle interval)
         }
 
         // Wait for any pending updates
@@ -298,11 +298,12 @@ class ProgressUpdateThrottlingTest {
         progressEngine.addBatchProgressListener(callback1);
         progressEngine.addBatchProgressListener(callback2);
 
-        // Start tracking and send updates
+        // Start tracking and send updates (600ms apart, above the 500ms batch
+        // throttle interval so non-forced notifications get delivered)
         progressEngine.startTracking(fileId, totalSize);
         for (int i = 0; i <= 10; i++) {
             progressEngine.updateProgress(fileId, (totalSize * i) / 10);
-            Thread.sleep(20);
+            Thread.sleep(600);
         }
 
         Thread.sleep(200);

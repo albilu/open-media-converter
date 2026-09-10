@@ -124,7 +124,9 @@ public class DependencyFactory {
             logger.info("Application dependencies initialized successfully");
             return controller;
 
-        } catch (Exception e) {
+        } catch (StateIOException | RuntimeException e) {
+            // StateIOException is the only checked exception the phases
+            // declare; everything else they can throw is unchecked
             logger.error("Failed to initialize application dependencies", e);
             // Phase 3 already created a ConversionEngine owning a worker pool
             // and a disk-space monitor thread; leaving it running would leak
@@ -142,7 +144,7 @@ public class DependencyFactory {
         if (conversionEngine != null) {
             try {
                 conversionEngine.shutdown();
-            } catch (Exception shutdownError) {
+            } catch (RuntimeException shutdownError) {
                 logger.error("Error shutting down ConversionEngine after failed initialization", shutdownError);
             }
         }
@@ -410,7 +412,7 @@ public class DependencyFactory {
             try {
                 conversionEngine.shutdown();
                 logger.debug("ConversionEngine shutdown complete");
-            } catch (Exception e) {
+            } catch (RuntimeException e) {
                 logger.error("Error shutting down ConversionEngine", e);
             }
         }

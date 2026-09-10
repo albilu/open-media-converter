@@ -2,13 +2,17 @@
 
 package org.omc.controller;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.io.IOException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -17,6 +21,9 @@ import java.util.function.UnaryOperator;
 
 import org.omc.core.ConfigurationManager;
 import org.omc.model.ApplicationState;
+import org.omc.model.ConversionFile;
+import org.omc.model.ConversionSettings;
+import org.omc.model.FileListSortState;
 import org.omc.model.SessionState;
 import org.omc.model.WindowState;
 import org.omc.util.JsonUtils;
@@ -76,8 +83,18 @@ public class StateManager {
 
     /**
      * Loads application state from disk.
-     * If the state file doesn't exist or is corrupted, returns default state.
-     * Corrupted files are backed up with timestamp.
+     * If the state file doesn't exist, returns default state.
+     *
+     * <p>
+     * <b>Corruption recovery:</b> when the file cannot be bound to
+     * {@link ApplicationState} in one piece, fields that bind cleanly are
+     * salvaged from the JSON tree (window state, sort state, conversion
+     * settings, and the session state minus its unreadable pieces; for
+     * {@code pendingFiles} only the unreadable entries are dropped) and the
+     * rest are reset to defaults. Files that are not parseable JSON at all
+     * keep the historical full-reset behaviour. Corrupted files are backed
+     * up with timestamp before any use of salvaged data.
+     * </p>
      *
      * States written by an older schema (major or minor) are migrated through
      * {@link #migrateState(ApplicationState)}. States written by a newer
@@ -85,9 +102,16 @@ public class StateManager {
      *
      * Requirement REQ-005.3: State persistence
      *
-     * @return Loaded or default state
+     * <p>
+     * Runs under the same monitor as {@link #saveState} and
+     * {@link #updateState} so the {@code currentState} writes below can
+     * never interleave a concurrent update's read-modify-write; startup
+     * semantics are unchanged (the monitor is uncontended at startup).
+     * </p>
+     *
+     * @return Loaded, salvaged or default state
      */
-    public ApplicationState loadState() {
+    public synchronized ApplicationState loadState() {
         Path statePath = getStatePath();
         logger.info("Loading application state from: {}", statePath);
 
@@ -114,30 +138,221 @@ public class StateManager {
                 return defaults;
             }
 
-            // Validate and clean state
-            ApplicationState validatedState = state.validated();
-
-            // Check if state needs migration (major and minor are compared; patch ignored)
-            if (state.needsMigration(ApplicationState.CURRENT_STATE_VERSION)) {
-                logger.info("State requires migration from version {} to {}",
-                        state.version(), ApplicationState.CURRENT_STATE_VERSION);
-                validatedState = migrateState(validatedState);
-            } else if (!ApplicationState.CURRENT_STATE_VERSION.equals(state.version())) {
-                logger.info("State schema {} is same-generation or newer than {}; keeping state as-is",
-                        state.version(), ApplicationState.CURRENT_STATE_VERSION);
-            }
-
-            currentState.set(validatedState);
+            ApplicationState validatedState = finishLoading(state);
             logger.info("Application state loaded successfully");
             return validatedState;
 
         } catch (IOException e) {
             logger.error("Error reading state file: {}", statePath, e);
-            backupCorruptedState(statePath);
-            ApplicationState defaults = ApplicationState.defaultState();
-            currentState.set(defaults);
-            return defaults;
+            return recoverCorruptedState(statePath);
         }
+    }
+
+    /**
+     * Applies the validation, schema-migration and publication steps shared
+     * by the normal and the salvaged load paths.
+     *
+     * @param state the freshly bound state (may still carry its saved version)
+     * @return validated (and if required migrated) state, also published as
+     *         the current state
+     */
+    private ApplicationState finishLoading(ApplicationState state) {
+        // Validate and clean state
+        ApplicationState validatedState = state.validated();
+
+        // Check if state needs migration (major and minor are compared; patch ignored)
+        if (state.needsMigration(ApplicationState.CURRENT_STATE_VERSION)) {
+            logger.info("State requires migration from version {} to {}",
+                    state.version(), ApplicationState.CURRENT_STATE_VERSION);
+            validatedState = migrateState(validatedState);
+        } else if (!ApplicationState.CURRENT_STATE_VERSION.equals(state.version())) {
+            logger.info("State schema {} is same-generation or newer than {}; keeping state as-is",
+                    state.version(), ApplicationState.CURRENT_STATE_VERSION);
+        }
+
+        currentState.set(validatedState);
+        return validatedState;
+    }
+
+    /**
+     * Recovers a state file whose content could not be bound to
+     * {@link ApplicationState} in one piece.
+     *
+     * <p>
+     * Mirrors the per-section salvage philosophy of
+     * {@code SettingsManager.recoverCorruptedSettings}: the file is parsed
+     * into a JSON tree and every field that binds cleanly is salvaged. For
+     * {@code sessionState.pendingFiles}, the {@link ConversionFile} entries
+     * that bind are kept and only the unreadable entries are dropped with a
+     * warning; a top-level field that is wholly unreadable falls back to its
+     * default. Only files that are not parseable JSON at all keep the
+     * historical full-reset behaviour.
+     * </p>
+     *
+     * <p>
+     * The original file is always backed up first (fail-closed) and is never
+     * rewritten during load; the salvaged state is persisted by the next
+     * save.
+     * </p>
+     *
+     * @param statePath path to the state file
+     * @return salvaged state, or full defaults when nothing is recoverable
+     */
+    private ApplicationState recoverCorruptedState(Path statePath) {
+        JsonNode root;
+        try {
+            root = JsonUtils.getObjectMapper().readTree(statePath.toFile());
+        } catch (IOException e) {
+            logger.warn("State file is not readable JSON; resetting to defaults", e);
+            return resetStateToDefaults(statePath);
+        }
+
+        if (root == null || !root.isObject()) {
+            logger.warn("State file is not a JSON object; resetting to defaults");
+            return resetStateToDefaults(statePath);
+        }
+
+        // Keep the historical backup behaviour before using salvaged data
+        backupCorruptedState(statePath);
+
+        ApplicationState salvaged = finishLoading(salvageState(root));
+        logger.info("Application state recovered after corruption; unreadable parts were reset to defaults");
+        return salvaged;
+    }
+
+    /**
+     * Full-reset recovery: backs the file up and returns defaults.
+     */
+    private ApplicationState resetStateToDefaults(Path statePath) {
+        backupCorruptedState(statePath);
+        ApplicationState defaults = ApplicationState.defaultState();
+        currentState.set(defaults);
+        return defaults;
+    }
+
+    /**
+     * Builds an application state from a JSON tree, keeping every field
+     * that binds and taking defaults for the rest.
+     *
+     * @param root object node of the state file
+     * @return salvaged state (never null; defaults fill unreadable fields)
+     */
+    private ApplicationState salvageState(JsonNode root) {
+        WindowState windowState = salvageValue(root.get("windowState"), WindowState.class);
+        FileListSortState sortState = salvageValue(root.get("fileListSortState"), FileListSortState.class);
+        ConversionSettings conversionSettings =
+                salvageValue(root.get("conversionSettings"), ConversionSettings.class);
+
+        return new ApplicationState(
+                windowState != null ? windowState : WindowState.defaultState(),
+                salvageSessionState(root.get("sessionState")),
+                conversionSettings,
+                sortState != null ? sortState : FileListSortState.unsorted(),
+                salvageText(root.get("version"), ApplicationState.CURRENT_STATE_VERSION),
+                root.path("lastSaved").isNumber()
+                        ? root.get("lastSaved").asLong()
+                        : System.currentTimeMillis());
+    }
+
+    /**
+     * Converts one JSON subtree to the given type, returning null when it
+     * is absent or cannot be bound so only that field is reset.
+     *
+     * @param node the subtree, may be null or absent
+     * @param type the target model class
+     * @param <T>  model type
+     * @return the bound value, or null when the field must be reset
+     */
+    private <T> T salvageValue(JsonNode node, Class<T> type) {
+        if (node == null || node.isNull() || !node.isObject()) {
+            return null;
+        }
+        try {
+            return JsonUtils.getObjectMapper().treeToValue(node, type);
+        } catch (IOException | IllegalArgumentException e) {
+            logger.warn("Discarding unreadable state field during salvage: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Salvages the session state at field granularity: pending files that
+     * bind are kept individually and only unreadable entries are dropped.
+     *
+     * @param node the sessionState subtree, may be null or absent
+     * @return salvaged session state, or empty when wholly unreadable
+     */
+    private SessionState salvageSessionState(JsonNode node) {
+        if (node == null || node.isNull() || !node.isObject()) {
+            return SessionState.empty();
+        }
+
+        List<Path> recentFilePaths = new ArrayList<>();
+        JsonNode recents = node.get("recentFilePaths");
+        if (recents != null && recents.isArray()) {
+            int index = 0;
+            for (JsonNode entry : recents) {
+                // Per-entry salvage (mirrors pendingFiles): a malformed path
+                // (e.g. NUL byte) must drop only that entry, never abort the
+                // whole recovery
+                Path recent = salvagePath(entry);
+                if (recent != null) {
+                    recentFilePaths.add(recent);
+                } else if (entry.isTextual()) {
+                    logger.warn("Dropping malformed recentFilePaths entry #{} during state salvage", index);
+                }
+                index++;
+            }
+        }
+
+        List<ConversionFile> pendingFiles = new ArrayList<>();
+        JsonNode pending = node.get("pendingFiles");
+        if (pending != null && pending.isArray()) {
+            int index = 0;
+            for (JsonNode entry : pending) {
+                try {
+                    ConversionFile file =
+                            JsonUtils.getObjectMapper().treeToValue(entry, ConversionFile.class);
+                    if (file != null) {
+                        pendingFiles.add(file);
+                    }
+                } catch (IOException | IllegalArgumentException e) {
+                    logger.warn("Dropping unreadable pendingFile entry #{} during state salvage: {}",
+                            index, e.getMessage());
+                }
+                index++;
+            }
+        }
+
+        return new SessionState(
+                recentFilePaths,
+                salvagePath(node.get("lastInputDirectory")),
+                salvagePath(node.get("lastOutputDirectory")),
+                pendingFiles,
+                salvageText(node.get("lastUsedPreset"), null));
+    }
+
+    /**
+     * Converts a textual JSON node to a path, returning null when absent or
+     * malformed.
+     */
+    private Path salvagePath(JsonNode node) {
+        if (node == null || !node.isTextual()) {
+            return null;
+        }
+        try {
+            return Path.of(node.asText());
+        } catch (InvalidPathException e) {
+            logger.warn("Discarding malformed path during state salvage: {}", node.asText());
+            return null;
+        }
+    }
+
+    /**
+     * Returns a textual JSON node's value or the given fallback.
+     */
+    private String salvageText(JsonNode node, String fallback) {
+        return node != null && node.isTextual() ? node.asText() : fallback;
     }
 
     /**

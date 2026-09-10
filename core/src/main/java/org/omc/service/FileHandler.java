@@ -59,9 +59,22 @@ public class FileHandler {
             "application/vnd.oasis.opendocument.presentation", FileFormat.ODP,
             "application/epub+zip", FileFormat.EPUB);
 
-    // Streamed copy chunk size; progress callbacks are emitted per chunk,
-    // which naturally throttles them to at most one per 64KB.
+    // Well-known BMP DIB header sizes (BITMAPCOREHEADER through
+    // BITMAPV5HEADER). "BM" alone matches almost any text starting with
+    // those two bytes, so BMP detection additionally requires the DIB
+    // header size (little-endian int at offset 14) to be one of these.
+    // Exotic/ancient BMP variants failing this check fall back to
+    // extension detection, which still routes real .bmp files correctly.
+    private static final Set<Integer> BMP_DIB_HEADER_SIZES = Set.of(12, 40, 52, 56, 64, 108, 124);
+
+    // Streamed copy chunk size.
     private static final int COPY_BUFFER_SIZE = 64 * 1024;
+
+    // Minimum interval between copy progress callbacks (~100ms): reporting
+    // every 64KB chunk means ~16k calls/GB, which floods listeners for
+    // large copies. The first chunk reports immediately; a final callback
+    // at completion always carries the total.
+    private static final long COPY_PROGRESS_THROTTLE_MILLIS = 100;
 
     // Registered files for cleanup on shutdown
     private final Set<Path> cleanupRegistry = ConcurrentHashMap.newKeySet();
@@ -281,9 +294,12 @@ public class FileHandler {
      *
      * <p>
      * The copy streams through a 64KB buffer and invokes the callback with
-     * the cumulative number of bytes copied after every chunk, so callers see
-     * progress grow during the copy instead of a single fake 100% report
-     * after an atomic copy. An empty file produces no callbacks.
+     * the cumulative number of bytes copied. Callbacks are time-throttled
+     * to at most one every ~100ms (the first chunk reports immediately and
+     * a final callback at completion always carries the total), so callers
+     * see progress grow during the copy instead of a single fake 100%
+     * report after an atomic copy, without being flooded per chunk. An
+     * empty file produces no callbacks.
      * </p>
      *
      * <p>
@@ -320,6 +336,8 @@ public class FileHandler {
         }
 
         long bytesCopied = 0;
+        long lastCallbackMillis = -1; // -1 => first chunk reports immediately
+        long reportedBytes = 0;
         byte[] buffer = new byte[COPY_BUFFER_SIZE];
         try (InputStream input = Files.newInputStream(source);
                 OutputStream output = overwrite
@@ -331,9 +349,19 @@ public class FileHandler {
             while ((bytesRead = input.read(buffer)) != -1) {
                 output.write(buffer, 0, bytesRead);
                 bytesCopied += bytesRead;
-                if (progressCallback != null) {
+                if (progressCallback != null && (lastCallbackMillis < 0
+                        || System.currentTimeMillis() - lastCallbackMillis >= COPY_PROGRESS_THROTTLE_MILLIS)) {
                     progressCallback.accept(bytesCopied);
+                    reportedBytes = bytesCopied;
+                    lastCallbackMillis = System.currentTimeMillis();
                 }
+            }
+            // Final callback so the total is always reported. Skipped when
+            // nothing was streamed (empty files produce no callbacks, per
+            // the existing contract) and when the last throttled report
+            // already carried the total.
+            if (progressCallback != null && bytesCopied > 0 && reportedBytes != bytesCopied) {
+                progressCallback.accept(bytesCopied);
             }
         } catch (FileAlreadyExistsException e) {
             throw new FileOperationException(
@@ -599,7 +627,9 @@ public class FileHandler {
         }
 
         try {
-            byte[] header = readFileHeader(filePath, 16);
+            // 18 bytes: the longest generic signature is 12 bytes, but the
+            // BMP validation reads the DIB header size from bytes 14-17.
+            byte[] header = readFileHeader(filePath, 18);
             if (header.length == 0) {
                 return null;
             }
@@ -614,6 +644,12 @@ public class FileHandler {
                 // return UNKNOWN, making the ZIP content inspection dead code
                 // and reducing every zip-based file to extension detection.
                 if ("ZIP".equals(formatName)) {
+                    continue;
+                }
+                // "BMP" is a 2-byte signature that false-positives on any
+                // "BM..." file (e.g. a text starting "BMW is a car"): require
+                // a plausible DIB header before the magic can win.
+                if ("BMP".equals(formatName) && !looksLikeBmp(header)) {
                     continue;
                 }
                 for (byte[] signature : entry.getValue()) {
@@ -681,6 +717,25 @@ public class FileHandler {
         }
 
         return true;
+    }
+
+    /**
+     * Cheap structural validation for BMP: after the "BM" signature, bytes
+     * 14-17 hold the DIB header size as a little-endian int, which for every
+     * real BMP variant is one of {@link #BMP_DIB_HEADER_SIZES}.
+     *
+     * @param header The file header bytes (at least 18 bytes long)
+     * @return true if the header carries a known DIB header size
+     */
+    private static boolean looksLikeBmp(byte[] header) {
+        if (header.length < 18) {
+            return false;
+        }
+        int dibHeaderSize = (header[14] & 0xFF)
+                | (header[15] & 0xFF) << 8
+                | (header[16] & 0xFF) << 16
+                | (header[17] & 0xFF) << 24;
+        return BMP_DIB_HEADER_SIZES.contains(dibHeaderSize);
     }
 
     /**

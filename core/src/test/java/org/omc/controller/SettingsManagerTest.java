@@ -519,6 +519,65 @@ class SettingsManagerTest {
     }
 
     @Test
+    void testLoadPresetsBySection_KeepsDocumentPresetWithNonExistentTemplatePath() throws IOException {
+        // Given: A document preset whose template lives on removable/offline
+        // storage (path does not currently exist); everything else is valid
+        Path offlineTemplate = tempDir.resolve("removable").resolve("template.docx");
+        DocumentSettings documentSettings = DocumentSettings.builder()
+                .outputFormat(FileFormat.PDF)
+                .templatePath(offlineTemplate)
+                .build();
+        SectionPreset documentPreset = SectionPreset.forDocument(
+                "Offline Template", "Template on removable storage", documentSettings, false);
+
+        PresetsBySection presets = new PresetsBySection(
+                List.of(), List.of(), List.of(), List.of(documentPreset));
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        JsonUtils.writeJsonFile(presets, presetsPath.toFile());
+
+        // When: Load presets
+        PresetsBySection loaded = settingsManager.loadPresetsBySection();
+
+        // Then: The preset is retained (load-time retention must not depend
+        // on transient filesystem state, otherwise the next unrelated save
+        // would permanently delete it from presets.json)
+        assertEquals(1, loaded.documentPresets().size());
+        assertEquals("Offline Template", loaded.documentPresets().get(0).name());
+        assertEquals(offlineTemplate, loaded.documentPresets().get(0).documentSettings().templatePath());
+    }
+
+    @Test
+    void testSectionSettingsStructurallyValid_DocumentPresetIgnoresTemplateExistence() {
+        // Given: A document preset whose template path does not exist on disk
+        Path offlineTemplate = tempDir.resolve("removable").resolve("template.docx");
+        DocumentSettings documentSettings = DocumentSettings.builder()
+                .outputFormat(FileFormat.PDF)
+                .templatePath(offlineTemplate)
+                .build();
+        SectionPreset preset = SectionPreset.forDocument(
+                "Offline Template", null, documentSettings, false);
+
+        // Then: The load-time structural check accepts it (runtime
+        // documentSettings().isValid() would reject it)
+        assertFalse(documentSettings.isValid());
+        assertTrue(SettingsManager.sectionSettingsStructurallyValid(preset));
+    }
+
+    @Test
+    void testSectionSettingsStructurallyValid_StillRejectsStructurallyInvalidDocumentSettings() throws IOException {
+        // Given: A document preset deserialized with an out-of-range margin
+        // (bypasses the builder) — structurally invalid regardless of filesystem
+        DocumentSettings badMargins = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readValue("{\"marginTop\": 500, \"outputFormat\": \"PDF\", "
+                        + "\"templatePath\": \"" + tempDir.resolve("t.docx").toString().replace("\\", "\\\\")
+                        + "\"}", DocumentSettings.class);
+        SectionPreset preset = SectionPreset.forDocument("Bad Margins", null, badMargins, false);
+
+        assertFalse(badMargins.isStructurallyValid());
+        assertFalse(SettingsManager.sectionSettingsStructurallyValid(preset));
+    }
+
+    @Test
     void testLoadPresetsBySection_WithMissingFile() {
         // When: Load presets when file doesn't exist
         PresetsBySection presets = settingsManager.loadPresetsBySection();
@@ -943,6 +1002,84 @@ class SettingsManagerTest {
     }
 
     @Test
+    void testDegeneratePresetsFile_RepeatedLoads_CreateSingleBackup() throws IOException {
+        // Given: A degenerate (unparseable) presets file that never gets
+        // rewritten because migration always fails on it
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        Files.writeString(presetsPath, "{ not valid json");
+
+        // When: Load three times (e.g. across three launches)
+        settingsManager.loadPresetsBySection();
+        settingsManager.loadPresetsBySection();
+        settingsManager.loadPresetsBySection();
+
+        // Then: Exactly one backup exists - unchanged content must not
+        // create a new timestamped backup on every load
+        List<Path> backups;
+        try (var files = Files.list(configDir)) {
+            backups = files
+                    .filter(p -> p.getFileName().toString().startsWith("presets.json.old."))
+                    .filter(p -> p.getFileName().toString().endsWith(".bak"))
+                    .toList();
+        }
+        assertEquals(1, backups.size(), "unchanged degenerate presets file must not be re-backed-up per load");
+    }
+
+    @Test
+    void testLoadPresetsBySection_DropsPresetsWithInvalidSectionSettings() throws IOException {
+        // Given: A current-format file with a valid video preset and a stale
+        // document preset whose outputFormat was recategorized (JPEG is
+        // IMAGE-only, no longer a valid DOCUMENT output format). The builder
+        // rejects such settings today, so the file must have been written by
+        // an older version - hand-write the JSON to model that.
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        String presetsJson = """
+                {
+                  "videoPresets": [
+                    {
+                      "name": "Valid Video",
+                      "description": null,
+                      "category": "VIDEO",
+                      "videoSettings": {"outputFormat": "MP4", "codec": "libx264", "bitrate": 5000},
+                      "builtIn": false,
+                      "createdAt": 1700000000000
+                    }
+                  ],
+                  "audioPresets": [],
+                  "imagePresets": [],
+                  "documentPresets": [
+                    {
+                      "name": "Stale Doc",
+                      "description": "JPEG document preset from before recategorization",
+                      "category": "DOCUMENT",
+                      "documentSettings": {"outputFormat": "JPEG"},
+                      "builtIn": false,
+                      "createdAt": 1700000000000
+                    }
+                  ]
+                }
+                """;
+        Files.writeString(presetsPath, presetsJson);
+
+        // When: Load presets
+        PresetsBySection loaded = settingsManager.loadPresetsBySection();
+
+        // Then: The valid video preset survives
+        assertEquals(1, loaded.videoPresets().size());
+        assertEquals("Valid Video", loaded.videoPresets().get(0).name());
+
+        // And: The stale document preset is dropped in-memory with a warn
+        assertEquals(0, loaded.documentPresets().size(),
+                "preset whose section settings are invalid must be dropped at load");
+
+        // And: The file itself is untouched (conservative in-memory-only
+        // filtering; the next save naturally drops the preset)
+        JsonNode root = JsonUtils.getObjectMapper().readTree(presetsPath.toFile());
+        assertEquals(1, root.get("documentPresets").size(),
+                "load must not rewrite the presets file");
+    }
+
+    @Test
     void testOldPresetApi_OnNewFormatFile_DoesNotWipeSectionPresets() throws IOException {
         // Given: A new-format file with a section preset
         Path outputDir = tempDir.resolve("output");
@@ -1060,12 +1197,16 @@ class SettingsManagerTest {
     @Test
     void testMigration_SameSecondBackups_DoNotOverwriteEachOther() throws IOException {
         // Given: A corrupt presets file that triggers two migration attempts
-        // within the same second (parse always fails, file is never rewritten)
+        // within the same second (parse always fails, file is never
+        // rewritten). The content changes between attempts so both backups
+        // are legitimately distinct (unchanged content is de-duplicated,
+        // see testDegeneratePresetsFile_RepeatedLoads_CreateSingleBackup).
         Path presetsPath = configurationManager.getPresetsFilePath();
-        Files.writeString(presetsPath, "{ not valid json");
+        Files.writeString(presetsPath, "{ not valid json A");
 
         // When: Two migration attempts run back to back
         settingsManager.loadPresetsBySection();
+        Files.writeString(presetsPath, "{ not valid json B");
         settingsManager.loadPresetsBySection();
 
         // Then: Both backups must survive (distinct names, not overwriting)

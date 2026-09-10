@@ -28,6 +28,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -42,7 +44,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 
 import org.junit.jupiter.api.AfterEach;
@@ -69,6 +73,7 @@ import org.omc.model.ValidationResult;
 import org.omc.model.VideoSettings;
 import org.omc.exception.ErrorCode;
 import org.omc.exception.FileOperationException;
+import org.omc.exception.ToolExecutionException;
 import org.omc.service.FileHandler;
 import org.slf4j.Logger;
 import org.slf4j.Logger;
@@ -3164,6 +3169,182 @@ class ConversionEngineTest {
                         Files.deleteIfExists(completedOriginal);
                         Files.deleteIfExists(activeOriginal);
                 }
+        }
+
+        // ==================== Returned-future cancel isolation test ====================
+
+        /**
+         * Defect: the future returned to callers was a hand-rolled bridge that
+         * forwarded an external cancel() to the internal future. A cancel
+         * racing the normal internal completion made the caller observe a
+         * cancellation although the conversion succeeded and its result was
+         * stored, and the pass-through turned the stored result into a
+         * cancelled one. The returned future must be a non-cancellable view:
+         * an external cancel is honored for the caller's own future but can
+         * neither reach the underlying task nor disturb result storage.
+         */
+        @Test
+        @Timeout(30)
+        void externalCancelOfReturnedFuture_MustNotAffectStoredResult() throws Exception {
+                CountDownLatch toolStarted = new CountDownLatch(1);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                try {
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> {
+                                                toolStarted.countDown();
+                                                releaseTool.await(10, TimeUnit.SECONDS);
+                                                Path tempPath = invocation.getArgument(2);
+                                                Files.write(tempPath, "content".getBytes());
+                                                return ConversionResult.success(testFile.id(), tempPath, null,
+                                                                Duration.ofSeconds(1), 1000L, 800L,
+                                                                ConversionTool.FFMPEG);
+                                        });
+
+                        CompletableFuture<ConversionResult> returned = conversionEngine.convertSingle(testFile,
+                                        testSettings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS), "Conversion should reach the tool");
+
+                        // The caller's cancel of the pending view is honored for the caller ...
+                        assertTrue(returned.cancel(true), "Cancelling the pending returned future must succeed");
+                        assertThrows(CancellationException.class, () -> returned.get(2, TimeUnit.SECONDS));
+
+                        releaseTool.countDown();
+
+                        // ... but the internal completion must still store the successful result
+                        ConversionResult stored = waitForStoredResult(testFile.id());
+                        assertTrue(stored.success(),
+                                        "External cancel must not turn the internal successful result into a "
+                                                        + "cancelled one, but was: " + stored);
+                } finally {
+                        releaseTool.countDown();
+                }
+        }
+
+        // ==================== Daemon worker thread test ====================
+
+        /**
+         * Defect: conversion workers were non-daemon, so a worker lingering
+         * past shutdown() (e.g. blocked in an uninterruptible tool wait) kept
+         * the whole JVM alive after "shutdown complete". shutdown() already
+         * destroys registered processes and awaits termination, so daemon
+         * workers are the correct trade-off.
+         */
+        @Test
+        void conversionWorkerThreads_MustBeDaemon() throws Exception {
+                Class<?> factoryClass = Class.forName("org.omc.core.ConversionEngine$ConversionThreadFactory");
+                Constructor<?> constructor = factoryClass.getDeclaredConstructor();
+                constructor.setAccessible(true);
+                ThreadFactory factory = (ThreadFactory) constructor.newInstance();
+
+                Thread worker = factory.newThread(() -> {
+                });
+
+                assertTrue(worker.isDaemon(),
+                                "conversion workers must be daemon so a lingering worker cannot keep the JVM "
+                                                + "alive after shutdown");
+                assertTrue(worker.getName().startsWith("conversion-"),
+                                "worker threads must stay named for debugging");
+        }
+
+        // ==================== Interrupt-path cancel symmetry tests ====================
+
+        /**
+         * Defect: when a cancel destroys the tool process, every service
+         * throws InterruptedException("Conversion cancelled by user") wrapped
+         * into a ToolExecutionException (with the interrupt as cause), but
+         * ConversionEngine's generic failure classification reported the file
+         * as FAILED instead of CANCELLED - asymmetric with the cooperative
+         * cancel flow. This reproduces the exact wrapped form FFmpegService
+         * produces.
+         */
+        @Test
+        @Timeout(30)
+        void toolExecutionExceptionWrappingInterrupt_WithCancelRequested_MustYieldCancelled() throws Exception {
+                CountDownLatch toolStarted = new CountDownLatch(1);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                try {
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> {
+                                                toolStarted.countDown();
+                                                releaseTool.await(10, TimeUnit.SECONDS);
+                                                throw new ToolExecutionException(
+                                                                "FFmpeg process interrupted: Conversion cancelled by user",
+                                                                ErrorCode.TOOL_EXECUTION_FAILED, "ffmpeg", null,
+                                                                null, null,
+                                                                new InterruptedException(
+                                                                                "Conversion cancelled by user"));
+                                        });
+
+                        CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(testFile,
+                                        testSettings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS), "Conversion should reach the tool");
+
+                        // A cancel arrived while the task was inside the tool
+                        setCancelRequested(true);
+
+                        releaseTool.countDown();
+                        ConversionResult result = future.get(10, TimeUnit.SECONDS);
+                        assertTrue(result.isCancelled(),
+                                        "Interrupt-path cancel must be classified CANCELLED, but was: " + result);
+                } finally {
+                        releaseTool.countDown();
+                }
+        }
+
+        /**
+         * Same symmetry requirement for a raw InterruptedException thrown by
+         * the tool layer (defensive counterpart of the wrapped form above).
+         */
+        @Test
+        @Timeout(30)
+        void rawInterruptedException_WithCancelRequested_MustYieldCancelled() throws Exception {
+                CountDownLatch toolStarted = new CountDownLatch(1);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                try {
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> {
+                                                toolStarted.countDown();
+                                                releaseTool.await(10, TimeUnit.SECONDS);
+                                                throw new InterruptedException("Conversion cancelled by user");
+                                        });
+
+                        CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(testFile,
+                                        testSettings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS), "Conversion should reach the tool");
+
+                        setCancelRequested(true);
+
+                        releaseTool.countDown();
+                        ConversionResult result = future.get(10, TimeUnit.SECONDS);
+                        assertTrue(result.isCancelled(),
+                                        "Interrupt-path cancel must be classified CANCELLED, but was: " + result);
+                } finally {
+                        releaseTool.countDown();
+                }
+        }
+
+        /**
+         * Sets the engine's private cancel flag directly, reproducing the
+         * state cancelConversion() leaves behind while a task is still
+         * executing inside a tool - without cancelling the task's future, so
+         * the task's own result classification stays observable.
+         */
+        private void setCancelRequested(boolean value) throws Exception {
+                Field field = ConversionEngine.class.getDeclaredField("cancelRequested");
+                field.setAccessible(true);
+                ((AtomicBoolean) field.get(conversionEngine)).set(value);
         }
 
         /**

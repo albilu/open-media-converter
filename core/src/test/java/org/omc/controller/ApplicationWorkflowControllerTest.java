@@ -42,7 +42,9 @@ import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+import java.util.function.UnaryOperator;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -1699,6 +1701,74 @@ class ApplicationWorkflowControllerTest {
         assertTrue(updatedFile.hasCustomSettings());
         assertEquals("HD Video", updatedFile.settingsOverride().presetName());
         assertEquals(videoSettings, updatedFile.settingsOverride().videoSettings());
+    }
+
+    @Test
+    void applyPresetToFiles_should_persistLastUsedPresetInSessionState() throws Exception {
+        // Arrange
+        initializeController();
+        ConversionFile videoFile = ConversionFile.create(
+                Path.of("/test/video.mp4"), FileFormat.MP4, 1024L);
+
+        when(fileManager.getFile("video1")).thenReturn(java.util.Optional.of(videoFile));
+        when(fileManager.getFiles()).thenReturn(List.of());
+
+        SectionPreset videoPreset = SectionPreset.forVideo(
+                "HD Video",
+                "1080p preset",
+                VideoSettings.builder().codec("H.264").bitrate(5000).build(),
+                false);
+
+        // Capture the result of the operator passed to the atomic state update
+        ApplicationState currentState = mock(ApplicationState.class);
+        when(currentState.fileListSortState()).thenReturn(FileListSortState.unsorted());
+        AtomicReference<ApplicationState> savedState = new AtomicReference<>();
+        when(stateManager.updateState(any())).thenAnswer(invocation -> {
+            UnaryOperator<ApplicationState> update = invocation.getArgument(0);
+            savedState.set(update.apply(currentState));
+            return savedState.get();
+        });
+
+        // Act
+        controller.applyPresetToFiles(List.of("video1"), videoPreset);
+        controller.shutdown(true);
+
+        // Assert: the persisted session state must record the applied preset
+        assertNotNull(savedState.get());
+        assertEquals("HD Video", savedState.get().sessionState().lastUsedPreset());
+    }
+
+    @Test
+    void shutdown_should_preserveRestoredLastUsedPreset_when_noNewPresetApplied() throws Exception {
+        // Arrange: initialize with a previously persisted last-used preset
+        ConversionSettings validSettings = createValidSettings();
+        ApplicationState mockState = mock(ApplicationState.class);
+        SessionState mockSessionState = mock(SessionState.class);
+
+        when(settingsManager.loadSettings()).thenReturn(validSettings);
+        when(stateManager.loadState()).thenReturn(mockState);
+        when(mockState.sessionState()).thenReturn(mockSessionState);
+        when(mockSessionState.pendingFiles()).thenReturn(List.of());
+        when(mockSessionState.lastUsedPreset()).thenReturn("Previously Used");
+        lenient().when(mockState.fileListSortState()).thenReturn(FileListSortState.unsorted());
+        lenient().when(stateManager.getCurrentState()).thenReturn(mockState);
+
+        controller.initialize();
+        when(fileManager.getFiles()).thenReturn(List.of());
+
+        AtomicReference<ApplicationState> savedState = new AtomicReference<>();
+        when(stateManager.updateState(any())).thenAnswer(invocation -> {
+            UnaryOperator<ApplicationState> update = invocation.getArgument(0);
+            savedState.set(update.apply(mockState));
+            return savedState.get();
+        });
+
+        // Act
+        controller.shutdown(true);
+
+        // Assert: restored value survives until a new preset is applied
+        assertNotNull(savedState.get());
+        assertEquals("Previously Used", savedState.get().sessionState().lastUsedPreset());
     }
 
     @Test

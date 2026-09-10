@@ -227,8 +227,10 @@ class AgentBRegressionTest {
 
     @Test
     void copyFileWithProgress_largeFile_reportsChunkedIncreasingProgress() throws IOException, FileOperationException {
-        // ~3 x 64KB + 100 bytes: must produce several callbacks, strictly
-        // increasing, ending at the total size (not one fake 100% ping).
+        // ~3 x 64KB + 100 bytes: must produce real streamed progress
+        // (throttled to ~100ms: a fast local copy reports the first chunk
+        // plus a final total), strictly increasing, ending at the total
+        // size (not one fake 100% ping).
         int total = 3 * COPY_BUFFER_SIZE + 100;
         Path source = tempDir.resolve("large-source.bin");
         byte[] data = new byte[total];
@@ -241,8 +243,8 @@ class AgentBRegressionTest {
         List<Long> callbacks = new CopyOnWriteArrayList<>();
         fileHandler.copyFile(source, destination, false, (Consumer<Long>) callbacks::add);
 
-        assertTrue(callbacks.size() >= 3,
-                "expected chunked progress callbacks but got " + callbacks.size());
+        assertTrue(callbacks.size() >= 2,
+                "expected streamed progress callbacks but got " + callbacks.size());
         long previous = -1;
         for (Long value : callbacks) {
             assertTrue(value > previous, "callbacks must be strictly increasing: " + callbacks);

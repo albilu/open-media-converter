@@ -108,9 +108,10 @@ class SessionStateHandler {
      * @param lastInputDirectory last browsed input directory (nullable)
      * @param lastOutputDirectory last browsed output directory (nullable)
      * @param currentSettings    current conversion settings snapshot
+     * @param lastUsedPreset     name of the last applied preset (nullable)
      */
     void saveApplicationState(List<Path> recentFilePaths, Path lastInputDirectory,
-            Path lastOutputDirectory, ConversionSettings currentSettings) {
+            Path lastOutputDirectory, ConversionSettings currentSettings, String lastUsedPreset) {
         try {
             // Build session state from current file list
             List<ConversionFile> pendingFiles = fileManager.getFiles();
@@ -120,7 +121,7 @@ class SessionStateHandler {
                     lastInputDirectory,
                     lastOutputDirectory,
                     pendingFiles,
-                    null // lastUsedPreset
+                    lastUsedPreset
             );
 
             // Merge into the current state atomically: the sort state read

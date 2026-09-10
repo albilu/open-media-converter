@@ -35,6 +35,54 @@ class DocumentSettingsTest {
     }
 
     @Test
+    void structuralValidation_NonExistentTemplatePath_IsStructurallyValidButNotRuntimeValid() {
+        // Given: Otherwise-valid settings whose template lives on (currently)
+        // offline/removable storage
+        DocumentSettings settings = DocumentSettings.builder()
+                .outputFormat(FileFormat.PDF)
+                .templatePath(Path.of("/nonexistent-removable/template.docx"))
+                .build();
+
+        // Then: Runtime validity still requires the template file to exist
+        assertFalse(settings.isValid());
+
+        // But: Structural validity ignores transient filesystem state
+        assertTrue(settings.isStructurallyValid());
+    }
+
+    @Test
+    void structuralValidation_OutOfRangeMarginDeserialized_IsStructurallyInvalid() throws Exception {
+        // Given: Deserialized settings (bypassing the builder) with an
+        // out-of-range margin
+        DocumentSettings deserialized = objectMapper.readValue(
+                "{\"marginTop\": 500, \"outputFormat\": \"PDF\"}", DocumentSettings.class);
+
+        // Then: Both validation variants reject it
+        assertFalse(deserialized.isValid());
+        assertFalse(deserialized.isStructurallyValid());
+    }
+
+    @Test
+    void structuralValidation_NonDocumentFormatDeserialized_IsStructurallyInvalid() throws Exception {
+        // Given: Deserialized settings with a non-DOCUMENT output format
+        DocumentSettings deserialized = objectMapper.readValue(
+                "{\"outputFormat\": \"JPEG\"}", DocumentSettings.class);
+
+        assertFalse(deserialized.isValid());
+        assertFalse(deserialized.isStructurallyValid());
+    }
+
+    @Test
+    void structuralValidation_MinimalValidSettings_IsStructurallyValid() throws Exception {
+        // Given: Minimal deserialized settings with no template
+        DocumentSettings deserialized = objectMapper.readValue(
+                "{\"outputFormat\": \"PDF\"}", DocumentSettings.class);
+
+        assertTrue(deserialized.isValid());
+        assertTrue(deserialized.isStructurallyValid());
+    }
+
+    @Test
     void builder_WithCustomValuesIncludingMarginsAndOutputFormat_ShouldSetCustomValues() {
         // Given: Builder with custom values
         DocumentSettings settings = DocumentSettings.builder()

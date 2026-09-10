@@ -58,8 +58,11 @@ public class ProgressEngine {
      * Minimum interval between batch progress notifications. Per-file updates
      * are throttled above; without this, every file update also fanned out to
      * all batch listeners and flooded the UI thread.
+     * Per NFR-FL-1 and AGENTS.md ("Throttle UI updates (max 2/sec)"): a
+     * 500ms interval caps batch notifications at two per second, matching
+     * the per-file {@link #THROTTLE_INTERVAL_MS} budget.
      */
-    private static final long BATCH_THROTTLE_INTERVAL_MS = 100;
+    private static final long BATCH_THROTTLE_INTERVAL_MS = 500;
     /** Last batch notification time in millis; 0 forces the first one. */
     private volatile long lastBatchNotificationTime;
 

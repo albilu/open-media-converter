@@ -108,7 +108,7 @@ public final class SettingsPreset {
      * @return New preset with updated settings
      */
     public SettingsPreset withSettings(ConversionSettings newSettings) {
-        return new SettingsPreset(name, description, newSettings, builtIn, System.currentTimeMillis());
+        return new SettingsPreset(name, description, newSettings, builtIn, createdAt);
     }
 
     /**
@@ -128,8 +128,10 @@ public final class SettingsPreset {
         if (o == null || getClass() != o.getClass())
             return false;
         SettingsPreset that = (SettingsPreset) o;
+        // createdAt is deliberately excluded: it is creation metadata, not
+        // identity — presets with identical name+description+settings+builtIn
+        // must stay equal so Set/Map dedup and edited copies keep working
         return builtIn == that.builtIn &&
-                createdAt == that.createdAt &&
                 Objects.equals(name, that.name) &&
                 Objects.equals(description, that.description) &&
                 Objects.equals(settings, that.settings);
@@ -137,7 +139,7 @@ public final class SettingsPreset {
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, description, settings, builtIn, createdAt);
+        return Objects.hash(name, description, settings, builtIn);
     }
 
     @Override

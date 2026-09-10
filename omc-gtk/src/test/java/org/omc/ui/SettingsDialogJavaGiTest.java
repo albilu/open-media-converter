@@ -789,13 +789,15 @@ class SettingsDialogJavaGiTest {
      */
     @Test
     void testAudioPresetSelectionLoadsValues() throws IOException {
-        // Create an audio preset with specific values
+        // Create an audio preset with specific values (FLAC codec paired with
+        // its FLAC container so the codec survives the container policy pass)
         AudioSettings expectedSettings = AudioSettings.builder()
                 .codec("flac")
                 .bitrate(320)
                 .sampleRate(96000)
                 .channels(6)
                 .quality(9)
+                .outputFormat(FileFormat.FLAC)
                 .build();
 
         SectionPreset audioPreset = SectionPreset.forAudio(

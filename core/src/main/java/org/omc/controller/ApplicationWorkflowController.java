@@ -72,6 +72,9 @@ public class ApplicationWorkflowController {
     private volatile Path lastInputDirectory;
     private volatile Path lastOutputDirectory;
     private volatile List<Path> recentFilePaths;
+    // Written on the GTK thread (preset application), read on worker threads
+    // (session-state saves) - volatile guarantees publication
+    private volatile String lastUsedPreset;
 
     // Current settings cached for quick access
     // Written on the GTK thread, read on engine threads (completion handler
@@ -118,6 +121,7 @@ public class ApplicationWorkflowController {
         this.lastInputDirectory = null;
         this.lastOutputDirectory = null;
         this.recentFilePaths = List.of();
+        this.lastUsedPreset = null;
 
         logger.debug("ApplicationWorkflowController created");
     }
@@ -167,6 +171,7 @@ public class ApplicationWorkflowController {
             this.lastInputDirectory = loadedSession.lastInputDirectory();
             this.lastOutputDirectory = loadedSession.lastOutputDirectory();
             this.recentFilePaths = loadedSession.recentFilePaths() != null ? loadedSession.recentFilePaths() : List.of();
+            this.lastUsedPreset = loadedSession.lastUsedPreset();
 
             // Restore window + file list from session state if any
             this.sessionState.restoreWindowState(state);
@@ -218,7 +223,7 @@ public class ApplicationWorkflowController {
                     conversionInProgress.set(false);
                     logger.info("Batch conversion complete, saving session state");
                     sessionState.saveApplicationState(recentFilePaths, lastInputDirectory,
-                    lastOutputDirectory, currentSettings);
+                    lastOutputDirectory, currentSettings, lastUsedPreset);
                 }
 
                 // Forward completion event to UI callback if registered
@@ -321,7 +326,7 @@ public class ApplicationWorkflowController {
             // Save current application state
             // Requirement REQ-005.1, REQ-005.2, REQ-005.3: Persist state
             sessionState.saveApplicationState(recentFilePaths, lastInputDirectory,
-                    lastOutputDirectory, currentSettings);
+                    lastOutputDirectory, currentSettings, lastUsedPreset);
 
             // Save current settings
             // Requirement REQ-003.1, REQ-005.3: Persist settings
@@ -887,7 +892,7 @@ public class ApplicationWorkflowController {
             // Save session state after removal to persist changes
             // Requirement REQ-005.2: Save session state
             sessionState.saveApplicationState(recentFilePaths, lastInputDirectory,
-                    lastOutputDirectory, currentSettings);
+                    lastOutputDirectory, currentSettings, lastUsedPreset);
 
             logger.info("Files removed successfully and state saved");
 
@@ -929,7 +934,7 @@ public class ApplicationWorkflowController {
             // Save session state after clearing
             // Requirement REQ-005.2: Save session state
             sessionState.saveApplicationState(recentFilePaths, lastInputDirectory,
-                    lastOutputDirectory, currentSettings);
+                    lastOutputDirectory, currentSettings, lastUsedPreset);
 
             logger.info("All files cleared successfully and state saved");
 
@@ -1379,6 +1384,8 @@ public class ApplicationWorkflowController {
      */
     public void applyPresetToFiles(List<String> fileIds, SectionPreset preset) {
         presetWorkflow.applyPresetToFiles(fileIds, preset);
+        // Record as session's last-used preset (persisted with session state)
+        this.lastUsedPreset = preset.name();
     }
 
     /**

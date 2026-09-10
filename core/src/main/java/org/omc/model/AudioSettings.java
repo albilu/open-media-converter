@@ -287,13 +287,21 @@ public final class AudioSettings {
 
         /**
          * Builds the AudioSettings instance.
+         * <p>
+         * Applies a final container-compatibility pass via
+         * {@link MediaCodecPolicy#audioCodec(FileFormat, String)} so the
+         * codec/format pair is valid regardless of the order codec and
+         * outputFormat were set. The pass is idempotent: a codec already
+         * rewritten by {@link #outputFormat(FileFormat)} is returned unchanged.
+         * </p>
          *
          * @return a new AudioSettings
          * @throws IllegalArgumentException if the settings are invalid
          */
         public AudioSettings build() {
             validate();
-            return new AudioSettings(codec, bitrate, sampleRate, channels, quality, outputFormat);
+            return new AudioSettings(MediaCodecPolicy.audioCodec(outputFormat, codec),
+                    bitrate, sampleRate, channels, quality, outputFormat);
         }
 
         private void validate() {

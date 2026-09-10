@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -697,54 +698,12 @@ public class FFmpegService {
                 "-show_format",
                 safePathArg(inputPath));
 
-        ProcessBuilder processBuilder = new ProcessBuilder(command);
-        processBuilder.redirectErrorStream(true);
-
-        logger.debug("Executing ffprobe command: {}", String.join(" ", command));
+        String output = runFfprobeBounded(command, "getting duration", inputPath);
+        if (output == null) {
+            return null;
+        }
 
         try {
-            Process process = processBuilder.start();
-
-            // Apply size limit similar to extractMetadata for consistency.
-            // Checked on EVERY line: a single oversized JSON line must also
-            // trigger truncation (a modulo-100 check would miss it entirely).
-            StringBuilder outputCapture = new StringBuilder(4096);
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                int lineCount = 0;
-                boolean truncated = false;
-
-                while ((line = reader.readLine()) != null) {
-                    lineCount++;
-
-                    if (!truncated) {
-                        if (outputCapture.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
-                            logger.warn("ffprobe output exceeded 1MB limit during duration extraction for {}",
-                                    inputPath);
-                            truncated = true;
-                            // Don't append more, but continue reading to process completion
-                        } else {
-                            outputCapture.append(line).append("\n");
-                        }
-                    }
-                }
-            }
-
-            String output = outputCapture.toString();
-
-            if (!process.waitFor(FFPROBE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
-                logger.warn("ffprobe timed out after {} ms while getting duration for {}",
-                        FFPROBE_TIMEOUT_MILLIS, inputPath);
-                process.destroyForcibly();
-                return null;
-            }
-
-            if (process.exitValue() != 0) {
-                logger.warn("ffprobe failed to get duration for {}", inputPath);
-                return null;
-            }
-
             ObjectMapper mapper = new ObjectMapper();
             JsonNode root = mapper.readTree(output);
             JsonNode format = root.path("format");
@@ -755,11 +714,6 @@ public class FFmpegService {
 
         } catch (IOException e) {
             logger.warn("Failed to get duration using ffprobe: {}", e.getMessage());
-            return null;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            logger.warn("Failed to get duration using ffprobe: {}", e.getMessage());
-            return null;
         }
 
         return null;
@@ -783,53 +737,12 @@ public class FFmpegService {
                 "-select_streams", "v:0", // Select first video stream only
                 safePathArg(inputPath));
 
-        ProcessBuilder processBuilder = new ProcessBuilder(command);
-        processBuilder.redirectErrorStream(true);
-
-        logger.debug("Executing ffprobe command to get frame count: {}", String.join(" ", command));
+        String output = runFfprobeBounded(command, "getting frame count", inputPath);
+        if (output == null) {
+            return -1;
+        }
 
         try {
-            Process process = processBuilder.start();
-
-            // Apply size limit similar to extractMetadata for consistency
-            // (checked on every line so oversized single lines also truncate).
-            StringBuilder outputCapture = new StringBuilder(4096);
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                int lineCount = 0;
-                boolean truncated = false;
-
-                while ((line = reader.readLine()) != null) {
-                    lineCount++;
-
-                    if (!truncated) {
-                        if (outputCapture.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
-                            logger.warn("ffprobe output exceeded 1MB limit during frame count extraction for {}",
-                                    inputPath);
-                            truncated = true;
-                            // Don't append more, but continue reading to process completion
-                        } else {
-                            outputCapture.append(line).append("\n");
-                        }
-                    }
-                }
-            }
-
-            String output = outputCapture.toString();
-
-            if (!process.waitFor(FFPROBE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
-                logger.warn("ffprobe timed out after {} ms while getting frame count for {}",
-                        FFPROBE_TIMEOUT_MILLIS, inputPath);
-                process.destroyForcibly();
-                return -1;
-            }
-
-            if (process.exitValue() != 0) {
-                logger.warn("ffprobe failed to get frame count for {}", inputPath);
-                return -1;
-            }
-
             ObjectMapper mapper = new ObjectMapper();
             JsonNode root = mapper.readTree(output);
             JsonNode streams = root.path("streams");
@@ -883,21 +796,141 @@ public class FFmpegService {
 
         } catch (IOException | NumberFormatException e) {
             logger.warn("Failed to get frame count using ffprobe: {}", e.getMessage());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            logger.warn("Failed to get frame count using ffprobe: {}", e.getMessage());
         }
 
         return -1;
     }
 
     /**
+     * How long the main thread waits for the ffprobe output reader to drain
+     * after the process has ended before parsing whatever was collected.
+     * The reader is a daemon and pipe reads are not interruptible, so this
+     * join is a brief courtesy, not a correctness requirement.
+     */
+    private static final long FFPROBE_READER_JOIN_MILLIS = TimeUnit.SECONDS.toMillis(2);
+
+    /**
+     * Runs an ffprobe query with a bounded wall-clock wait.
+     *
+     * Output (stderr merged into stdout) is consumed on a daemon reader
+     * thread - mirroring the outputReader gobbler pattern of
+     * PandocService/LibreOfficeService - because an inline readLine loop
+     * blocks forever on a hung ffprobe that holds the pipe open without
+     * producing output, and then never reaches the bounded waitFor. The
+     * main thread owns the bounded {@link #FFPROBE_TIMEOUT_MILLIS} wait
+     * plus destroyForcibly; after the process ends the reader is joined
+     * briefly and interrupted if still alive, then whatever it collected
+     * is returned (with the 1MB cap applied, checked on every line so a
+     * single oversized JSON line also triggers truncation).
+     *
+     * <p>
+     * Mirroring {@code executeConversion}, a finally block destroys the
+     * process unless it already ended on its own - a hung ffprobe caught by
+     * an interrupt (e.g. a cancelled conversion) must not outlive this call,
+     * since the bounded timeout no longer applies once the waiter exits.
+     * </p>
+     *
+     * @param command   ffprobe command line
+     * @param purpose   short description used in log messages
+     * @param inputPath file being probed (for log messages)
+     * @return captured output, or null on timeout, non-zero exit,
+     *         interruption or execution failure
+     */
+    private String runFfprobeBounded(List<String> command, String purpose, Path inputPath) {
+        ProcessBuilder processBuilder = new ProcessBuilder(command);
+        processBuilder.redirectErrorStream(true);
+
+        logger.debug("Executing ffprobe command: {}", String.join(" ", command));
+
+        Process process = null;
+        try {
+            process = processBuilder.start();
+
+            // Effectively-final alias so the reader lambda can capture the
+            // process even though the outer reference is reassigned/null.
+            final Process ffprobeProcess = process;
+
+            // Written only by the reader thread; read by this thread after
+            // the join below (synchronized so a join timeout still sees a
+            // consistent partial snapshot).
+            List<String> lines = Collections.synchronizedList(new ArrayList<>());
+            Thread outputReader = org.omc.util.ThreadUtils.createThreadFactory("FFprobe-Reader")
+                    .newThread(() -> {
+                        try (BufferedReader reader = new BufferedReader(
+                                new InputStreamReader(ffprobeProcess.getInputStream(), StandardCharsets.UTF_8))) {
+                            String line;
+                            while ((line = reader.readLine()) != null) {
+                                lines.add(line);
+                            }
+                        } catch (IOException e) {
+                            logger.trace("Error reading ffprobe output: {}", e.getMessage());
+                        }
+                    });
+            outputReader.start();
+
+            if (!process.waitFor(FFPROBE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+                logger.warn("ffprobe timed out after {} ms while {} for {}",
+                        FFPROBE_TIMEOUT_MILLIS, purpose, inputPath);
+                process.destroyForcibly();
+                return null;
+            }
+
+            outputReader.join(FFPROBE_READER_JOIN_MILLIS);
+            if (outputReader.isAlive()) {
+                outputReader.interrupt();
+            }
+
+            if (process.exitValue() != 0) {
+                logger.warn("ffprobe failed {} for {} (exit code {})", purpose, inputPath, process.exitValue());
+                return null;
+            }
+
+            StringBuilder outputCapture = new StringBuilder(4096);
+            synchronized (lines) {
+                for (String line : lines) {
+                    if (outputCapture.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
+                        logger.warn("ffprobe output exceeded 1MB limit while {} for {}", purpose, inputPath);
+                        break;
+                    }
+                    outputCapture.append(line).append("\n");
+                }
+            }
+            return outputCapture.toString();
+
+        } catch (IOException e) {
+            logger.warn("Failed to run ffprobe while {} for {}: {}", purpose, inputPath, e.getMessage());
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            logger.warn("Interrupted while running ffprobe for {}", inputPath);
+            return null;
+        } finally {
+            // An ffprobe still running here (interrupt path, or any other
+            // unexpected exit) must not outlive this call: the bounded
+            // timeout no longer applies once the waiter thread returns.
+            // destroyForcibly is a no-op on an already-terminated process,
+            // so normal completion is unaffected.
+            if (process != null && process.isAlive()) {
+                process.destroyForcibly();
+            }
+        }
+    }
+
+    /**
      * Extracts media metadata using ffprobe.
-     * 
+     *
+     * <p>
+     * Delegates to {@link #runFfprobeBounded} so the probe is bounded by
+     * {@link #FFPROBE_TIMEOUT_MILLIS} and its process is destroyed on
+     * timeout/interrupt - an inline readLine loop would hang forever on a
+     * ffprobe that holds the pipe open without producing output. The
+     * interrupt flag is restored inside runFfprobeBounded.
+     * </p>
+     *
      * Requirements:
      * - REQ-002.2: File metadata extraction for video, audio, and image files
      * - REQ-015: Metadata extraction using ffprobe
-     * 
+     *
      * @param filePath path to the media file
      * @param category the format category (VIDEO, AUDIO, or IMAGE)
      * @return MediaMetadata object, or null if extraction fails
@@ -919,55 +952,27 @@ public class FFmpegService {
                 "-show_streams",
                 safePathArg(filePath));
 
-        ProcessBuilder processBuilder = new ProcessBuilder(command);
-        processBuilder.redirectErrorStream(true);
-
         logger.debug("Extracting metadata from {} using ffprobe", filePath);
 
+        // Requirement: Task 5.19 - Capture output with size limit for metadata
+        // extraction (the 1MB cap is applied inside runFfprobeBounded).
+        String output = runFfprobeBounded(command, "extracting metadata", filePath);
+        if (output == null) {
+            // Covers timeout, non-zero exit, interruption (flag already
+            // restored inside runFfprobeBounded) and spawn failures.
+            logger.warn("ffprobe failed to extract metadata for {}", filePath);
+            throw new ToolExecutionException(
+                    "ffprobe failed to extract metadata",
+                    ErrorCode.TOOL_EXECUTION_FAILED,
+                    "ffprobe",
+                    ffprobePath.toString(),
+                    null,
+                    "Failed to extract metadata",
+                    null);
+        }
+
+        // Parse JSON output
         try {
-            Process process = processBuilder.start();
-
-            // Requirement: Task 5.19 - Capture output with size limit for metadata
-            // extraction (checked on every line so oversized lines truncate).
-            StringBuilder outputCapture = new StringBuilder(4096);
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                int lineCount = 0;
-                boolean truncated = false;
-
-                while ((line = reader.readLine()) != null) {
-                    lineCount++;
-
-                    if (!truncated) {
-                        if (outputCapture.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
-                            logger.warn("ffprobe output exceeded 1MB limit during metadata extraction for {}",
-                                    filePath);
-                            truncated = true;
-                            // Don't append more, but continue reading to process completion
-                        } else {
-                            outputCapture.append(line).append("\n");
-                        }
-                    }
-                }
-            }
-
-            String output = outputCapture.toString();
-
-            int exitCode = process.waitFor();
-            if (exitCode != 0) {
-                logger.warn("ffprobe failed to extract metadata for {}, exit code: {}", filePath, exitCode);
-                throw new ToolExecutionException(
-                        "ffprobe failed to extract metadata",
-                        ErrorCode.TOOL_EXECUTION_FAILED,
-                        "ffprobe",
-                        ffprobePath.toString(),
-                        exitCode,
-                        "Failed to extract metadata: exit code " + exitCode,
-                        null);
-            }
-
-            // Parse JSON output
             ObjectMapper mapper = new ObjectMapper();
             JsonNode root = mapper.readTree(output);
 
@@ -984,25 +989,14 @@ public class FFmpegService {
             };
 
         } catch (IOException e) {
-            logger.error("Failed to execute ffprobe for metadata extraction", e);
+            logger.error("Failed to parse ffprobe metadata output for {}", filePath, e);
             throw new ToolExecutionException(
-                    "Failed to execute ffprobe: " + e.getMessage(),
+                    "Failed to parse ffprobe output: " + e.getMessage(),
                     ErrorCode.TOOL_EXECUTION_FAILED,
                     "ffprobe",
                     ffprobePath.toString(),
                     null,
                     e.getMessage(),
-                    e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            logger.error("ffprobe process interrupted", e);
-            throw new ToolExecutionException(
-                    "ffprobe process interrupted",
-                    ErrorCode.TOOL_EXECUTION_FAILED,
-                    "ffprobe",
-                    ffprobePath.toString(),
-                    null,
-                    "Process interrupted",
                     e);
         }
     }
@@ -1382,15 +1376,45 @@ public class FFmpegService {
 
     /**
      * Detects GPU-environment failures in a conversion result by matching
-     * CUDA/NVENC/hwaccel markers in the error message and captured tool
-     * output.
+     * well-known ffmpeg NVENC/CUDA failure lines in the error message and
+     * captured tool output.
+     *
+     * <p>
+     * Deliberately narrow: a loose contains("cuda")/contains("nvenc")
+     * matched unrelated output (e.g. a filename containing "cuda" or a
+     * stream listing mentioning nvenc), silently discarding the user's
+     * preset for a full software re-encode. Unknown GPU failure strings
+     * are intentionally not retried - the conservative direction is "no
+     * false re-encode". Only reached for commands built with a GPU codec
+     * (see the caller's isGPUCodec gate).
+     * </p>
      */
+    private static final List<java.util.regex.Pattern> GPU_FAILURE_PATTERNS = List.of(
+            // "No NVIDIA capable devices found" (no/driverless GPU)
+            java.util.regex.Pattern.compile("no nvidia capable devices", java.util.regex.Pattern.CASE_INSENSITIVE),
+            // Windows / Linux CUDA driver library load failures
+            java.util.regex.Pattern.compile("cannot load nvcuda", java.util.regex.Pattern.CASE_INSENSITIVE),
+            java.util.regex.Pattern.compile("cannot load libcuda", java.util.regex.Pattern.CASE_INSENSITIVE),
+            // nvcuvid load failures: ffnvcodec/legacy loaders log "Cannot load
+            // nvcuvid.dll" (Windows) / "Cannot load libnvcuvid.so.1" (Linux);
+            // the cuvid decoder logs "Failed loading nvcuvid."; other stacks
+            // report "Failed/Unable to load nvcuvid".
+            java.util.regex.Pattern.compile("(?:failed|cannot|unable)(?:\\s+to)?\\s+load(?:ing)?\\s+(?:lib)?nvcuvid",
+                    java.util.regex.Pattern.CASE_INSENSITIVE),
+            // NVENC encoder library itself missing (driverless host):
+            // "Cannot load nvEncodeAPI64.dll" (Windows) /
+            // "Cannot load libnvidia-encode.so.1" (Linux)
+            java.util.regex.Pattern.compile("cannot load (?:nvencodeapi|libnvidia-encode)",
+                    java.util.regex.Pattern.CASE_INSENSITIVE),
+            // NVENC session initialization failures
+            java.util.regex.Pattern.compile("openencodesessionex failed", java.util.regex.Pattern.CASE_INSENSITIVE),
+            java.util.regex.Pattern.compile("cuda error", java.util.regex.Pattern.CASE_INSENSITIVE),
+            // Driver too old for the encoder
+            java.util.regex.Pattern.compile("required nvenc api version", java.util.regex.Pattern.CASE_INSENSITIVE));
+
     private static boolean isGpuFailure(ConversionResult result) {
-        String haystack = (result.errorMessage().orElse("") + "\n" + result.toolOutput().orElse(""))
-                .toLowerCase(java.util.Locale.ROOT);
-        return haystack.contains("cuda") || haystack.contains("nvenc")
-                || haystack.contains("hwaccel") || haystack.contains("no nvenc")
-                || haystack.contains("cannot load libcuda");
+        String haystack = result.errorMessage().orElse("") + "\n" + result.toolOutput().orElse("");
+        return GPU_FAILURE_PATTERNS.stream().anyMatch(pattern -> pattern.matcher(haystack).find());
     }
 
     /**

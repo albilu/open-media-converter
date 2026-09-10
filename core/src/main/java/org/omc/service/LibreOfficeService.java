@@ -559,7 +559,6 @@ public class LibreOfficeService {
             case HTML -> "html";
             case TXT -> "txt";
             case RTF -> "rtf";
-            case JPEG -> "jpeg";
             case CSV -> "csv";
             default -> throw new IllegalArgumentException("Unsupported LibreOffice output: " + format);
         };

@@ -546,4 +546,49 @@ class AudioSettingsTest {
         assertEquals("copy", updated.codec());
         assertEquals(FileFormat.OGG, updated.outputFormat());
     }
+
+    // ========== Builder policy order-independence Tests ==========
+
+    @Test
+    void builder_CodecSetAfterOutputFormat_AppliesPolicyAtBuild() {
+        // Given: an incompatible codec set AFTER the container (the order
+        // Builder.outputFormat cannot intercept)
+        AudioSettings settings = AudioSettings.builder()
+                .outputFormat(FileFormat.OGG)
+                .codec("aac")
+                .build();
+
+        // Then: build() applies a final idempotent policy pass
+        assertEquals("libvorbis", settings.codec());
+        assertEquals(FileFormat.OGG, settings.outputFormat());
+    }
+
+    @Test
+    void builder_PolicyApplication_IsOrderIndependent() {
+        // Given: the same codec/container pair applied in both orders
+        AudioSettings codecFirst = AudioSettings.builder()
+                .codec("aac")
+                .outputFormat(FileFormat.OGG)
+                .build();
+        AudioSettings formatFirst = AudioSettings.builder()
+                .outputFormat(FileFormat.OGG)
+                .codec("aac")
+                .build();
+
+        // Then: both produce the same container-compatible settings
+        assertEquals("libvorbis", codecFirst.codec());
+        assertEquals(codecFirst, formatFirst);
+    }
+
+    @Test
+    void builder_CodecSetAfterOutputFormat_KeepsCopyCodec() {
+        // Given: stream copy set after the container
+        AudioSettings settings = AudioSettings.builder()
+                .outputFormat(FileFormat.OGG)
+                .codec("copy")
+                .build();
+
+        // Then: copy survives the build()-time policy pass
+        assertEquals("copy", settings.codec());
+    }
 }

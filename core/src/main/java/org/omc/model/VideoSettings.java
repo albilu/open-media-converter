@@ -148,14 +148,21 @@ public final class VideoSettings {
 
     /**
      * Copies settings with a different output format, preserving all other
-     * video options (codec, bitrate, resolution, frame rate, preset, CRF,
-     * aspect ratio).
+     * video options (bitrate, resolution, frame rate, preset, CRF, aspect
+     * ratio).
+     *
+     * <p>
+     * The codec is rewritten for container compatibility via
+     * {@link MediaCodecPolicy#videoCodec(FileFormat, String)}, matching
+     * {@link Builder#outputFormat(FileFormat)} semantics exactly.
+     * </p>
      *
      * @param format the new output format
      * @return settings retaining all video options with the new format
      */
     public VideoSettings withOutputFormat(FileFormat format) {
-        return new VideoSettings(codec, bitrate, resolution, frameRate, preset, crf, aspectRatio, format);
+        return new VideoSettings(MediaCodecPolicy.videoCodec(format, codec),
+                bitrate, resolution, frameRate, preset, crf, aspectRatio, format);
     }
 
     /**
@@ -330,24 +337,38 @@ public final class VideoSettings {
 
         /**
          * Sets the output format.
+         * <p>
+         * The codec is rewritten for container compatibility via
+         * {@link MediaCodecPolicy#videoCodec(FileFormat, String)}, mirroring
+         * {@code AudioSettings.Builder.outputFormat}.
+         * </p>
          *
          * @param outputFormat the file format
          * @return this builder
          */
         public Builder outputFormat(FileFormat outputFormat) {
             this.outputFormat = outputFormat;
+            this.codec = MediaCodecPolicy.videoCodec(outputFormat, codec);
             return this;
         }
 
         /**
          * Builds the VideoSettings instance.
+         * <p>
+         * Applies a final container-compatibility pass via
+         * {@link MediaCodecPolicy#videoCodec(FileFormat, String)} so the
+         * codec/format pair is valid regardless of the order codec and
+         * outputFormat were set. The pass is idempotent: a codec already
+         * rewritten by {@link #outputFormat(FileFormat)} is returned unchanged.
+         * </p>
          *
          * @return a new VideoSettings
          * @throws IllegalArgumentException if the settings are invalid
          */
         public VideoSettings build() {
             validate();
-            return new VideoSettings(codec, bitrate, resolution, frameRate, preset, crf, aspectRatio, outputFormat);
+            return new VideoSettings(MediaCodecPolicy.videoCodec(outputFormat, codec),
+                    bitrate, resolution, frameRate, preset, crf, aspectRatio, outputFormat);
         }
 
         private void validate() {

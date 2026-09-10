@@ -9,9 +9,11 @@ import org.slf4j.LoggerFactory;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -57,6 +59,9 @@ public class ToolDiscovery {
 
     // Process execution timeout (milliseconds)
     private static final long VERSION_CHECK_TIMEOUT = 5000;
+
+    // Temporary-file suffix used for the atomic tools.json write
+    private static final String TEMP_SUFFIX = ".tmp";
 
     private final Path toolsConfigPath;
     private final Path extractedToolsDirectory;
@@ -638,18 +643,79 @@ public class ToolDiscovery {
 
     /**
      * Saves tool configuration to disk.
-     * 
+     *
+     * <p>
+     * Writes to a temporary file first and then renames it over the final
+     * path (preferring an atomic move, with a plain replacement move as
+     * fallback for filesystems without atomic move support), mirroring the
+     * write pattern of {@code SettingsManager}/{@code StateManager}. The
+     * write itself goes through {@link JsonUtils#writeJsonFile}, which
+     * forces the data to physical storage before the rename.
+     * </p>
+     *
      * @param config the configuration to save
      */
     private void saveConfiguration(ToolConfiguration config) {
+        Path tempPath = Path.of(toolsConfigPath.toString() + TEMP_SUFFIX);
         try {
             // Ensure parent directory exists
             Files.createDirectories(toolsConfigPath.getParent());
 
-            JsonUtils.writeJsonFile(config, toolsConfigPath.toFile());
+            // Write to temporary file first (fsync'd by JsonUtils), then
+            // atomically rename over the final path
+            JsonUtils.writeJsonFile(config, tempPath.toFile());
+            moveWithAtomicFallback(tempPath, toolsConfigPath);
             logger.info("Saved tool configuration to: {}", toolsConfigPath);
         } catch (IOException e) {
             logger.error("Failed to save tool configuration: {}", e.getMessage(), e);
+        } finally {
+            // Clean up the temp file whether the move failed or never
+            // happened; after a successful move this is a no-op
+            deleteQuietly(tempPath);
+        }
+    }
+
+    /**
+     * Moves {@code source} to {@code target}, preferring an atomic move.
+     *
+     * <p>
+     * Some filesystems (certain network mounts, FAT/exFAT) do not support
+     * atomic moves; {@link Files#move} then throws
+     * {@link AtomicMoveNotSupportedException}, which is unchecked and would
+     * otherwise escape the {@code catch (IOException)} handler. This helper
+     * catches it and retries with a plain
+     * {@link StandardCopyOption#REPLACE_EXISTING} move, logging a warning.
+     * </p>
+     *
+     * @param source the file to move (typically the temp file)
+     * @param target the destination file
+     * @throws IOException if both the atomic and the fallback move fail
+     */
+    private static void moveWithAtomicFallback(Path source, Path target) throws IOException {
+        try {
+            Files.move(source, target,
+                    StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            logger.warn("Atomic move not supported for {} ({}); falling back to a non-atomic move",
+                    target, e.getMessage());
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    /**
+     * Deletes a file if it exists, swallowing IOExceptions (best effort).
+     * Used for temp-file cleanup in {@code finally} blocks where the
+     * original outcome must not be masked.
+     *
+     * @param file the file to delete, may no longer exist
+     */
+    private static void deleteQuietly(Path file) {
+        try {
+            if (Files.exists(file)) {
+                Files.delete(file);
+            }
+        } catch (IOException e) {
+            logger.warn("Failed to delete temp file: {}", file, e);
         }
     }
 

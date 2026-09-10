@@ -534,6 +534,49 @@ class ProgressEngineTest {
     }
 
     @Test
+    void testBatchProgressThrottling_MaxTwoUpdatesPerSecond() throws InterruptedException {
+        // Given - AGENTS.md spec: throttle UI updates to max 2/sec (500ms interval)
+        progressEngine.addBatchProgressListener(batchProgressListener);
+        progressEngine.startBatch(Arrays.asList("file1"), Map.of("file1", 1000L));
+        progressEngine.startTracking("file1", 1000L);
+
+        // When - a batch notification 300ms after the forced startBatch baseline
+        progressEngine.updateProgress("file1", 100L);
+        Thread.sleep(300);
+        progressEngine.updateProgress("file1", 200L);
+
+        // Then - 300ms < 500ms interval: the intermediate update is throttled
+        // (startBatch baseline is the only delivered notification so far)
+        verify(batchProgressListener, times(1)).accept(any(BatchProgress.class));
+
+        // When - another update after the full 500ms interval has elapsed
+        Thread.sleep(350);
+        progressEngine.updateProgress("file1", 300L);
+
+        // Then - the update is delivered
+        verify(batchProgressListener, times(2)).accept(any(BatchProgress.class));
+    }
+
+    @Test
+    void testBatchProgressThrottling_TerminalStateBypassesThrottle() {
+        // Given - a single-file batch driven to its terminal state
+        progressEngine.addBatchProgressListener(batchProgressListener);
+        progressEngine.startBatch(Arrays.asList("file1"), Map.of("file1", 1000L));
+        progressEngine.startTracking("file1", 1000L);
+        ConversionResult result = ConversionResult.success("file1", Path.of("/output"), null,
+                Duration.ofSeconds(1), 1000L, 800L, mockTool);
+        progressEngine.completeTracking("file1", result);
+
+        // When - a late non-forced update lands inside the throttle window
+        // (the batch is terminal: no pending or in-progress files)
+        progressEngine.updateProgress("file1", 900L);
+
+        // Then - the terminal-state bypass delivers it immediately: the forced
+        // startBatch + completion notifications plus the late update
+        verify(batchProgressListener, times(3)).accept(any(BatchProgress.class));
+    }
+
+    @Test
     void testRemoveListeners_StopsNotifications() throws InterruptedException {
         // Given
         progressEngine.addProgressListener(progressListener);

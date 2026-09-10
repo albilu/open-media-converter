@@ -402,8 +402,9 @@ public final class SectionPreset {
             return false;
         }
         SectionPreset other = (SectionPreset) obj;
+        // createdAt deliberately excluded: identity is content-based, matching
+        // SettingsPreset semantics (creation time is metadata, not identity)
         return builtIn == other.builtIn
-                && createdAt == other.createdAt
                 && Objects.equals(name, other.name)
                 && Objects.equals(description, other.description)
                 && category == other.category
@@ -416,7 +417,7 @@ public final class SectionPreset {
     @Override
     public int hashCode() {
         return Objects.hash(name, description, category, videoSettings, audioSettings,
-                imageSettings, documentSettings, builtIn, createdAt);
+                imageSettings, documentSettings, builtIn);
     }
 
     @Override

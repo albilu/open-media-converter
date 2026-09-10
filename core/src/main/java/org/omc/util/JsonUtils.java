@@ -9,6 +9,9 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 
 /**
  * Utility class for JSON serialization and deserialization using Jackson.
@@ -146,12 +149,34 @@ public final class JsonUtils {
     /**
      * Writes an object to a JSON file.
      *
+     * <p>
+     * The written data is forced to physical storage (fsync) before
+     * returning, so callers that rename the file afterwards (the atomic
+     * temp-file + move persistence pattern used by the state/settings
+     * managers) cannot end up with an empty or torn file after a crash.
+     * Directory fsync is not portable via {@code java.nio} and is
+     * intentionally not attempted.
+     * </p>
+     *
      * @param object The object to write
      * @param file   The target file
      * @throws IOException if writing fails
      */
     public static void writeJsonFile(Object object, File file) throws IOException {
         MAPPER.writeValue(file, object);
+        forceToDisk(file.toPath());
+    }
+
+    /**
+     * Flushes the file's data (and metadata) to physical storage.
+     *
+     * @param file the file to flush; must already exist
+     * @throws IOException if opening or forcing the channel fails
+     */
+    private static void forceToDisk(Path file) throws IOException {
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.WRITE)) {
+            channel.force(true);
+        }
     }
 
     /**

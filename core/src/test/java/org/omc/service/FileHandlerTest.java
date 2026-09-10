@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.nio.file.*;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
@@ -181,6 +182,28 @@ class FileHandlerTest {
 
         assertTrue(Files.exists(destination));
         assertEquals("source content".length(), progressValue.get());
+    }
+
+    @Test
+    void copyFileWithProgress_LargeFile_CallbacksAreTimeThrottled() throws IOException, FileOperationException {
+        // ~8MB = 128 x 64KB chunks: without throttling this fires 128
+        // callbacks; a ~100ms time-based throttle must keep a fast local
+        // copy down to a handful of calls (first + final + ~elapsed/100ms).
+        Path source = tempDir.resolve("throttle-source.bin");
+        byte[] data = new byte[8 * 1024 * 1024];
+        for (int i = 0; i < data.length; i++) {
+            data[i] = (byte) (i % 251);
+        }
+        Files.write(source, data);
+        Path destination = tempDir.resolve("throttle-dest.bin");
+
+        AtomicInteger callbackCount = new AtomicInteger();
+        fileHandler.copyFile(source, destination, false, bytes -> callbackCount.incrementAndGet());
+
+        assertTrue(callbackCount.get() < 20,
+                "progress callbacks must be time-throttled, got " + callbackCount.get());
+        assertEquals(data.length, Files.size(destination));
+        assertArrayEquals(data, Files.readAllBytes(destination));
     }
 
     @Test
@@ -435,6 +458,70 @@ class FileHandlerTest {
         FileFormat format = fileHandler.detectFormat(docxFile);
 
         assertEquals(FileFormat.DOCX, format);
+    }
+
+    // BMP 2-byte-magic false positive tests ("BM" prefix vs real BMP)
+
+    /**
+     * Builds a minimal well-formed BMP: 14-byte file header plus a DIB
+     * header of the given size, so bytes 14-17 carry the DIB size as a
+     * little-endian int.
+     */
+    private static byte[] minimalBmpBytes(int dibHeaderSize) {
+        byte[] bmp = new byte[14 + dibHeaderSize];
+        bmp[0] = 'B';
+        bmp[1] = 'M';
+        // Bytes 2-5: file size (LE); bytes 6-9: reserved; bytes 10-13: data
+        // offset (LE) - values are irrelevant to detection but kept plausible.
+        int fileSize = bmp.length;
+        bmp[2] = (byte) fileSize;
+        bmp[10] = (byte) (14 + dibHeaderSize);
+        // Bytes 14-17: DIB header size (LE)
+        bmp[14] = (byte) dibHeaderSize;
+        bmp[15] = (byte) (dibHeaderSize >>> 8);
+        bmp[16] = (byte) (dibHeaderSize >>> 16);
+        bmp[17] = (byte) (dibHeaderSize >>> 24);
+        return bmp;
+    }
+
+    @Test
+    void detectFormat_TextStartingWithBm_TxtExtension_NotDetectedAsBmp() throws IOException {
+        Path bmwText = Files.createTempFile(tempDir, "note", ".txt");
+        Files.writeString(bmwText, "BMW is a car brand, not a bitmap.");
+
+        FileFormat format = fileHandler.detectFormat(bmwText);
+
+        assertEquals(FileFormat.TXT, format,
+                "'BM' prefix alone must not override extension detection");
+    }
+
+    @Test
+    void detectFormat_TextStartingWithBm_DocExtension_NotDetectedAsBmp() throws IOException {
+        Path bmwDoc = Files.createTempFile(tempDir, "note", ".doc");
+        Files.writeString(bmwDoc, "BMW is a car brand, not a bitmap.");
+
+        FileFormat format = fileHandler.detectFormat(bmwDoc);
+
+        assertEquals(FileFormat.DOC, format,
+                "'BM' prefix alone must not override extension detection");
+    }
+
+    @Test
+    void detectFormat_ValidBmpHeader_StillDetectedAsBmp() throws IOException {
+        Path bmpFile = Files.createTempFile(tempDir, "image", ".bmp");
+        Files.write(bmpFile, minimalBmpBytes(40)); // BITMAPINFOHEADER
+
+        assertEquals(FileFormat.BMP, fileHandler.detectFormat(bmpFile),
+                "real BMP (BITMAPINFOHEADER) must still be detected by magic bytes");
+    }
+
+    @Test
+    void detectFormat_ValidBmpCoreHeader_StillDetectedAsBmp() throws IOException {
+        Path bmpFile = Files.createTempFile(tempDir, "image", ".bmp");
+        Files.write(bmpFile, minimalBmpBytes(12)); // BITMAPCOREHEADER
+
+        assertEquals(FileFormat.BMP, fileHandler.detectFormat(bmpFile),
+                "real BMP (BITMAPCOREHEADER) must still be detected by magic bytes");
     }
 
     // Tests for openInFileManager() - Requirement REQ-FL-3.2, REQ-FL-3.3

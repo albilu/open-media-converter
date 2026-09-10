@@ -371,6 +371,38 @@ class ToolDiscoveryTest {
     }
 
     @Test
+    void testSaveConfiguration_ReplacesFileViaTempAndAtomicRename() throws IOException {
+        assumeTrue(isUnixLike(), "inode-based replace detection requires a Unix-like filesystem");
+
+        // Given: An existing tools.json (observed by its inode)
+        Path toolsConfigPath = configManager.getToolsConfigPath();
+        ToolConfiguration seed = new ToolConfiguration();
+        seed.setFfmpegPath(tempDir.resolve("old-ffmpeg"));
+        org.omc.util.JsonUtils.writeJsonFile(seed, toolsConfigPath.toFile());
+        long inodeBefore = (Long) Files.getAttribute(toolsConfigPath, "unix:ino");
+
+        // When: Discovery saves a fresh configuration
+        toolDiscovery.discoverTools();
+
+        // Then: The file was replaced by a rename (new inode), not
+        // truncated and rewritten in place
+        long inodeAfter = (Long) Files.getAttribute(toolsConfigPath, "unix:ino");
+        assertNotEquals(inodeBefore, inodeAfter,
+                "tools.json must be replaced via temp-file + rename, not rewritten in place");
+
+        // And: No temporary file is left behind
+        String tempPrefix = toolsConfigPath.getFileName().toString() + ".tmp";
+        try (var files = Files.list(toolsConfigPath.getParent())) {
+            assertTrue(files.noneMatch(p -> p.getFileName().toString().startsWith(tempPrefix)),
+                    "temp file must be cleaned up after the move");
+        }
+
+        // And: The replaced file is still valid JSON
+        assertNotNull(org.omc.util.JsonUtils.readJsonFile(
+                toolsConfigPath.toFile(), ToolConfiguration.class));
+    }
+
+    @Test
     void testFindSystemBinary_EmptyPathSegment_NotResolvedAgainstCwd() throws IOException {
         assumeTrue(isUnixLike(), "Requires POSIX executable scripts");
 

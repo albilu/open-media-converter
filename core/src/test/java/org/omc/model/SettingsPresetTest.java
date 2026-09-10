@@ -216,8 +216,58 @@ class SettingsPresetTest {
                 assertEquals(original.name(), updated.name());
                 assertEquals(original.description(), updated.description());
                 assertEquals(newSettings, updated.settings());
-                // Timestamp should be updated or same (may be same if executed too quickly)
-                assertTrue(updated.createdAt() >= original.createdAt());
+                // Timestamp is preserved on settings updates (identity is
+                // content-based; createdAt is metadata)
+                assertEquals(original.createdAt(), updated.createdAt());
+        }
+
+        @Test
+        void withSettings_ShouldPreserveCreatedAt() {
+                // Given: Preset with a known creation timestamp
+                ConversionSettings settings = ConversionSettings.builder()
+                                .outputFormat(FileFormat.MP4)
+                                .outputDirectory(Paths.get("/tmp"))
+                                .parallelConversions(4)
+                                .build();
+
+                SettingsPreset original = new SettingsPreset(
+                                "Name",
+                                "Description",
+                                settings,
+                                false,
+                                1234567890L);
+
+                // When: Update settings
+                SettingsPreset updated = original.withSettings(settings);
+
+                // Then: Creation timestamp should be preserved (consistent
+                // with withDescription and SectionPreset's withX methods)
+                assertEquals(1234567890L, updated.createdAt());
+        }
+
+        @Test
+        void withSettings_ShouldKeepPresetEqual_when_settingsReapplied() {
+                // Given: A preset with a known creation timestamp
+                ConversionSettings settings = ConversionSettings.builder()
+                                .outputFormat(FileFormat.MP4)
+                                .outputDirectory(Paths.get("/tmp"))
+                                .parallelConversions(4)
+                                .build();
+
+                SettingsPreset preset = new SettingsPreset(
+                                "Name",
+                                "Description",
+                                settings,
+                                false,
+                                1000L);
+
+                // When: Reapply the same settings
+                SettingsPreset updated = preset.withSettings(preset.settings());
+
+                // Then: Identity must not change — editing settings must not
+                // break Set/Map dedup or equality-based lookups
+                assertEquals(preset, updated);
+                assertEquals(preset.hashCode(), updated.hashCode());
         }
 
         @Test
@@ -274,6 +324,36 @@ class SettingsPresetTest {
                                 timestamp);
 
                 // When/Then: Should be equal
+                assertEquals(preset1, preset2);
+                assertEquals(preset1.hashCode(), preset2.hashCode());
+        }
+
+        @Test
+        void equals_ShouldReturnTrue_when_onlyCreatedAtDiffers() {
+                // Given: Two presets with identical name/settings but created at
+                // different times
+                ConversionSettings settings = ConversionSettings.builder()
+                                .outputFormat(FileFormat.MP4)
+                                .outputDirectory(Paths.get("/tmp"))
+                                .parallelConversions(4)
+                                .build();
+
+                SettingsPreset preset1 = new SettingsPreset(
+                                "Name",
+                                "Description",
+                                settings,
+                                false,
+                                1000L);
+
+                SettingsPreset preset2 = new SettingsPreset(
+                                "Name",
+                                "Description",
+                                settings,
+                                false,
+                                2000L);
+
+                // When/Then: createdAt must not participate in identity —
+                // two presets with the same name+settings are the same preset
                 assertEquals(preset1, preset2);
                 assertEquals(preset1.hashCode(), preset2.hashCode());
         }

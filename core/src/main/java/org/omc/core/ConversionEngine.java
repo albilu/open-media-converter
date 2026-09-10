@@ -533,15 +533,20 @@ public class ConversionEngine implements ProcessRegistry {
             }
         });
 
+        // One-way bridge: internal completions are translated onto the
+        // returned future (cancellation included, so get() surfaces the raw
+        // CancellationException callers expect from a cancelled conversion),
+        // but an external cancel() is NOT forwarded to the internal future.
+        // Forwarding made an external cancel racing the normal internal
+        // completion cancel the source, silently downgrading the stored
+        // result to a cancelled one; callers who want the underlying
+        // conversion stopped must use cancelConversion().
         CompletableFuture<ConversionResult> completed = new CompletableFuture<>();
         observed.whenComplete((result, error) -> {
             Throwable cause = error instanceof java.util.concurrent.CompletionException ? error.getCause() : error;
             if (cause instanceof CancellationException) completed.cancel(false);
             else if (cause != null) completed.completeExceptionally(cause);
             else completed.complete(result);
-        });
-        completed.whenComplete((result, error) -> {
-            if (completed.isCancelled()) future.cancel(true);
         });
         return completed;
     }
@@ -651,8 +656,15 @@ public class ConversionEngine implements ProcessRegistry {
                     // and external tool processes are not orphaned.
                     destroyActiveProcesses();
 
-                    // Wait again after forcing shutdown
-                    executorService.awaitTermination(5, TimeUnit.SECONDS);
+                    // Wait again after forcing shutdown; report (not ignore)
+                    // tasks that are still undrained - workers blocked in an
+                    // uninterruptible tool wait can survive shutdownNow
+                    boolean drained = executorService.awaitTermination(5, TimeUnit.SECONDS);
+                    if (!drained) {
+                        logger.error("Executor still not terminated 5s after forced shutdown; "
+                                + "undrained tasks remain: {} active conversion(s), {} in-flight task(s)",
+                                activeConversions.size(), inFlightTasks.get());
+                    }
                 }
 
                 activeConversions.clear();
@@ -1283,6 +1295,21 @@ public class ConversionEngine implements ProcessRegistry {
                 }
 
             } catch (ToolExecutionException e) {
+                // Interrupt-path cancel symmetry: the services surface a
+                // user-initiated cancellation as an InterruptedException
+                // ("Conversion cancelled by user") wrapped in a
+                // ToolExecutionException; classify it CANCELLED like the
+                // cooperative cancel flow instead of FAILED
+                if (cancelRequested.get() && isCancellationInterrupt(e)) {
+                    logger.info("Tool execution interrupted by cancellation for {}", file.fileName());
+                    return ConversionResult.cancelled(
+                            fileId,
+                            "", // No tool output for cancelled attempt
+                            Duration.ZERO,
+                            file.size(),
+                            tool);
+                }
+
                 // Tool execution exception with exit code
                 logger.error("Tool execution failed for {} (attempt {}): {}",
                         file.fileName(), attempt, e.getDetailedMessage());
@@ -1331,6 +1358,20 @@ public class ConversionEngine implements ProcessRegistry {
                             tool);
                 }
             } catch (Exception e) {
+                // Raw interrupt while a cancel is in flight: same cancelled
+                // classification as the wrapped path (the interrupt flag is
+                // restored because catching InterruptedException swallows it)
+                if (cancelRequested.get() && e instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                    logger.info("Conversion interrupted by cancellation for {}", file.fileName());
+                    return ConversionResult.cancelled(
+                            fileId,
+                            "", // No tool output for cancelled attempt
+                            Duration.ZERO,
+                            file.size(),
+                            tool);
+                }
+
                 // Other unexpected exceptions
                 logger.error("Unexpected error during conversion for {}: {}", file.fileName(), e.getMessage(), e);
                 return ConversionResult.failure(
@@ -1352,6 +1393,20 @@ public class ConversionEngine implements ProcessRegistry {
                         Duration.ZERO,
                         file.size(),
                         tool);
+    }
+
+    /**
+     * Returns true when the throwable is the services' cancellation
+     * sentinel: every service aborts a cancelled conversion by throwing an
+     * {@code InterruptedException("Conversion cancelled by user")} once the
+     * cancel path destroys the tool process, and wraps it in a
+     * {@link ToolExecutionException} carrying the interrupt as cause.
+     */
+    private static boolean isCancellationInterrupt(Throwable e) {
+        if (e instanceof InterruptedException) {
+            return true;
+        }
+        return e instanceof ToolExecutionException && e.getCause() instanceof InterruptedException;
     }
 
     /**
@@ -1596,7 +1651,10 @@ public class ConversionEngine implements ProcessRegistry {
         @Override
         public Thread newThread(Runnable r) {
             Thread thread = new Thread(r, "conversion-" + threadNumber.getAndIncrement());
-            thread.setDaemon(false); // Allow JVM to wait for conversions
+            // Daemon: shutdown() explicitly destroys processes and awaits
+            // termination, so a worker lingering past shutdown (e.g. blocked
+            // in an uninterruptible tool wait) must not keep the JVM alive
+            thread.setDaemon(true);
             thread.setPriority(Thread.NORM_PRIORITY);
             return thread;
         }

@@ -588,6 +588,65 @@ class VideoSettingsTest {
 
     // ========== withOutputFormat Tests ==========
 
+    // ========== MediaCodecPolicy parity (Builder.outputFormat) Tests ==========
+
+    @Test
+    void builder_OutputFormat_AppliesVideoCodecPolicy() {
+        // Given: an incompatible codec for the target container
+        // When: outputFormat is set after the codec
+        VideoSettings settings = VideoSettings.builder()
+                .codec("wmv2")
+                .outputFormat(FileFormat.MP4)
+                .build();
+
+        // Then: the codec is rewritten to the container-compatible encoder,
+        // mirroring AudioSettings.Builder.outputFormat and FFmpegService
+        assertEquals("libx264", settings.codec());
+        assertEquals(FileFormat.MP4, settings.outputFormat());
+    }
+
+    @Test
+    void builder_OutputFormatWebm_MapsAnyCodecToLibvpxVp9() {
+        // Given: a GPU codec that WebM cannot hold
+        // When: selecting WebM as the container
+        VideoSettings settings = VideoSettings.builder()
+                .codec("h264_nvenc")
+                .outputFormat(FileFormat.WEBM)
+                .build();
+
+        // Then: the policy's WebM rule forces the VP9 encoder
+        assertEquals("libvpx-vp9", settings.codec());
+    }
+
+    @Test
+    void builder_OutputFormat_KeepsContainerCompatibleCodec() {
+        // Given: a codec already compatible with the target container
+        VideoSettings settings = VideoSettings.builder()
+                .codec("libx264")
+                .outputFormat(FileFormat.MKV)
+                .build();
+
+        // Then: the codec is kept unchanged
+        assertEquals("libx264", settings.codec());
+    }
+
+    @Test
+    void withOutputFormat_AppliesVideoCodecPolicy() {
+        // Given: settings holding a codec valid for its current container
+        VideoSettings original = VideoSettings.builder()
+                .codec("wmv2")
+                .outputFormat(FileFormat.WMV)
+                .build();
+        assertEquals("wmv2", original.codec());
+
+        // When: switching to a container the codec cannot live in
+        VideoSettings updated = original.withOutputFormat(FileFormat.MP4);
+
+        // Then: the codec is rewritten exactly like Builder.outputFormat
+        assertEquals("libx264", updated.codec());
+        assertEquals(FileFormat.MP4, updated.outputFormat());
+    }
+
     @Test
     void withOutputFormat_ShouldPreserveAllFields() {
         // Given: VideoSettings with every field set to a non-default value
@@ -614,5 +673,65 @@ class VideoSettingsTest {
         assertEquals("slow", updated.preset());
         assertEquals(20, updated.crf());
         assertEquals(AspectRatio.RATIO_16_9, updated.aspectRatio());
+    }
+
+    // ========== Builder policy order-independence Tests ==========
+
+    @Test
+    void builder_CodecSetAfterOutputFormat_AppliesPolicyAtBuild() {
+        // Given: an incompatible codec set AFTER the container (the order
+        // Builder.outputFormat cannot intercept)
+        VideoSettings settings = VideoSettings.builder()
+                .outputFormat(FileFormat.MP4)
+                .codec("wmv2")
+                .build();
+
+        // Then: build() applies a final idempotent policy pass
+        assertEquals("libx264", settings.codec());
+        assertEquals(FileFormat.MP4, settings.outputFormat());
+    }
+
+    @Test
+    void builder_PolicyApplication_IsOrderIndependent() {
+        // Given: the same codec/container pair applied in both orders
+        VideoSettings codecFirst = VideoSettings.builder()
+                .codec("wmv2")
+                .outputFormat(FileFormat.MP4)
+                .build();
+        VideoSettings formatFirst = VideoSettings.builder()
+                .outputFormat(FileFormat.MP4)
+                .codec("wmv2")
+                .build();
+
+        // Then: both produce the same container-compatible settings
+        assertEquals("libx264", codecFirst.codec());
+        assertEquals(codecFirst, formatFirst);
+    }
+
+    @Test
+    void builder_BuildTimePolicyPass_IsIdempotentAcrossFormats() {
+        // Given: representative codecs (standard, GPU and container-specific)
+        String[] representativeCodecs = {
+                "libx264", "libvpx-vp9", "wmv2", "flv", "mpeg4",
+                "h264_nvenc", "hevc_nvenc", "libx265" };
+        for (FileFormat format : FileFormat.values()) {
+            if (!format.supportsCategory(FormatCategory.VIDEO)) {
+                continue;
+            }
+            for (String codec : representativeCodecs) {
+                // When: the codec is set after the container and built
+                VideoSettings built = VideoSettings.builder()
+                        .outputFormat(format)
+                        .codec(codec)
+                        .build();
+
+                // Then: the built codec matches the policy exactly and
+                // re-applying the policy (withOutputFormat) is a no-op
+                assertEquals(MediaCodecPolicy.videoCodec(format, codec), built.codec(),
+                        () -> "build() pass mismatch vs policy for " + format + " x " + codec);
+                assertEquals(built.codec(), built.withOutputFormat(format).codec(),
+                        () -> "build() pass not idempotent for " + format + " x " + codec);
+            }
+        }
     }
 }

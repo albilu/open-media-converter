@@ -895,8 +895,13 @@ public class SettingsManager {
             PresetsBySection presets = JsonUtils.getObjectMapper().treeToValue(root, PresetsBySection.class);
 
             if (presets != null) {
+                // Drop presets whose section settings are invalid (e.g. a
+                // document preset whose output format was recategorized to
+                // another category by a newer version); see
+                // withoutInvalidSectionPresets
+                PresetsBySection validPresets = withoutInvalidSectionPresets(presets);
                 logger.info("Successfully loaded presets by section");
-                return presets;
+                return validPresets;
             } else {
                 logger.warn("Presets file returned null, attempting migration");
                 return migrateOldPresetsFormat();
@@ -908,6 +913,89 @@ public class SettingsManager {
             logger.info("Failed to load as PresetsBySection format, attempting migration: {}", e.getMessage());
             return migrateOldPresetsFormat();
         }
+    }
+
+    /**
+     * Drops section presets whose section settings are structurally invalid.
+     *
+     * <p>
+     * A preset can survive in presets.json with settings that no longer
+     * validate (for example a document preset whose output format was
+     * recategorized to IMAGE by a newer version). Such presets would
+     * otherwise load and display harmlessly forever, so they are dropped
+     * from the in-memory result with a warning at load time. The check is
+     * structural only (see
+     * {@link #sectionSettingsStructurallyValid(SectionPreset)}): transient
+     * filesystem state, such as a document template on offline storage,
+     * must not drop a preset.
+     * </p>
+     *
+     * <p>
+     * <b>Conservative in-memory filtering only:</b> the file is left
+     * untouched; the next save naturally drops these presets because it
+     * serializes the in-memory sections.
+     * </p>
+     *
+     * @param presets the bound presets
+     * @return presets with invalid-section presets removed
+     */
+    private PresetsBySection withoutInvalidSectionPresets(PresetsBySection presets) {
+        return new PresetsBySection(
+                dropPresetsWithInvalidSettings(presets.videoPresets(), "video"),
+                dropPresetsWithInvalidSettings(presets.audioPresets(), "audio"),
+                dropPresetsWithInvalidSettings(presets.imagePresets(), "image"),
+                dropPresetsWithInvalidSettings(presets.documentPresets(), "document"));
+    }
+
+    /**
+     * Filters one section's preset list to presets that are structurally
+     * valid and whose section settings are structurally valid.
+     *
+     * @param sectionPresets the section's presets as bound from disk
+     * @param section        section name, used for logging
+     * @return a new list without invalid presets
+     */
+    private List<SectionPreset> dropPresetsWithInvalidSettings(List<SectionPreset> sectionPresets, String section) {
+        List<SectionPreset> valid = new ArrayList<>(sectionPresets.size());
+        for (SectionPreset preset : sectionPresets) {
+            if (preset != null && preset.isValid() && sectionSettingsStructurallyValid(preset)) {
+                valid.add(preset);
+            } else {
+                String name = preset != null ? preset.name() : "<unreadable>";
+                logger.warn("Dropping {} preset '{}' with invalid section settings during load", section, name);
+            }
+        }
+        return valid;
+    }
+
+    /**
+     * Checks whether the preset's section settings are structurally valid
+     * for its category, without consulting the filesystem.
+     *
+     * <p>
+     * Load-time preset retention must not hinge on transient filesystem
+     * state: a document preset whose template lives on removable or offline
+     * storage would otherwise be silently dropped at load and permanently
+     * deleted from presets.json by the next unrelated save. For that reason
+     * the DOCUMENT case uses {@link DocumentSettings#isStructurallyValid()},
+     * which excludes the template-path existence check that the runtime
+     * {@link DocumentSettings#isValid()} keeps. The video, audio and image
+     * section validators perform no filesystem checks at all, so their
+     * regular {@code isValid()} is already structural.
+     * </p>
+     *
+     * @param preset the preset to check (structurally valid)
+     * @return true when the section settings for the preset's category are
+     *         structurally valid
+     */
+    static boolean sectionSettingsStructurallyValid(SectionPreset preset) {
+        return switch (preset.category()) {
+            case VIDEO -> preset.videoSettings() != null && preset.videoSettings().isValid();
+            case AUDIO -> preset.audioSettings() != null && preset.audioSettings().isValid();
+            case IMAGE -> preset.imageSettings() != null && preset.imageSettings().isValid();
+            case DOCUMENT -> preset.documentSettings() != null && preset.documentSettings().isStructurallyValid();
+            case UNKNOWN -> false;
+        };
     }
 
     /**
@@ -1261,15 +1349,29 @@ public class SettingsManager {
     /**
      * Backs up a presets file with a timestamped .old.TIMESTAMP.bak suffix.
      *
+     * <p>
+     * <b>Backup de-duplication:</b> before creating a backup, the current
+     * file bytes are compared against the most recent existing backup; when
+     * they are identical, no new backup is created. Without this, a
+     * degenerate file (unreadable, or with no recognizable presets) that
+     * migration never rewrites would create a new timestamped backup on
+     * every load, littering the config directory across launches.
+     * </p>
+     *
      * @param presetsPath path to the presets file
-     * @return true if a backup was created or there is nothing to back up,
-     *         false if the backup attempt failed
+     * @return true if a backup was created (or skipped as duplicate, or
+     *         there is nothing to back up), false if the backup attempt
+     *         failed
      */
     private boolean backupPresetsFile(Path presetsPath) {
         if (!Files.exists(presetsPath)) {
             return true;
         }
         try {
+            if (isAlreadyBackedUpUnchanged(presetsPath)) {
+                logger.info("Skipping presets backup for {}: identical backup already exists", presetsPath);
+                return true;
+            }
             String timestamp = LocalDateTime.now().format(StateManager.BACKUP_TIMESTAMP_FORMATTER);
             Path backupPath = Path.of(presetsPath.toString() + ".old." + timestamp + ".bak");
             Files.copy(presetsPath, backupPath, StandardCopyOption.REPLACE_EXISTING);
@@ -1278,6 +1380,60 @@ public class SettingsManager {
         } catch (IOException e) {
             logger.error("Failed to backup old presets file: {}", presetsPath, e);
             return false;
+        }
+    }
+
+    /**
+     * Decides whether the presets file already has a byte-identical backup,
+     * so unchanged content is not backed up again.
+     *
+     * @param presetsPath path to the presets file
+     * @return true when the most recent existing backup matches the current
+     *         file content byte-for-byte
+     */
+    private boolean isAlreadyBackedUpUnchanged(Path presetsPath) {
+        Path mostRecentBackup = mostRecentPresetsBackup(presetsPath);
+        if (mostRecentBackup == null) {
+            return false;
+        }
+        try {
+            return Files.mismatch(presetsPath, mostRecentBackup) == -1;
+        } catch (IOException e) {
+            // If either file cannot be read for comparison, assume no
+            // identical backup so the (fail-closed) backup attempt proceeds
+            return false;
+        }
+    }
+
+    /**
+     * Finds the most recent backup of the presets file, or null when none
+     * exists.
+     *
+     * <p>
+     * Backup names embed a fixed-width timestamp
+     * ({@link StateManager#BACKUP_TIMESTAMP_PATTERN}), so plain
+     * lexicographic filename ordering is chronological.
+     * </p>
+     *
+     * @param presetsPath path to the presets file
+     * @return the newest matching backup path, or null
+     */
+    private Path mostRecentPresetsBackup(Path presetsPath) {
+        Path directory = presetsPath.getParent();
+        if (directory == null) {
+            return null;
+        }
+        String prefix = presetsPath.getFileName().toString() + ".old.";
+        try (var files = Files.list(directory)) {
+            return files
+                    .map(Path::getFileName)
+                    .map(Path::toString)
+                    .filter(name -> name.startsWith(prefix) && name.endsWith(".bak"))
+                    .max(String::compareTo)
+                    .map(name -> directory.resolve(name))
+                    .orElse(null);
+        } catch (IOException e) {
+            return null;
         }
     }
 

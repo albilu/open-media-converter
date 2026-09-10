@@ -1668,6 +1668,133 @@ class FFmpegServiceTest {
                 assertEquals("hevc_nvenc", result, "hevc_nvenc should map to hevc_nvenc");
         }
 
+        // ========================================
+        // GPU failure detection tests (fallback must only trigger on
+        // genuine CUDA/NVENC failures, not on unrelated output that merely
+        // contains "cuda"/"nvenc" - e.g. filenames or stream listings)
+        // ========================================
+
+        private static boolean isGpuFailureFor(String errorMessage, String toolOutput) throws Exception {
+                ConversionResult failure = ConversionResult.failure(
+                                "file-1", errorMessage, toolOutput,
+                                java.time.Duration.ZERO, 0, org.omc.model.ConversionTool.FFMPEG);
+                java.lang.reflect.Method method = FFmpegService.class
+                                .getDeclaredMethod("isGpuFailure", ConversionResult.class);
+                method.setAccessible(true);
+                return (Boolean) method.invoke(null, failure);
+        }
+
+        @Test
+        void testIsGpuFailure_FileNameContainingCuda_ReturnsFalse() throws Exception {
+                assertFalse(isGpuFailureFor(
+                                "Input file /home/user/cuda_video.mp4 not found", ""),
+                                "a filename containing 'cuda' is not a GPU failure");
+        }
+
+        @Test
+        void testIsGpuFailure_StreamListingMentioningNvenc_ReturnsFalse() throws Exception {
+                assertFalse(isGpuFailureFor(
+                                "FFmpeg conversion failed (exit code 1): Invalid argument",
+                                "Stream #0:0: Video: h264_nvenc (High), yuv420p, 1920x1080"),
+                                "an unrelated stream listing mentioning nvenc is not a GPU failure");
+        }
+
+        @Test
+        void testIsGpuFailure_NoNvidiaCapableDevices_ReturnsTrue() throws Exception {
+                assertTrue(isGpuFailureFor(
+                                "FFmpeg conversion failed (exit code 1): No NVIDIA capable devices found", ""),
+                                "'No NVIDIA capable devices found' is a genuine GPU failure");
+        }
+
+        @Test
+        void testIsGpuFailure_CannotLoadNvcuda_ReturnsTrue() throws Exception {
+                assertTrue(isGpuFailureFor(
+                                "", "Cannot load nvcuda.dll"),
+                                "'Cannot load nvcuda.dll' is a genuine GPU failure");
+        }
+
+        @Test
+        void testIsGpuFailure_CannotLoadLibcudaInToolOutput_ReturnsTrue() throws Exception {
+                assertTrue(isGpuFailureFor(
+                                "FFmpeg conversion failed (exit code 1)", "Cannot load libcuda.so.1"),
+                                "'Cannot load libcuda.so.1' is a genuine GPU failure");
+        }
+
+        @Test
+        void testIsGpuFailure_OpenEncodeSessionExFailed_ReturnsTrue() throws Exception {
+                assertTrue(isGpuFailureFor(
+                                "", "[h264_nvenc @ 0x7f] OpenEncodeSessionEx failed: out of memory (10)"),
+                                "'OpenEncodeSessionEx failed' is a genuine GPU failure");
+        }
+
+        @Test
+        void testIsGpuFailure_CudaError_ReturnsTrue() throws Exception {
+                assertTrue(isGpuFailureFor(
+                                "CUDA error: out of memory", ""),
+                                "'CUDA error' is a genuine GPU failure");
+        }
+
+        // nvcuvid load-failure phrasings. ffmpeg's own loaders say
+        // "Cannot load nvcuvid.dll" (ffnvcodec dynlink loader, Windows) and
+        // "Cannot load libnvcuvid.so.1" (Linux); the cuvid decoder says
+        // "Failed loading nvcuvid." (libavcodec/cuviddec.c); other stacks in
+        // the wild report "Failed to load nvcuvid.dll" / "Unable to load
+        // nvcuvid". All mean the GPU decode library is unusable.
+
+        @Test
+        void testIsGpuFailure_CannotLoadNvcuvidDll_ReturnsTrue() throws Exception {
+                assertTrue(isGpuFailureFor(
+                                "", "Cannot load nvcuvid.dll"),
+                                "'Cannot load nvcuvid.dll' is a genuine GPU failure");
+        }
+
+        @Test
+        void testIsGpuFailure_FailedToLoadNvcuvidDll_ReturnsTrue() throws Exception {
+                assertTrue(isGpuFailureFor(
+                                "", "Failed to load nvcuvid.dll"),
+                                "'Failed to load nvcuvid.dll' is a genuine GPU failure");
+        }
+
+        @Test
+        void testIsGpuFailure_UnableToLoadNvcuvid_ReturnsTrue() throws Exception {
+                assertTrue(isGpuFailureFor(
+                                "", "Unable to load nvcuvid library"),
+                                "'Unable to load nvcuvid' is a genuine GPU failure");
+        }
+
+        @Test
+        void testIsGpuFailure_FailedLoadingNvcuvid_ReturnsTrue() throws Exception {
+                assertTrue(isGpuFailureFor(
+                                "", "Failed loading nvcuvid."),
+                                "'Failed loading nvcuvid.' (ffmpeg cuviddec) is a genuine GPU failure");
+        }
+
+        @Test
+        void testIsGpuFailure_CannotLoadLibNvcuvidSo1_ReturnsTrue() throws Exception {
+                assertTrue(isGpuFailureFor(
+                                "", "Cannot load libnvcuvid.so.1"),
+                                "'Cannot load libnvcuvid.so.1' is a genuine GPU failure");
+        }
+
+        // NVENC encoder library itself missing (driverless host): the
+        // ffnvcodec loader logs "Cannot load nvEncodeAPI64.dll" (Windows) /
+        // "Cannot load libnvidia-encode.so.1" (Linux) when
+        // nvenc_load_functions fails (libavcodec/nvenc.c nvenc_load_libraries).
+
+        @Test
+        void testIsGpuFailure_CannotLoadLibNvidiaEncode_ReturnsTrue() throws Exception {
+                assertTrue(isGpuFailureFor(
+                                "FFmpeg conversion failed (exit code 1)", "Cannot load libnvidia-encode.so.1"),
+                                "'Cannot load libnvidia-encode.so.1' is a genuine GPU failure");
+        }
+
+        @Test
+        void testIsGpuFailure_CannotLoadNvEncodeApiDll_ReturnsTrue() throws Exception {
+                assertTrue(isGpuFailureFor(
+                                "", "Cannot load nvEncodeAPI64.dll"),
+                                "'Cannot load nvEncodeAPI64.dll' is a genuine GPU failure");
+        }
+
         @Test
         void testBuildVideoCommand_H264Nvenc_IncludesGPUAcceleration() {
                 VideoSettings settings = VideoSettings.builder()
@@ -2679,6 +2806,35 @@ class FFmpegServiceTest {
                 return stub;
         }
 
+        /**
+         * Creates an executable ffprobe stub that KEEPS stdout open (stderr
+         * is merged into it) but never writes a single byte and never
+         * exits. Unlike {@link #createHangingFfprobeStub()} the output
+         * reader never sees EOF, so an inline readLine loop would block
+         * forever and never reach the bounded waitFor.
+         */
+        private Path createSilentOpenStdoutFfprobeStub() throws IOException {
+                Path stub = tempDir.resolve("ffprobe-silent-open");
+                Files.writeString(stub, "#!/bin/sh\nexec sleep 60\n");
+                Files.setPosixFilePermissions(stub,
+                                java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+                return stub;
+        }
+
+        /**
+         * Like {@link #createHangingFfprobeStub()} but publishes its pid to
+         * {@code pidFile} before hanging, so a test can observe (via
+         * /proc/&lt;pid&gt;) whether the service destroyed the process. The
+         * {@code exec sleep} keeps the pid stable for the check.
+         */
+        private Path createHangingFfprobeStubWithPidFile(Path pidFile) throws IOException {
+                Path stub = tempDir.resolve("ffprobe-hanging-pid");
+                Files.writeString(stub, "#!/bin/sh\necho $$ > '" + pidFile + "'\nexec 1>&- 2>&-\nexec sleep 60\n");
+                Files.setPosixFilePermissions(stub,
+                                java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+                return stub;
+        }
+
         private static java.lang.reflect.Method ffprobeHelper(String name) throws Exception {
                 java.lang.reflect.Method method = FFmpegService.class.getDeclaredMethod(name, Path.class);
                 method.setAccessible(true);
@@ -2730,6 +2886,107 @@ class FFmpegServiceTest {
         }
 
         @Test
+        void testGetDuration_Interrupted_DestroysFfprobeProcess() throws Exception {
+                Path pidFile = tempDir.resolve("ffprobe-hanging.pid");
+                Path stub = createHangingFfprobeStubWithPidFile(pidFile);
+                FFmpegService hangingService = new FFmpegService(stub, stub);
+                java.lang.reflect.Method getDuration = ffprobeHelper("getDuration");
+
+                Thread worker = new Thread(() -> {
+                        try {
+                                getDuration.invoke(hangingService, tempDir.resolve("input.mp4"));
+                        } catch (ReflectiveOperationException e) {
+                                // method returns null on interrupt; only unexpected here
+                        }
+                });
+                worker.start();
+
+                // Wait for the stub to publish its pid, then let the worker
+                // block in the bounded waitFor().
+                long pidDeadline = System.currentTimeMillis() + 2000;
+                while (!Files.exists(pidFile) && System.currentTimeMillis() < pidDeadline) {
+                        Thread.sleep(20);
+                }
+                assertTrue(Files.exists(pidFile), "ffprobe stub must publish its pid");
+                Thread.sleep(500);
+
+                worker.interrupt();
+                worker.join(5000);
+                assertFalse(worker.isAlive(), "getDuration must return after interruption");
+
+                // The hung ffprobe must not outlive the interrupted call:
+                // without destroyForcibly the stubbed `sleep 60` keeps the
+                // process (and its pid) alive far beyond the call.
+                String pid = Files.readString(pidFile).trim();
+                Path procEntry = Path.of("/proc", pid);
+                long destroyDeadline = System.currentTimeMillis() + 5000;
+                while (Files.exists(procEntry) && System.currentTimeMillis() < destroyDeadline) {
+                        Thread.sleep(50);
+                }
+                assertFalse(Files.exists(procEntry),
+                                "interrupted ffprobe process (pid " + pid + ") must be destroyed");
+        }
+
+        // extractMetadata must be bounded by the same ffprobe timeout as the
+        // private helpers: an inline readLine loop blocks forever on a hung
+        // ffprobe that holds stdout open without producing output.
+
+        @Test
+        @org.junit.jupiter.api.Timeout(value = 20)
+        void testExtractMetadata_SilentOpenStdoutNeverExiting_IsBounded() throws Exception {
+                Path stub = createSilentOpenStdoutFfprobeStub();
+                FFmpegService silentService = new FFmpegService(stub, stub);
+
+                long originalTimeout = FFmpegService.FFPROBE_TIMEOUT_MILLIS;
+                FFmpegService.FFPROBE_TIMEOUT_MILLIS = 800;
+                Object[] outcome = { "unset" };
+                Thread worker = new Thread(() -> {
+                        try {
+                                silentService.extractMetadata(tempDir.resolve("input.mp4"),
+                                                org.omc.model.FormatCategory.VIDEO);
+                                outcome[0] = "returned without exception";
+                        } catch (ToolExecutionException e) {
+                                outcome[0] = e;
+                        }
+                });
+                worker.start();
+                try {
+                        worker.join(10000);
+                        assertFalse(worker.isAlive(),
+                                        "extractMetadata must be bounded even when ffprobe holds stdout open with no output");
+                        assertTrue(outcome[0] instanceof ToolExecutionException,
+                                        "extractMetadata must throw ToolExecutionException on ffprobe failure, got: "
+                                                        + outcome[0]);
+                } finally {
+                        FFmpegService.FFPROBE_TIMEOUT_MILLIS = originalTimeout;
+                        worker.interrupt(); // unwedge the worker if the assertion failed
+                        worker.join(5000);
+                }
+        }
+
+        @Test
+        void testExtractMetadata_Interrupted_PreservesInterruptFlag() throws Exception {
+                Path stub = createHangingFfprobeStub();
+                FFmpegService hangingService = new FFmpegService(stub, stub);
+
+                Thread worker = new Thread(() -> {
+                        try {
+                                hangingService.extractMetadata(tempDir.resolve("input.mp4"),
+                                                org.omc.model.FormatCategory.VIDEO);
+                        } catch (ToolExecutionException e) {
+                                // expected outcome on interrupt
+                        }
+                });
+                worker.start();
+                Thread.sleep(500); // let the worker block waiting for ffprobe
+                worker.interrupt();
+                worker.join(5000);
+
+                assertFalse(worker.isAlive(), "extractMetadata must return after interruption");
+                assertTrue(worker.isInterrupted(), "interrupt flag must be restored by extractMetadata");
+        }
+
+        @Test
         void testGetDuration_NeverExitingProcess_ReturnsNullAfterTimeout() throws Exception {
                 Path stub = createHangingFfprobeStub();
                 FFmpegService hangingService = new FFmpegService(stub, stub);
@@ -2777,7 +3034,74 @@ class FFmpegServiceTest {
                 try {
                         worker.join(10000);
                         assertFalse(worker.isAlive(), "getTotalFrames must be bounded by the ffprobe timeout");
-                        assertEquals(-1L, result[0], "getTotalFrames must return -1 on timeout");
+                        assertEquals(-1l, ((Number) result[0]).longValue(),
+                                        "getTotalFrames must return -1 on timeout");
+                } finally {
+                        FFmpegService.FFPROBE_TIMEOUT_MILLIS = originalTimeout;
+                        worker.interrupt(); // unwedge the worker if the assertion failed
+                        worker.join(5000);
+                }
+        }
+
+        // Silent-but-open stdout variants: a hung ffprobe holding the pipe
+        // open with NO output must still be bounded by the timeout (an
+        // inline readLine-to-EOF loop would block forever before ever
+        // reaching the bounded waitFor).
+
+        @Test
+        @org.junit.jupiter.api.Timeout(value = 20)
+        void testGetDuration_SilentOpenStdoutNeverExiting_ReturnsNullAfterTimeout() throws Exception {
+                Path stub = createSilentOpenStdoutFfprobeStub();
+                FFmpegService silentService = new FFmpegService(stub, stub);
+                java.lang.reflect.Method getDuration = ffprobeHelper("getDuration");
+
+                long originalTimeout = FFmpegService.FFPROBE_TIMEOUT_MILLIS;
+                FFmpegService.FFPROBE_TIMEOUT_MILLIS = 800;
+                Object[] result = { "unset" };
+                Thread worker = new Thread(() -> {
+                        try {
+                                result[0] = getDuration.invoke(silentService, tempDir.resolve("input.mp4"));
+                        } catch (ReflectiveOperationException e) {
+                                result[0] = e;
+                        }
+                });
+                worker.start();
+                try {
+                        worker.join(10000);
+                        assertFalse(worker.isAlive(),
+                                        "getDuration must be bounded even when ffprobe holds stdout open with no output");
+                        assertNull(result[0], "getDuration must return null on silent-stream timeout");
+                } finally {
+                        FFmpegService.FFPROBE_TIMEOUT_MILLIS = originalTimeout;
+                        worker.interrupt(); // unwedge the worker if the assertion failed
+                        worker.join(5000);
+                }
+        }
+
+        @Test
+        @org.junit.jupiter.api.Timeout(value = 20)
+        void testGetTotalFrames_SilentOpenStdoutNeverExiting_ReturnsMinusOneAfterTimeout() throws Exception {
+                Path stub = createSilentOpenStdoutFfprobeStub();
+                FFmpegService silentService = new FFmpegService(stub, stub);
+                java.lang.reflect.Method getTotalFrames = ffprobeHelper("getTotalFrames");
+
+                long originalTimeout = FFmpegService.FFPROBE_TIMEOUT_MILLIS;
+                FFmpegService.FFPROBE_TIMEOUT_MILLIS = 800;
+                Object[] result = { "unset" };
+                Thread worker = new Thread(() -> {
+                        try {
+                                result[0] = getTotalFrames.invoke(silentService, tempDir.resolve("input.mp4"));
+                        } catch (ReflectiveOperationException e) {
+                                result[0] = e;
+                        }
+                });
+                worker.start();
+                try {
+                        worker.join(10000);
+                        assertFalse(worker.isAlive(),
+                                        "getTotalFrames must be bounded even when ffprobe holds stdout open with no output");
+                        assertEquals(-1l, ((Number) result[0]).longValue(),
+                                        "getTotalFrames must return -1 on silent-stream timeout");
                 } finally {
                         FFmpegService.FFPROBE_TIMEOUT_MILLIS = originalTimeout;
                         worker.interrupt(); // unwedge the worker if the assertion failed

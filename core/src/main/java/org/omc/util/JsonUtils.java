@@ -2,6 +2,7 @@ package org.omc.util;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -41,14 +42,14 @@ public final class JsonUtils {
         // Don't write dates as timestamps
         mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
-        // NOTE: FAIL_ON_UNKNOWN_PROPERTIES deliberately stays ENABLED here.
-        // SettingsManager.loadPresetsBySection() detects legacy preset files
-        // by attempting a strict parse into the current model and falling
-        // back to backup+migration when it fails; making the shared mapper
-        // lenient would let legacy files parse as "empty current format"
-        // and silently skip migration (data loss). Forward compatibility is
-        // handled per-model with @JsonIgnoreProperties(ignoreUnknown = true)
-        // on the persisted models that opt in.
+        // Ignore unknown properties when deserializing: persisted JSON files
+        // may carry fields written by newer application versions and must
+        // not fail to load (forward compatibility). Legacy preset files are
+        // NOT detected by strict-parse failure anymore: SettingsManager
+        // .loadPresetsBySection() inspects the JSON tree shape (legacy
+        // top-level "presets" key / bare array vs current section keys) to
+        // decide between normal load and backup+migration.
+        mapper.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
 
         return mapper;
     }
@@ -62,8 +63,10 @@ public final class JsonUtils {
      * <em>not</em> reconfigure it (enable/disable features, register modules):
      * configuration changes leak into every other JsonUtils consumer. All
      * current call sites only read/serialize, which is the supported usage.
-     * In particular, do not disable FAIL_ON_UNKNOWN_PROPERTIES globally: it is
-     * load-bearing for legacy-format detection (see
+     * The mapper is lenient on unknown properties
+     * (FAIL_ON_UNKNOWN_PROPERTIES is disabled); callers that must distinguish
+     * file formats do so by inspecting the JSON tree shape, not by relying on
+     * strict-parse failures (see
      * {@code SettingsManager.loadPresetsBySection}).
      * </p>
      *

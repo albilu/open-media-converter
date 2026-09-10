@@ -16,6 +16,7 @@ import org.omc.model.SectionPreset;
 import org.omc.model.SettingsPreset;
 import org.omc.model.VideoSettings;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.omc.core.ConfigurationManager;
 import org.omc.core.ValidationEngine;
 import org.omc.exception.InvalidSettingsException;
@@ -457,6 +458,62 @@ class SettingsManagerMigrationTest {
                 .orElse(null);
         assertNotNull(user);
         assertFalse(user.builtIn(), "User preset should retain flag");
+    }
+
+    /**
+     * Requirement REQ-5.1: Legacy detection is shape-based and survives global
+     * lenient parsing.
+     *
+     * <p>
+     * The shared Jackson mapper ignores unknown properties. A legacy
+     * {@code {"presets":[...]}} container must still be detected by its shape
+     * (legacy top-level {@code presets} key) and routed to backup+migration,
+     * even when the file also carries unknown extra fields — under lenient
+     * parsing this shape would otherwise bind as an "empty current" object and
+     * silently skip migration (data loss).
+     * </p>
+     */
+    @Test
+    void testMigration_LegacyContainerWithUnknownFields_StillDetectedUnderLenientParsing() throws IOException {
+        // Given: Legacy {"presets":[...]} container with unknown extra fields
+        VideoSettings videoSettings = VideoSettings.builder()
+                .outputFormat(FileFormat.MP4)
+                .codec("libx264")
+                .bitrate(5000)
+                .build();
+        ConversionSettings settings = ConversionSettings.builder()
+                .outputDirectory(outputDir)
+                .videoSettings(videoSettings)
+                .build();
+        SettingsPreset legacyPreset = SettingsPreset.createUserPreset(
+                "Legacy With Extras", "Legacy container with unknown fields", settings);
+
+        ObjectNode root = JsonUtils.getObjectMapper().createObjectNode();
+        root.set("presets", JsonUtils.getObjectMapper().valueToTree(List.of(legacyPreset)));
+        root.put("schemaVersion", 99);
+        ((ObjectNode) root.get("presets").get(0)).put("favorite", true);
+
+        String legacyJson = JsonUtils.toJson(root);
+        Files.writeString(presetsPath, legacyJson);
+
+        // When: Load presets (must trigger migration)
+        PresetsBySection result = settingsManager.loadPresetsBySection();
+
+        // Then: Backup of the original content is created
+        List<Path> backups;
+        try (var files = Files.list(configDir)) {
+            backups = files
+                    .filter(p -> p.getFileName().toString().startsWith("presets.json.old."))
+                    .filter(p -> p.getFileName().toString().endsWith(".bak"))
+                    .toList();
+        }
+        assertEquals(1, backups.size(), "Legacy container must trigger backup");
+        assertEquals(legacyJson, Files.readString(backups.get(0)));
+
+        // And: The legacy preset is migrated into the video section, not dropped
+        assertEquals(1, result.videoPresets().size(), "Legacy preset must be migrated");
+        assertEquals("Legacy With Extras", result.videoPresets().get(0).name());
+        assertEquals(FileFormat.MP4, result.videoPresets().get(0).videoSettings().outputFormat());
     }
 
     /**

@@ -59,13 +59,15 @@ public class FileDetailsDialog {
 
     private final Window parentWindow;
     private Window dialog;
+    /** File whose details the live dialog shows (audit: window-storm reuse). */
+    private volatile String displayedFileId;
     private Button copyButton;
 
     // Global conversion settings used for output-format resolution (may be
     // null when constructed without settings; resolution then uses the same
     // core helper on an empty settings instance, which is equivalent for the
     // override-only branch).
-    private final ConversionSettings globalSettings;
+    private ConversionSettings globalSettings;
 
     // Receiver fallback for override-only resolution without global settings.
     private static final ConversionSettings EMPTY_SETTINGS = ConversionSettings.builder().build();
@@ -98,9 +100,30 @@ public class FileDetailsDialog {
      * @param file   The conversion file to display details for
      * @param result The conversion result (nullable for pending/in-progress files)
      */
+    /**
+     * Refreshes the global settings snapshot used for output-format
+     * resolution (the dialog instance is reused across settings changes).
+     *
+     * @param settings current conversion settings (nullable)
+     */
+    public void updateSettings(ConversionSettings settings) {
+        this.globalSettings = settings;
+    }
+
     public void show(ConversionFile file, ConversionResult result) {
         if (file == null) {
             logger.warn("Cannot show dialog: file is null");
+            return;
+        }
+
+        // Re-present an already-open dialog for the SAME file instead of
+        // stacking duplicate windows on repeated double-clicks (audit fix).
+        Window existing = dialog;
+        if (existing != null && existing.isVisible() && file.id().equals(displayedFileId)) {
+            GLib.idleAdd(0, () -> {
+                existing.present();
+                return false;
+            });
             return;
         }
 
@@ -126,6 +149,7 @@ public class FileDetailsDialog {
      */
     private void buildDialog(ConversionFile file, ConversionResult result) {
         dialog = new Window();
+        displayedFileId = file.id();
         dialog.setTitle(file.fileName() + " - Conversion Details");
         dialog.setTransientFor(parentWindow);
         dialog.setModal(false);

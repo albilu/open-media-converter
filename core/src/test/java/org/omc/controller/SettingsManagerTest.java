@@ -953,6 +953,75 @@ class SettingsManagerTest {
         assertEquals(2, backups.size(), "same-second backups must not overwrite each other");
     }
 
+    @Test
+    void testLoadPresetsBySection_CurrentFormatWithUnknownField_LoadsAndKeepsKnownValues() throws IOException {
+        // Given: A current-format file carrying extra unknown fields, as written
+        // by a newer application version (forward compatibility)
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        String currentWithExtra = """
+                {
+                  "videoPresets": [
+                    {
+                      "name": "Future Preset",
+                      "description": "Current schema plus unknown fields",
+                      "category": "VIDEO",
+                      "videoSettings": {"outputFormat": "MP4", "codec": "libx264", "bitrate": 5000},
+                      "builtIn": false,
+                      "createdAt": 1700000000000,
+                      "presetColor": "blue"
+                    }
+                  ],
+                  "audioPresets": [],
+                  "imagePresets": [],
+                  "documentPresets": [],
+                  "schemaVersion": 2
+                }
+                """;
+        Files.writeString(presetsPath, currentWithExtra);
+
+        // When: Load presets
+        PresetsBySection loaded = settingsManager.loadPresetsBySection();
+
+        // Then: File loads leniently; known values are kept, unknown fields ignored
+        assertEquals(1, loaded.videoPresets().size());
+        assertEquals("Future Preset", loaded.videoPresets().get(0).name());
+        assertNotNull(loaded.videoPresets().get(0).videoSettings());
+        assertEquals(FileFormat.MP4, loaded.videoPresets().get(0).videoSettings().outputFormat());
+
+        // And: No backup or migration was triggered for a current-shape file
+        try (var files = Files.list(configDir)) {
+            assertFalse(files.anyMatch(p -> p.getFileName().toString().startsWith("presets.json.old.")),
+                    "Current-shape file with unknown fields must load directly, not migrate");
+        }
+    }
+
+    @Test
+    void testLoadPresetsBySection_AmbiguousFile_TakesSafeMigrationPath() throws IOException {
+        // Given: A parseable file whose shape matches neither the current
+        // sectioned schema nor the known legacy schemas
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        String ambiguous = "{\"somethingUnknown\": 42}";
+        Files.writeString(presetsPath, ambiguous);
+
+        // When: Load presets
+        PresetsBySection loaded = settingsManager.loadPresetsBySection();
+
+        // Then: Empty result via the migration path
+        assertEquals(0, loaded.totalPresetCount());
+
+        // And: A backup of the original content exists (data safety over
+        // silent accept for ambiguous shapes)
+        List<Path> backups;
+        try (var files = Files.list(configDir)) {
+            backups = files
+                    .filter(p -> p.getFileName().toString().startsWith("presets.json.old."))
+                    .filter(p -> p.getFileName().toString().endsWith(".bak"))
+                    .toList();
+        }
+        assertEquals(1, backups.size(), "Ambiguous file must go through backup+migration, not silent accept");
+        assertEquals(ambiguous, Files.readString(backups.get(0)));
+    }
+
     private SettingsPreset createLegacyPreset(Path outputDir) {
         VideoSettings videoSettings = VideoSettings.builder()
                 .outputFormat(FileFormat.MP4)

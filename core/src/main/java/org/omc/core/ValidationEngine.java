@@ -47,10 +47,15 @@ public class ValidationEngine {
 
     // Validation thresholds
     private static final long MIN_DISK_SPACE_BUFFER = 500 * 1024 * 1024; // 500 MB safety buffer
-    private static final int MIN_PARALLEL_CONVERSIONS = 1;
-    // Must match ConversionEngine (1-16): allowing 17+ here would pass
-    // validation only for the engine to reject it.
-    private static final int MAX_PARALLEL_CONVERSIONS = 16;
+    /**
+     * Parallelism bounds shared with ConversionEngine and the settings-dialog
+     * validation in ApplicationWorkflowController (single source of truth).
+     */
+    public static final int MIN_PARALLEL_CONVERSIONS = 1;
+    /**
+     * @see #MIN_PARALLEL_CONVERSIONS
+     */
+    public static final int MAX_PARALLEL_CONVERSIONS = 16;
 
     // Video validation ranges
     private static final int MIN_VIDEO_BITRATE = 100; // kbps

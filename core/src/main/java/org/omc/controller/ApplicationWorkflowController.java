@@ -59,13 +59,16 @@ public class ApplicationWorkflowController {
     private final StateManager stateManager;
     private final ConversionEngine conversionEngine;
 
+    // Extracted workflow concerns (audit: god-object decomposition)
+    private final PresetWorkflowHandler presetWorkflow;
+    private final SessionStateHandler sessionState;
+
     // Current state
     private final AtomicBoolean initialized;
     private final AtomicBoolean conversionInProgress;
     private final AtomicBoolean hasUnsavedChanges;
 
     // Tracked state for session persistence
-    private volatile WindowState windowState = WindowState.defaultState();
     private volatile Path lastInputDirectory;
     private volatile Path lastOutputDirectory;
     private volatile List<Path> recentFilePaths;
@@ -100,6 +103,10 @@ public class ApplicationWorkflowController {
         this.settingsManager = Objects.requireNonNull(settingsManager, "settingsManager cannot be null");
         this.stateManager = Objects.requireNonNull(stateManager, "stateManager cannot be null");
         this.conversionEngine = Objects.requireNonNull(conversionEngine, "conversionEngine cannot be null");
+
+        // Extracted workflow concerns (audit: god-object decomposition)
+        this.presetWorkflow = new PresetWorkflowHandler(fileManager, settingsManager);
+        this.sessionState = new SessionStateHandler(stateManager, fileManager, settingsManager);
 
         this.initialized = new AtomicBoolean(false);
         this.conversionInProgress = new AtomicBoolean(false);
@@ -151,14 +158,16 @@ public class ApplicationWorkflowController {
             logger.info("Application state loaded successfully");
 
             // Restore tracked state
-            SessionState sessionState = state.sessionState();
-            this.lastInputDirectory = sessionState.lastInputDirectory();
-            this.lastOutputDirectory = sessionState.lastOutputDirectory();
-            this.recentFilePaths = sessionState.recentFilePaths() != null ? sessionState.recentFilePaths() : List.of();
+            // (local named 'loadedSession' to avoid shadowing the
+            // SessionStateHandler field 'sessionState')
+            SessionState loadedSession = state.sessionState();
+            this.lastInputDirectory = loadedSession.lastInputDirectory();
+            this.lastOutputDirectory = loadedSession.lastOutputDirectory();
+            this.recentFilePaths = loadedSession.recentFilePaths() != null ? loadedSession.recentFilePaths() : List.of();
 
-            // Restore file list from session state if any
-            windowState = state.windowState();
-            restoreFileList(state.sessionState());
+            // Restore window + file list from session state if any
+            this.sessionState.restoreWindowState(state);
+            this.sessionState.restoreFileList(state.sessionState());
 
             // Register conversion completion handler to track conversion status
             conversionEngine.onConversionComplete((fileId, result) -> {
@@ -205,7 +214,8 @@ public class ApplicationWorkflowController {
                 if (conversionEngine.getActiveConversionCount() == 0) {
                     conversionInProgress.set(false);
                     logger.info("Batch conversion complete, saving session state");
-                    saveApplicationState();
+                    sessionState.saveApplicationState(recentFilePaths, lastInputDirectory,
+                    lastOutputDirectory, currentSettings);
                 }
 
                 // Forward completion event to UI callback if registered
@@ -295,7 +305,7 @@ public class ApplicationWorkflowController {
                 logger.warn("Unsaved settings changes exist, shutdown requires confirmation");
                 // In a real application, this would show a Save/Discard/Cancel dialog
                 // For now, we auto-save
-                saveCurrentSettings();
+                sessionState.saveCurrentSettings(currentSettings, this::clearUnsavedChanges);
             }
 
             // Cancel active conversions if any
@@ -307,11 +317,12 @@ public class ApplicationWorkflowController {
 
             // Save current application state
             // Requirement REQ-005.1, REQ-005.2, REQ-005.3: Persist state
-            saveApplicationState();
+            sessionState.saveApplicationState(recentFilePaths, lastInputDirectory,
+                    lastOutputDirectory, currentSettings);
 
             // Save current settings
             // Requirement REQ-003.1, REQ-005.3: Persist settings
-            saveCurrentSettings();
+            sessionState.saveCurrentSettings(currentSettings, this::clearUnsavedChanges);
 
             // Shutdown conversion engine
             conversionEngine.shutdown();
@@ -867,7 +878,8 @@ public class ApplicationWorkflowController {
 
             // Save session state after removal to persist changes
             // Requirement REQ-005.2: Save session state
-            saveApplicationState();
+            sessionState.saveApplicationState(recentFilePaths, lastInputDirectory,
+                    lastOutputDirectory, currentSettings);
 
             logger.info("Files removed successfully and state saved");
 
@@ -908,7 +920,8 @@ public class ApplicationWorkflowController {
 
             // Save session state after clearing
             // Requirement REQ-005.2: Save session state
-            saveApplicationState();
+            sessionState.saveApplicationState(recentFilePaths, lastInputDirectory,
+                    lastOutputDirectory, currentSettings);
 
             logger.info("All files cleared successfully and state saved");
 
@@ -1066,10 +1079,17 @@ public class ApplicationWorkflowController {
             }
         }
 
-        // Validate parallelism is within reasonable range
-        if (settings.parallelConversions() < 1 || settings.parallelConversions() > 16) {
+        // Validate parallelism is within the shared bound (single source of
+        // truth in ValidationEngine; field-level exception preserved for the
+        // settings dialog's focus handling — full pre-flight validation lives
+        // in ValidationEngine.validateSettings)
+        if (settings.parallelConversions() < org.omc.core.ValidationEngine.MIN_PARALLEL_CONVERSIONS
+                || settings.parallelConversions() > org.omc.core.ValidationEngine.MAX_PARALLEL_CONVERSIONS) {
             throw new InvalidSettingsException(
-                    "Max parallel conversions must be between 1 and 16, got: " + settings.parallelConversions(),
+                    "Max parallel conversions must be between "
+                            + org.omc.core.ValidationEngine.MIN_PARALLEL_CONVERSIONS + " and "
+                            + org.omc.core.ValidationEngine.MAX_PARALLEL_CONVERSIONS + ", got: "
+                            + settings.parallelConversions(),
                     "parallelConversions");
         }
 
@@ -1336,78 +1356,7 @@ public class ApplicationWorkflowController {
      * @see FileSettingsOverride
      */
     public void applyPresetToFiles(List<String> fileIds, SectionPreset preset) {
-        Objects.requireNonNull(fileIds, "fileIds cannot be null");
-        Objects.requireNonNull(preset, "preset cannot be null");
-
-        if (fileIds.isEmpty()) {
-            throw new IllegalArgumentException("fileIds cannot be empty");
-        }
-
-        logger.debug("Applying preset '{}' to {} files", preset.name(), fileIds.size());
-
-        // Performance tracking: REQ-5.2 - Target < 500ms for 100 files
-        long startTime = System.nanoTime();
-
-        // Get ConversionFile objects from FileManager
-        List<ConversionFile> files = fileIds.stream()
-                .map(fileManager::getFile)
-                .filter(Optional::isPresent)
-                .map(Optional::get)
-                .toList();
-
-        // Validate all files have the same FormatCategory
-        java.util.Set<FormatCategory> categories = files.stream()
-                .map(file -> file.format().getCategory())
-                .collect(java.util.stream.Collectors.toSet());
-
-        if (categories.size() != 1) {
-            logger.warn("Cannot apply preset to mixed file categories: {}", categories);
-            throw new IllegalArgumentException(
-                    "Cannot apply preset to files with different format categories. " +
-                            "Selected files have categories: " + categories);
-        }
-
-        // Get the single category
-        FormatCategory fileCategory = categories.iterator().next();
-
-        // Check file category matches preset category
-        if (fileCategory != preset.category()) {
-            logger.warn("File category {} does not match preset category {}",
-                    fileCategory, preset.category());
-            throw new IllegalArgumentException(
-                    String.format("File category %s does not match preset category %s",
-                            fileCategory, preset.category()));
-        }
-
-        // Create FileSettingsOverride using switch on category
-        FileSettingsOverride override = switch (preset.category()) {
-            case VIDEO -> FileSettingsOverride.forVideo(
-                    preset.name(),
-                    preset.videoSettings());
-            case AUDIO -> FileSettingsOverride.forAudio(
-                    preset.name(),
-                    preset.audioSettings());
-            case IMAGE -> FileSettingsOverride.forImage(
-                    preset.name(),
-                    preset.imageSettings());
-            case DOCUMENT -> FileSettingsOverride.forDocument(
-                    preset.name(),
-                    preset.documentSettings());
-            case UNKNOWN -> {
-                logger.error("Cannot create override for UNKNOWN category");
-                throw new IllegalArgumentException("Cannot apply preset with UNKNOWN category");
-            }
-        };
-
-        // Loop through files and apply settings override
-        for (ConversionFile file : files) {
-            ConversionFile updatedFile = file.withSettingsOverride(override);
-            fileManager.updateFile(updatedFile);
-        }
-
-        long elapsedMs = (System.nanoTime() - startTime) / 1_000_000;
-        logger.info("Successfully applied preset '{}' to {} file(s) in category {} (took {}ms - target <500ms)",
-                preset.name(), files.size(), preset.category(), elapsedMs);
+        presetWorkflow.applyPresetToFiles(fileIds, preset);
     }
 
     /**
@@ -1442,35 +1391,7 @@ public class ApplicationWorkflowController {
      * @see ConversionFile#hasCustomSettings()
      */
     public void clearPresetFromFiles(List<String> fileIds) {
-        Objects.requireNonNull(fileIds, "fileIds cannot be null");
-
-        if (fileIds.isEmpty()) {
-            logger.debug("clearPresetFromFiles called with empty list");
-            return;
-        }
-
-        logger.debug("Clearing custom settings from {} file(s)", fileIds.size());
-
-        int clearedCount = 0;
-        for (String fileId : fileIds) {
-            Optional<ConversionFile> fileOpt = fileManager.getFile(fileId);
-            if (fileOpt.isEmpty()) {
-                logger.warn("File not found in FileManager: {}", fileId);
-                continue;
-            }
-
-            ConversionFile file = fileOpt.get();
-            if (file.hasCustomSettings()) {
-                ConversionFile updatedFile = file.clearSettingsOverride();
-                fileManager.updateFile(updatedFile);
-                clearedCount++;
-                logger.debug("Cleared custom settings from file: {}", fileId);
-            } else {
-                logger.debug("File has no custom settings to clear: {}", fileId);
-            }
-        }
-
-        logger.info("Cleared custom settings from {} of {} file(s)", clearedCount, fileIds.size());
+        presetWorkflow.clearPresetFromFiles(fileIds);
     }
 
     /**
@@ -1519,59 +1440,12 @@ public class ApplicationWorkflowController {
      * @see PresetsBySection#getPresetsForCategory(FormatCategory)
      */
     public List<SectionPreset> getAvailablePresetsForFiles(List<String> fileIds) {
-        Objects.requireNonNull(fileIds, "fileIds cannot be null");
-
-        if (fileIds.isEmpty()) {
-            logger.debug("getAvailablePresetsForFiles called with empty list");
-            return List.of();
-        }
-
-                logger.debug("Getting available presets for {} file(s)", fileIds.size());
-        // Get ConversionFile objects from FileManager
-        List<ConversionFile> files = new ArrayList<>();
-        for (String fileId : fileIds) {
-            Optional<ConversionFile> fileOpt = fileManager.getFile(fileId);
-            if (fileOpt.isEmpty()) {
-                logger.warn("File not found in FileManager: {}", fileId);
-                // If any file is missing, return empty list (invalid state)
-                return List.of();
-            }
-            files.add(fileOpt.get());
-        }
-
-        // Collect all FormatCategory values to validate uniformity
-        java.util.Set<FormatCategory> categories = files.stream()
-                .map(file -> file.format().getCategory())
-                .collect(java.util.stream.Collectors.toSet());
-
-        // If empty or mixed categories, return empty list
-        if (categories.isEmpty() || categories.size() > 1) {
-            logger.debug("Mixed or empty categories detected: {}, returning empty preset list", categories);
-            return List.of();
-        }
-
-        // Get the single category
-        FormatCategory category = categories.iterator().next();
-
-        // UNKNOWN category has no presets
-        if (category == FormatCategory.UNKNOWN) {
-            logger.debug("UNKNOWN category detected, returning empty preset list");
-            return List.of();
-        }
-
-        // Load PresetsBySection from SettingsManager
-        PresetsBySection presetsBySection = settingsManager.loadPresetsBySection();
-
-        // Get presets for this category
-        List<SectionPreset> presets = presetsBySection.getPresetsForCategory(category);
-
-        logger.debug("Found {} preset(s) for category {}", presets.size(), category);
-        return presets;
+        return presetWorkflow.getAvailablePresetsForFiles(fileIds);
     }
 
     /** Returns the window geometry and desktop state restored at startup. */
     public WindowState getWindowState() {
-        return windowState;
+        return sessionState.getWindowState();
     }
 
     /** Returns the format sections supported by installed conversion tools. */
@@ -1584,118 +1458,19 @@ public class ApplicationWorkflowController {
      * @param state current window geometry and desktop state
      */
     public void updateWindowState(WindowState state) {
-        windowState = Objects.requireNonNull(state, "state");
+        sessionState.updateWindowState(state);
     }
 
     // ===== Private Helper Methods =====
 
-    /**
-     * Restores file list from session state.
-     * Validates that files still exist and removes missing files.
-     * 
-     * Requirement REQ-005.2: Restore session state
-     */
-    private void restoreFileList(SessionState sessionState) {
-        if (sessionState == null || sessionState.pendingFiles() == null) {
-            logger.debug("No files to restore from session state");
-            return;
-        }
-
-        List<ConversionFile> pendingFiles = sessionState.pendingFiles();
-        if (pendingFiles.isEmpty()) {
-            logger.debug("No pending files in session state");
-            return;
-        }
-
-        logger.info("Restoring {} files from session state", pendingFiles.size());
-
-        fileManager.restoreFiles(pendingFiles);
-    }
-
-    /**
-     * Saves current application state to disk.
-     * 
-     * Requirement REQ-005.1, REQ-005.2, REQ-005.3: Persist application state
-     * Requirement REQ-FL-4.5: Preserve file list sort state during shutdown
-     */
-    private void saveApplicationState() {
-        try {
-            // Build session state from current file list
-            List<ConversionFile> pendingFiles = fileManager.getFiles();
-
-            SessionState sessionState = new SessionState(
-                    recentFilePaths,
-                    lastInputDirectory,
-                    lastOutputDirectory,
-                    pendingFiles,
-                    null // lastUsedPreset
-            );
-
-            // Get current window state (would come from UI)
-            WindowState capturedWindowState = windowState;
-
-            // Get current sort state to preserve it during shutdown
-            // Requirement REQ-FL-4.5: Persist sort state across application restarts
-            ApplicationState currentState = stateManager.getCurrentState();
-            FileListSortState sortState = currentState.fileListSortState();
-
-            // Create new state with all current values including sort state
-            ApplicationState state = new ApplicationState(
-                    capturedWindowState,
-                    sessionState,
-                    currentSettings,
-                    sortState, // Preserve current sort state
-                    "1.0.0",
-                    System.currentTimeMillis());
-
-            stateManager.saveState(state);
-            logger.debug("Application state saved successfully");
-
-        } catch (Exception e) {
-            logger.error("Failed to save application state", e);
-        }
-    }
-
-    /**
-     * Saves current settings to disk.
-     * 
-     * Requirement REQ-003.1, REQ-005.3: Persist settings
-     */
-    private void saveCurrentSettings() {
-        try {
-            if (currentSettings != null) {
-                settingsManager.saveSettings(currentSettings);
-                clearUnsavedChanges();
-                logger.debug("Settings saved successfully");
-            }
-        } catch (InvalidSettingsException | java.io.IOException e) {
-            logger.error("Failed to save settings", e);
-        }
-    }
-
-    /**
+                /**
      * Saves file list sort state to application state.
      * Task 80: REQ-FL-4.5 - Persist sort state when user changes column sorting.
      * 
      * @param sortState The new sort state to save
      */
     public void saveSortState(FileListSortState sortState) {
-        try {
-            logger.debug("Saving sort state: {}", sortState);
-
-            // Get current application state
-            ApplicationState currentState = stateManager.getCurrentState();
-
-            // Update with new sort state
-            ApplicationState updatedState = currentState.withFileListSortState(sortState);
-
-            // Save updated state
-            stateManager.saveState(updatedState);
-
-            logger.debug("Sort state saved successfully");
-        } catch (Exception e) {
-            logger.error("Failed to save sort state", e);
-        }
+        sessionState.saveSortState(sortState);
     }
 
     /**
@@ -1705,14 +1480,7 @@ public class ApplicationWorkflowController {
      * @return The saved sort state, or FileListSortState.unsorted() if none saved
      */
     public FileListSortState getSavedSortState() {
-        try {
-            ApplicationState currentState = stateManager.getCurrentState();
-            FileListSortState sortState = currentState.fileListSortState();
-            return sortState != null ? sortState : FileListSortState.unsorted();
-        } catch (Exception e) {
-            logger.error("Failed to retrieve saved sort state", e);
-            return FileListSortState.unsorted();
-        }
+        return sessionState.getSavedSortState();
     }
 
     /**

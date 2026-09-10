@@ -813,24 +813,27 @@ public class SettingsManager {
      * Loads presets organized by section from disk.
      * 
      * <p>
-     * This method attempts to load presets in the new {@link PresetsBySection}
-     * format.
-     * If the file doesn't exist or loading fails, it attempts automatic migration
-     * from
-     * the old {@code List<SettingsPreset>} format. Migration creates a timestamped
-     * backup
-     * of the old file before converting to the new structure.
+     * This method loads presets in the new {@link PresetsBySection} format.
+     * The file is first parsed into a JSON tree and its <em>shape</em> is
+     * inspected to distinguish current-format files from legacy ones (see
+     * {@link #isLegacyPresetsShape(JsonNode)}). Legacy-shaped files are
+     * migrated from the old {@code List<SettingsPreset>} format; migration
+     * creates a timestamped backup of the old file before converting to the
+     * new structure.
      * </p>
      * 
      * <p>
-     * <b>Migration Process:</b>
+     * <b>Decision Procedure:</b>
      * </p>
      * <ol>
-     * <li>Try loading as {@link PresetsBySection}</li>
-     * <li>If fails, load as old {@code List<SettingsPreset>} format</li>
-     * <li>Categorize old presets by output format category</li>
-     * <li>Create backup of old file with timestamp</li>
-     * <li>Convert to {@link PresetsBySection} and save in new format</li>
+     * <li>Read the file as a JSON tree; if it is not parseable JSON, run the
+     * migration path (which backs the file up before giving up)</li>
+     * <li>If the tree has the legacy shape (bare array, or an object with a
+     * legacy {@code presets} key, or no recognizable current section keys),
+     * run backup+migration</li>
+     * <li>Otherwise bind the tree to {@link PresetsBySection} leniently
+     * (unknown fields are ignored); if binding still fails (e.g. type
+     * mismatches), fall back to backup+migration</li>
      * </ol>
      * 
      * <p>
@@ -843,6 +846,7 @@ public class SettingsManager {
      * 
      * @return Presets organized by section, or empty if none exist
      * @see #migrateOldPresetsFormat() for migration implementation
+     * @see #isLegacyPresetsShape(JsonNode) for legacy-shape detection
      * @see #addSectionPreset(SectionPreset) to add new presets
      * @see PresetsBySection
      */
@@ -857,11 +861,23 @@ public class SettingsManager {
             return PresetsBySection.empty();
         }
 
+        JsonNode root;
         try {
-            // Try loading as new PresetsBySection format
-            PresetsBySection presets = JsonUtils.readJsonFile(
-                    presetsPath.toFile(),
-                    PresetsBySection.class);
+            root = JsonUtils.getObjectMapper().readTree(presetsPath.toFile());
+        } catch (IOException e) {
+            // Not parseable JSON: existing failure path (backup, then empty)
+            logger.info("Presets file is not parseable JSON, attempting migration: {}", e.getMessage());
+            return migrateOldPresetsFormat();
+        }
+
+        if (isLegacyPresetsShape(root)) {
+            logger.info("Presets file has a legacy or unrecognized shape, attempting migration");
+            return migrateOldPresetsFormat();
+        }
+
+        try {
+            // Current shape: bind leniently (unknown fields are ignored)
+            PresetsBySection presets = JsonUtils.getObjectMapper().treeToValue(root, PresetsBySection.class);
 
             if (presets != null) {
                 logger.info("Successfully loaded presets by section");
@@ -872,10 +888,75 @@ public class SettingsManager {
             }
 
         } catch (IOException e) {
-            // Failed to load as new format, try migration from old format
+            // Shape looked current but binding failed (e.g. type mismatch):
+            // fall back to the migration path rather than failing hard
             logger.info("Failed to load as PresetsBySection format, attempting migration: {}", e.getMessage());
             return migrateOldPresetsFormat();
         }
+    }
+
+    /**
+     * Top-level JSON field names of the current {@link PresetsBySection}
+     * schema, used as current-format shape markers.
+     */
+    private static final List<String> CURRENT_SECTION_KEYS = List.of(
+            "videoPresets", "audioPresets", "imagePresets", "documentPresets");
+
+    /**
+     * Top-level JSON field name holding the legacy flat preset list.
+     */
+    private static final String LEGACY_PRESETS_KEY = "presets";
+
+    /**
+     * Decides from the JSON tree shape whether a presets file must take the
+     * legacy backup+migration path instead of a normal lenient load.
+     *
+     * <p>
+     * <b>Markers</b> (derived from the historical schemas):
+     * </p>
+     * <ul>
+     * <li><b>Legacy:</b> a bare top-level JSON array (ancient
+     * {@code List<SettingsPreset>} files), or a top-level object containing
+     * the legacy {@code presets} key (the old {@code {"presets":[...]}}
+     * container, including mixed files that also carry section keys — the
+     * migration path preserves both parts)</li>
+     * <li><b>Current:</b> a top-level object with no {@code presets} key and
+     * at least one of the section keys ({@code videoPresets},
+     * {@code audioPresets}, {@code imagePresets}, {@code documentPresets})</li>
+     * <li><b>Ambiguous:</b> anything else (empty object, objects with only
+     * unrecognized keys, non-object/non-array JSON, or a null tree from an
+     * empty file)</li>
+     * </ul>
+     *
+     * <p>
+     * <b>Conservative rule:</b> ambiguous or unknown shapes are treated as
+     * legacy, i.e. they prefer the backup+migration path over silently
+     * accepting the file as current. Rationale: a lenient bind of a
+     * non-current file would produce an "empty current" result and silently
+     * skip migration (data loss), while the migration path is fail-safe — it
+     * backs the original up and only rewrites recognized content. Data safety
+     * wins over convenience.
+     * </p>
+     *
+     * @param root the parsed presets file tree, may be null (empty/unreadable)
+     * @return true if the file must go through backup+migration
+     */
+    private boolean isLegacyPresetsShape(JsonNode root) {
+        if (root == null || root.isNull() || (!root.isObject() && !root.isArray())) {
+            // Empty file, JSON null/scalar: ambiguous → safe path
+            return true;
+        }
+        if (root.isArray()) {
+            // Ancient bare List<SettingsPreset> files
+            return true;
+        }
+        if (root.has(LEGACY_PRESETS_KEY)) {
+            // Legacy {"presets":[...]} container, possibly mixed with sections
+            return true;
+        }
+        // Current only when at least one section key is present; an object
+        // with no recognizable marker at all is ambiguous → safe path
+        return CURRENT_SECTION_KEYS.stream().noneMatch(root::has);
     }
 
     /**

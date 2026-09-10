@@ -5,12 +5,15 @@ package org.omc.service;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -63,6 +66,34 @@ public class FFmpegService {
      */
     private static final Map<FileFormat, String> CONTAINER_NATIVE_AUDIO_CODECS = Map.of(
             FileFormat.WEBM, "libopus");
+
+    /**
+     * Tolerance for matching a decimal ratio against a canonical named ratio.
+     * Kept tight (0.005) so adjacent ratios (e.g. 2.39 vs 2.40) are never
+     * conflated.
+     */
+    private static final double RATIO_TOLERANCE = 0.005;
+
+    /** Maximum denominator accepted in generated ratio fractions. */
+    private static final int MAX_RATIO_DENOMINATOR = 100;
+
+    /**
+     * Canonical named ratios mapped to their display fractions. These are
+     * matched first because pure rational reduction would lose their
+     * conventional forms (e.g. 21/9 would reduce to 7/3).
+     */
+    private static final Map<Double, String> CANONICAL_RATIOS = createCanonicalRatios();
+
+    private static Map<Double, String> createCanonicalRatios() {
+        Map<Double, String> ratios = new LinkedHashMap<>();
+        ratios.put(16.0 / 9.0, "16/9");
+        ratios.put(4.0 / 3.0, "4/3");
+        ratios.put(1.0, "1/1");
+        ratios.put(21.0 / 9.0, "21/9");
+        ratios.put(9.0 / 16.0, "9/16");
+        ratios.put(3.0 / 2.0, "3/2");
+        return ratios;
+    }
 
     private final Path ffmpegPath;
     private final Path ffprobePath;
@@ -475,7 +506,19 @@ public class FFmpegService {
         // Rounded up to even dimensions: yuv420p encoders fail on odd sizes.
         if (settings.resolution() != null) {
             Resolution res = settings.resolution();
-            filters.add(String.format("scale=%d:%d", toEven(res.getWidth()), toEven(res.getHeight())));
+            boolean hasTargetAspectRatio = settings.aspectRatio() != null
+                    && !settings.aspectRatio().isOriginal();
+            if (hasTargetAspectRatio) {
+                // Geometry-preserving scale so the subsequent pad filter
+                // letterboxes correctly; a stretch-to-exact-dimensions scale
+                // here would double-distort the picture.
+                filters.add(String.format("scale=%d:%d:force_original_aspect_ratio=decrease",
+                        toEven(res.getWidth()), toEven(res.getHeight())));
+            } else {
+                // Resolution-only: intended stretch to exact dimensions.
+                filters.add(String.format("scale=%d:%d",
+                        toEven(res.getWidth()), toEven(res.getHeight())));
+            }
         }
 
         // 2. Aspect ratio filters (if not KEEP_ORIGINAL)
@@ -502,6 +545,7 @@ public class FFmpegService {
      * - 1.777 → "16/9"
      * - 1.333 → "4/3"
      * - 1.5 → "3/2"
+     * - 2.40 → "12/5"
      * 
      * @param ratio decimal aspect ratio (must be positive, finite)
      * @return formatted ratio string (e.g., "16/9")
@@ -514,25 +558,52 @@ public class FFmpegService {
             throw new IllegalArgumentException("Invalid aspect ratio: " + ratio);
         }
 
-        // Convert decimal ratio to fractional string (e.g., 1.777 → "16/9")
-        if (Math.abs(ratio - 16.0 / 9.0) < 0.01)
-            return "16/9";
-        if (Math.abs(ratio - 4.0 / 3.0) < 0.01)
-            return "4/3";
-        if (Math.abs(ratio - 1.0) < 0.01)
-            return "1/1";
-        if (Math.abs(ratio - 21.0 / 9.0) < 0.01)
-            return "21/9";
-        if (Math.abs(ratio - 9.0 / 16.0) < 0.01)
-            return "9/16";
-        if (Math.abs(ratio - 3.0 / 2.0) < 0.01)
-            return "3/2";
-        if (Math.abs(ratio - 2.39) < 0.01)
-            return "239/100";
+        // Named ratios keep their display forms (e.g. "21/9", not "7/3")
+        for (Map.Entry<Double, String> canonical : CANONICAL_RATIOS.entrySet()) {
+            if (Math.abs(ratio - canonical.getKey()) <= RATIO_TOLERANCE) {
+                return canonical.getValue();
+            }
+        }
+
+        // Exact rational conversion (e.g. 2.40 → "12/5", 2.39 → "239/100")
+        String fraction = toFractionString(ratio);
+        if (fraction != null) {
+            return fraction;
+        }
 
         // Fallback: use decimal format for precision (FFmpeg accepts decimal ratios)
         // Use Locale.ROOT to ensure period as decimal separator (not comma)
         return String.format(java.util.Locale.ROOT, "%.3f", ratio);
+    }
+
+    /**
+     * Converts a decimal ratio to an exact reduced fraction string with
+     * denominator at most {@value #MAX_RATIO_DENOMINATOR}.
+     * 
+     * @param ratio decimal aspect ratio
+     * @return reduced fraction string (e.g., "12/5"), or null when the exact
+     *         value cannot be represented with the maximum denominator
+     */
+    private static String toFractionString(double ratio) {
+        BigDecimal decimal = BigDecimal.valueOf(ratio);
+        BigInteger numerator;
+        BigInteger denominator;
+        if (decimal.scale() >= 0) {
+            numerator = decimal.unscaledValue();
+            denominator = BigInteger.TEN.pow(decimal.scale());
+        } else {
+            numerator = decimal.unscaledValue().multiply(BigInteger.TEN.pow(-decimal.scale()));
+            denominator = BigInteger.ONE;
+        }
+
+        BigInteger gcd = numerator.gcd(denominator);
+        numerator = numerator.divide(gcd);
+        denominator = denominator.divide(gcd);
+
+        if (denominator.compareTo(BigInteger.valueOf(MAX_RATIO_DENOMINATOR)) > 0) {
+            return null;
+        }
+        return numerator + "/" + denominator;
     }
 
     /**
@@ -1948,18 +2019,5 @@ public class FFmpegService {
         } catch (IOException e) {
             logger.warn("Failed to clean up partial output file: {}", outputPath, e);
         }
-    }
-
-    /**
-     * Terminates any running FFmpeg process.
-     * This method is called when cancellation is requested.
-     * 
-     * Requirements: REQ-004.2 - Process termination support
-     */
-    public void terminate() {
-        // Process termination is handled in executeConversion via
-        // process.destroyForcibly()
-        // This method serves as a hook for external cancellation signals
-        logger.debug("Terminate called on FFmpegService - no active processes to terminate");
     }
 }

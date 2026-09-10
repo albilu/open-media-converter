@@ -79,6 +79,9 @@ public class MainWindowJavaGi extends ApplicationWindow {
     private ColumnView fileListColumnView;
     private FileListView fileListView;
 
+    /** Single reused details dialog (tracks its live window per file). */
+    private FileDetailsDialog fileDetailsDialog;
+
     // Progress View
     private Revealer progressRevealer;
     private ProgressBar overallProgressBar;
@@ -1689,9 +1692,15 @@ public class MainWindowJavaGi extends ApplicationWindow {
         ConversionResult result = controller.getConversionResult(fileId);
 
         // Create and show the dialog, passing the current settings so output
-        // format resolution uses the same core helper as the file list
-        FileDetailsDialog dialog = new FileDetailsDialog(this, controller.getCurrentSettings());
-        dialog.show(file, result);
+        // format resolution uses the same core helper as the file list.
+        // Single instance is reused: repeated double-clicks on the same file
+        // re-present the existing window instead of stacking duplicates.
+        if (fileDetailsDialog == null) {
+            fileDetailsDialog = new FileDetailsDialog(this, controller.getCurrentSettings());
+        } else {
+            fileDetailsDialog.updateSettings(controller.getCurrentSettings());
+        }
+        fileDetailsDialog.show(file, result);
 
         logger.debug("File details dialog displayed for: {}", file.path().getFileName());
     }

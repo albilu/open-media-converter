@@ -357,12 +357,13 @@ class ApplicationWorkflowControllerTest {
 
     @Test
     void restoreFileList_should_doNothing_when_sessionStateIsNull() throws Exception {
-        // Arrange
-        Method method = ApplicationWorkflowController.class.getDeclaredMethod("restoreFileList", SessionState.class);
+        // Arrange - restoreFileList now lives on the extracted SessionStateHandler
+        Method method = SessionStateHandler.class.getDeclaredMethod("restoreFileList", SessionState.class);
         method.setAccessible(true);
+        SessionStateHandler handler = new SessionStateHandler(stateManager, fileManager, settingsManager);
 
         // Act
-        method.invoke(controller, (SessionState) null);
+        method.invoke(handler, (SessionState) null);
 
         // Assert
         verify(fileManager, never()).addFiles(any());

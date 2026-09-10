@@ -858,10 +858,65 @@ class FFmpegServiceTest {
                 assertTrue(result.contains("Invalid"));
         }
 
+        // ========================================
+        // Format Ratio Tests (P3 audit)
+        // ========================================
+
+        private String invokeFormatRatio(double ratio) throws Exception {
+                java.lang.reflect.Method method = FFmpegService.class.getDeclaredMethod(
+                                "formatRatio", double.class);
+                method.setAccessible(true);
+                return (String) method.invoke(service, ratio);
+        }
+
         @Test
-        void testTerminate() {
-                // Test that terminate() can be called without exceptions
-                assertDoesNotThrow(() -> service.terminate());
+        void testFormatRatio_CanonicalRatios() throws Exception {
+                assertEquals("16/9", invokeFormatRatio(16.0 / 9.0));
+                assertEquals("4/3", invokeFormatRatio(4.0 / 3.0));
+                assertEquals("1/1", invokeFormatRatio(1.0));
+                assertEquals("21/9", invokeFormatRatio(21.0 / 9.0));
+                assertEquals("9/16", invokeFormatRatio(9.0 / 16.0));
+                assertEquals("3/2", invokeFormatRatio(3.0 / 2.0));
+        }
+
+        @Test
+        void testFormatRatio_2_40_Yields12Over5() throws Exception {
+                // 2.40 must not be swept into the 2.39 bucket; exact rational
+                // conversion yields the reduced fraction 12/5.
+                assertEquals("12/5", invokeFormatRatio(2.40));
+        }
+
+        @Test
+        void testFormatRatio_2_39_Yields239Over100() throws Exception {
+                assertEquals("239/100", invokeFormatRatio(2.39));
+        }
+
+        @Test
+        void testFormatRatio_NonRepresentable_FallsBackToDecimal() throws Exception {
+                // 1.234567 cannot be expressed with denominator <= 100, so the
+                // Locale.ROOT %.3f decimal fallback must be used.
+                assertEquals("1.235", invokeFormatRatio(1.234567));
+        }
+
+        @Test
+        void testFormatRatio_InvalidInput_ThrowsIllegalArgument() throws Exception {
+                double[] invalid = {
+                                0.0,
+                                -1.5,
+                                Double.NaN,
+                                Double.POSITIVE_INFINITY,
+                                Double.NEGATIVE_INFINITY };
+                for (double value : invalid) {
+                        java.lang.reflect.Method method = FFmpegService.class.getDeclaredMethod(
+                                        "formatRatio", double.class);
+                        method.setAccessible(true);
+                        final java.lang.reflect.Method m = method;
+                        java.lang.reflect.InvocationTargetException thrown = assertThrows(
+                                        java.lang.reflect.InvocationTargetException.class,
+                                        () -> m.invoke(service, value));
+                        assertTrue(thrown.getCause() instanceof IllegalArgumentException,
+                                        "cause should be IllegalArgumentException for input " + value);
+                }
         }
 
         // ========================================
@@ -2043,6 +2098,76 @@ class FFmpegServiceTest {
                 assertTrue(setdarIndex >= 0, "Filter chain should contain setdar filter");
 
                 assertTrue(padIndex < setdarIndex, "pad must come before setdar so DAR is set on final dimensions");
+        }
+
+        // ========== Scale / Aspect Ratio Interaction Tests (P3 audit) ==========
+
+        /**
+         * Test that resolution + non-original aspect ratio produces a
+         * geometry-preserving scale (force_original_aspect_ratio=decrease)
+         * followed by pad letterboxing. Stretching to exact dimensions first
+         * and then padding double-distorts the picture.
+         * Requirements: REQ-VID-2.2, REQ-VID-2.3
+         */
+        @Test
+        void testAspectRatioFilterChain_ResolutionWithAspectRatio_GeometryPreservingScale() throws Exception {
+                VideoSettings settings = VideoSettings.builder()
+                                .codec("H264")
+                                .crf(23)
+                                .resolution(new Resolution(640, 480))
+                                .aspectRatio(AspectRatio.RATIO_16_9)
+                                .build();
+
+                List<String> command = service.buildVideoCommand(
+                                inputPath,
+                                outputPath,
+                                settings);
+
+                int vfIndex = command.indexOf("-vf");
+                assertTrue(vfIndex >= 0, "Command should contain -vf flag");
+
+                String filterChain = command.get(vfIndex + 1);
+
+                assertTrue(filterChain.contains("scale=640:480:force_original_aspect_ratio=decrease"),
+                                "scale must preserve original geometry when an aspect ratio is set");
+                assertFalse(filterChain.contains("scale=640:480,"),
+                                "scale must not stretch to exact dimensions when an aspect ratio is set");
+
+                int scaleIndex = filterChain.indexOf("scale=640:480:force_original_aspect_ratio=decrease");
+                int padIndex = filterChain.indexOf("pad=");
+                int setdarIndex = filterChain.indexOf("setdar=");
+                assertTrue(padIndex > scaleIndex, "pad must follow the geometry-preserving scale");
+                assertTrue(setdarIndex > padIndex, "setdar must follow pad");
+        }
+
+        /**
+         * Test that resolution-only (KEEP_ORIGINAL aspect ratio) keeps the
+         * plain stretch-to-exact-dimensions scale semantics.
+         * Requirements: REQ-VID-2.2
+         */
+        @Test
+        void testAspectRatioFilterChain_ResolutionOnly_PlainStretchScale() throws Exception {
+                VideoSettings settings = VideoSettings.builder()
+                                .codec("H264")
+                                .crf(23)
+                                .resolution(new Resolution(1920, 1080))
+                                .aspectRatio(AspectRatio.KEEP_ORIGINAL)
+                                .build();
+
+                List<String> command = service.buildVideoCommand(
+                                inputPath,
+                                outputPath,
+                                settings);
+
+                int vfIndex = command.indexOf("-vf");
+                assertTrue(vfIndex >= 0, "Command should contain -vf flag");
+
+                String filterChain = command.get(vfIndex + 1);
+
+                assertEquals("scale=1920:1080", filterChain,
+                                "resolution-only filter chain must be the plain stretch scale");
+                assertFalse(filterChain.contains("force_original_aspect_ratio"),
+                                "resolution-only scale must not carry the decrease modifier");
         }
 
         // ========== Audio Copy Codec Tests ==========

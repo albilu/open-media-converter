@@ -44,19 +44,21 @@ public final class VideoSettings {
     @JsonCreator
     private VideoSettings(
             @JsonProperty("codec") String codec,
-            @JsonProperty("bitrate") int bitrate,
+            @JsonProperty("bitrate") Integer bitrate,
             @JsonProperty("resolution") Resolution resolution,
-            @JsonProperty("frameRate") int frameRate,
+            @JsonProperty("frameRate") Integer frameRate,
             @JsonProperty("preset") String preset,
-            @JsonProperty("crf") int crf,
+            @JsonProperty("crf") Integer crf,
             @JsonProperty("aspectRatio") AspectRatio aspectRatio,
             @JsonProperty("outputFormat") FileFormat outputFormat) {
-        this.codec = codec;
-        this.bitrate = bitrate;
+        // Missing/null keys must fall back to the Builder defaults (safe
+        // defaults for missing fields), not to primitive zero/null values
+        this.codec = codec != null ? codec : "libx264";
+        this.bitrate = bitrate != null ? bitrate : 5000;
         this.resolution = resolution;
-        this.frameRate = frameRate;
-        this.preset = preset;
-        this.crf = crf;
+        this.frameRate = frameRate != null ? frameRate : -1;
+        this.preset = preset != null ? preset : "medium";
+        this.crf = crf != null ? crf : 23;
         // Requirement REQ-VID-2.1: Default to KEEP_ORIGINAL for backward compatibility
         this.aspectRatio = aspectRatio != null ? aspectRatio : AspectRatio.KEEP_ORIGINAL;
         this.outputFormat = outputFormat;
@@ -142,6 +144,18 @@ public final class VideoSettings {
     @JsonProperty("outputFormat")
     public FileFormat outputFormat() {
         return outputFormat;
+    }
+
+    /**
+     * Copies settings with a different output format, preserving all other
+     * video options (codec, bitrate, resolution, frame rate, preset, CRF,
+     * aspect ratio).
+     *
+     * @param format the new output format
+     * @return settings retaining all video options with the new format
+     */
+    public VideoSettings withOutputFormat(FileFormat format) {
+        return new VideoSettings(codec, bitrate, resolution, frameRate, preset, crf, aspectRatio, format);
     }
 
     /**

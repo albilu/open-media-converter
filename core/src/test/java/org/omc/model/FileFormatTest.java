@@ -165,6 +165,23 @@ class FileFormatTest {
     }
 
     @Test
+    @DisplayName("JPEG is a single-category IMAGE format, not DOCUMENT")
+    void jpeg_IsSingleCategoryImageFormat() {
+        assertFalse(FileFormat.JPEG.supportsCategory(FormatCategory.DOCUMENT),
+                "JPEG must not claim DOCUMENT category (no document tool supports it)");
+        assertTrue(FileFormat.JPEG.supportsCategory(FormatCategory.IMAGE),
+                "JPEG must remain an IMAGE format");
+
+        assertFalse(Arrays.asList(FileFormat.getFormatsByCategory(FormatCategory.DOCUMENT)).contains(FileFormat.JPEG),
+                "DOCUMENT format list must not contain JPEG");
+        assertTrue(Arrays.asList(FileFormat.getFormatsByCategory(FormatCategory.IMAGE)).contains(FileFormat.JPEG),
+                "IMAGE format list must still contain JPEG");
+
+        assertEquals(FileFormat.JPEG, FileFormat.fromExtension("jpg"));
+        assertEquals(FileFormat.JPEG, FileFormat.fromExtension("jpeg"));
+    }
+
+    @Test
     @DisplayName("PNG format has correct properties")
     void png_HasCorrectProperties() {
         assertEquals(FormatCategory.IMAGE, FileFormat.PNG.getCategory());
@@ -615,7 +632,7 @@ class FileFormatTest {
     void getFormatsByCategory_Document_ReturnsAllDocumentFormats() {
         FileFormat[] documentFormats = FileFormat.getFormatsByCategory(FormatCategory.DOCUMENT);
 
-        assertEquals(21, documentFormats.length);
+        assertEquals(20, documentFormats.length);
         assertTrue(Arrays.asList(documentFormats).contains(FileFormat.DOCX));
         assertTrue(Arrays.asList(documentFormats).contains(FileFormat.DOC));
         assertTrue(Arrays.asList(documentFormats).contains(FileFormat.PDF));
@@ -636,7 +653,8 @@ class FileFormatTest {
         assertTrue(Arrays.asList(documentFormats).contains(FileFormat.RST));
         assertTrue(Arrays.asList(documentFormats).contains(FileFormat.ORG));
         assertTrue(Arrays.asList(documentFormats).contains(FileFormat.CSV));
-        assertTrue(Arrays.asList(documentFormats).contains(FileFormat.JPEG));
+        // JPEG is IMAGE-only: it must NOT appear in the DOCUMENT list
+        assertFalse(Arrays.asList(documentFormats).contains(FileFormat.JPEG));
     }
 
     @Test
@@ -712,9 +730,9 @@ class FileFormatTest {
             total += FileFormat.getFormatsByCategory(category).length;
         }
 
-        // PDF appears in both DOCUMENT and IMAGE categories, so total will be enum
-        // count + 1
-        int expectedTotal = FileFormat.values().length + 3; // +3 for PDF/JPEG/MP3 dual-category
+        // PDF (DOCUMENT+IMAGE) and MP3 (AUDIO+VIDEO) each appear in two
+        // categories; JPEG is single-category IMAGE
+        int expectedTotal = FileFormat.values().length + 2; // +2 for PDF/MP3 dual-category
         assertEquals(expectedTotal, total,
                 "Sum of formats in all categories should equal total enum values plus dual-category formats (PDF)");
     }

@@ -1,5 +1,6 @@
 package org.omc.controller;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import org.omc.model.ImageSettings;
 import org.omc.model.DocumentSettings;
 import org.omc.model.ConversionSettings;
@@ -25,8 +26,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CyclicBarrier;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -706,6 +711,127 @@ class SettingsManagerTest {
         assertEquals("Test Preset", presets.audioPresets().get(0).name());
     }
 
+    // ========== Preset read-merge-write cycle concurrency tests ==========
+
+    @Test
+    void testAddSectionPreset_ConcurrentAdds_PersistAllPresetsWithoutLoss() throws Exception {
+        // Given: Concurrent starters all adding distinct presets
+        VideoSettings videoSettings = VideoSettings.builder()
+                .outputFormat(FileFormat.MP4)
+                .build();
+
+        int threadCount = 8;
+        CyclicBarrier barrier = new CyclicBarrier(threadCount);
+        Thread[] threads = new Thread[threadCount];
+        List<Exception> failures = Collections.synchronizedList(new ArrayList<>());
+
+        for (int i = 0; i < threadCount; i++) {
+            final String name = "Concurrent Preset " + i;
+            threads[i] = new Thread(() -> {
+                try {
+                    barrier.await();
+                    settingsManager.addSectionPreset(
+                            SectionPreset.forVideo(name, null, videoSettings, false));
+                } catch (Exception e) {
+                    failures.add(e);
+                }
+            });
+            threads[i].start();
+        }
+        for (Thread thread : threads) {
+            thread.join();
+        }
+
+        // Then: Every add must be persisted - a lost update means the
+        // load-modify-save cycle was not guarded
+        assertTrue(failures.isEmpty(), () -> "Concurrent adds must not fail: " + failures);
+        PresetsBySection presets = settingsManager.loadPresetsBySection();
+        assertEquals(threadCount, presets.videoPresets().size(),
+                "every concurrent add must be persisted (no lost updates)");
+    }
+
+    @Test
+    void testDeleteSectionPreset_ConcurrentDeletes_RemoveAllPresetsWithoutLoss() throws Exception {
+        // Given: Eight section presets to remove concurrently
+        VideoSettings videoSettings = VideoSettings.builder()
+                .outputFormat(FileFormat.MP4)
+                .build();
+
+        int threadCount = 8;
+        for (int i = 0; i < threadCount; i++) {
+            settingsManager.addSectionPreset(
+                    SectionPreset.forVideo("Doomed Preset " + i, null, videoSettings, false));
+        }
+
+        CyclicBarrier barrier = new CyclicBarrier(threadCount);
+        Thread[] threads = new Thread[threadCount];
+        List<Exception> failures = Collections.synchronizedList(new ArrayList<>());
+
+        for (int i = 0; i < threadCount; i++) {
+            final String name = "Doomed Preset " + i;
+            threads[i] = new Thread(() -> {
+                try {
+                    barrier.await();
+                    settingsManager.deleteSectionPreset(name, FormatCategory.VIDEO);
+                } catch (Exception e) {
+                    failures.add(e);
+                }
+            });
+            threads[i].start();
+        }
+        for (Thread thread : threads) {
+            thread.join();
+        }
+
+        // Then: Every delete must be applied - a resurrected preset means the
+        // load-modify-save cycle was not guarded
+        assertTrue(failures.isEmpty(), () -> "Concurrent deletes must not fail: " + failures);
+        PresetsBySection presets = settingsManager.loadPresetsBySection();
+        assertEquals(0, presets.videoPresets().size(),
+                "every concurrent delete must be applied (no lost updates)");
+    }
+
+    @Test
+    void testDeletePreset_ConcurrentDeletes_RemoveAllPresetsWithoutLoss() throws Exception {
+        // Given: Eight custom classic presets to remove concurrently
+        Path outputDir = tempDir.resolve("output");
+        Files.createDirectories(outputDir);
+
+        int threadCount = 8;
+        for (int i = 0; i < threadCount; i++) {
+            settingsManager.savePreset(createUserPresetNamed("Doomed Classic " + i, outputDir));
+        }
+        assertEquals(threadCount, settingsManager.getPresets().stream()
+                .filter(p -> !p.builtIn()).count(), "seeding failed");
+
+        CyclicBarrier barrier = new CyclicBarrier(threadCount);
+        Thread[] threads = new Thread[threadCount];
+        List<Exception> failures = Collections.synchronizedList(new ArrayList<>());
+
+        for (int i = 0; i < threadCount; i++) {
+            final String name = "Doomed Classic " + i;
+            threads[i] = new Thread(() -> {
+                try {
+                    barrier.await();
+                    settingsManager.deletePreset(name);
+                } catch (Exception e) {
+                    failures.add(e);
+                }
+            });
+            threads[i].start();
+        }
+        for (Thread thread : threads) {
+            thread.join();
+        }
+
+        // Then: Every delete must be applied - a resurrected preset means the
+        // load-modify-save cycle was not guarded
+        assertTrue(failures.isEmpty(), () -> "Concurrent deletes must not fail: " + failures);
+        assertEquals(0, settingsManager.getPresets().stream()
+                        .filter(p -> !p.builtIn()).count(),
+                "every concurrent delete must be applied (no lost updates)");
+    }
+
     @Test
     void testReplacePresetsForCategory_ReplacesCorrectCategory() {
         // Given: Initial presets
@@ -1022,6 +1148,195 @@ class SettingsManagerTest {
         assertEquals(ambiguous, Files.readString(backups.get(0)));
     }
 
+    @Test
+    void deletePreset_OnFileWithSectionPresets_PreservesSectionPresets() throws IOException {
+        // Given: A mixed presets file with a legacy "presets" array AND section presets
+        Path outputDir = tempDir.resolve("output");
+        Files.createDirectories(outputDir);
+
+        VideoSettings videoSettings = VideoSettings.builder()
+                .outputFormat(FileFormat.MP4)
+                .build();
+        SectionPreset sectionPreset = SectionPreset.forVideo("Section Video", null, videoSettings, false);
+
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        JsonUtils.writeJsonFile(
+                Map.of(
+                        "presets", List.of(createLegacyPreset(outputDir)),
+                        "videoPresets", List.of(sectionPreset),
+                        "audioPresets", List.of(),
+                        "imagePresets", List.of(),
+                        "documentPresets", List.of()),
+                presetsPath.toFile());
+
+        // When: Delete the legacy preset via the old API
+        settingsManager.deletePreset("Legacy Video");
+
+        // Then: The deleted preset is gone
+        assertTrue(settingsManager.getPresets().stream()
+                .filter(p -> !p.builtIn())
+                .noneMatch(p -> p.name().equals("Legacy Video")));
+
+        // And: Coexisting section presets must survive the delete
+        PresetsBySection after = settingsManager.loadPresetsBySection();
+        assertTrue(after.videoPresets().stream().anyMatch(p -> p.name().equals("Section Video")),
+                "deletePreset must not wipe coexisting section presets");
+    }
+
+    @Test
+    void addSectionPreset_OnFileWithLegacyPresets_PreservesLegacyPresets() throws IOException {
+        // Given: A legacy {"presets":[A]} presets file written by the old API
+        Path outputDir = tempDir.resolve("output");
+        Files.createDirectories(outputDir);
+
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        JsonUtils.writeJsonFile(
+                Map.of("presets", List.of(createLegacyPreset(outputDir))),
+                presetsPath.toFile());
+
+        // When: Add a section preset via the new API
+        VideoSettings videoSettings = VideoSettings.builder()
+                .outputFormat(FileFormat.MP4)
+                .build();
+        settingsManager.addSectionPreset(
+                SectionPreset.forVideo("New Section Video", null, videoSettings, false));
+
+        // Then: The new section preset is stored
+        PresetsBySection sections = settingsManager.loadPresetsBySection();
+        assertTrue(sections.videoPresets().stream()
+                .anyMatch(p -> p.name().equals("New Section Video")));
+
+        // And: The coexisting legacy preset survives the save - migration
+        // consumes the legacy "presets" key (so repeated loads cannot
+        // re-migrate it), but the preset itself is preserved as a section
+        // preset
+        assertTrue(sections.videoPresets().stream()
+                .anyMatch(p -> p.name().equals("Legacy Video")),
+                "the coexisting legacy preset must survive the save as a migrated section preset");
+    }
+
+    // ========== Mixed legacy/section presets regression tests ==========
+
+    @Test
+    void MixedFile_RepeatedLoads_DoNotAccumulateDuplicates() throws IOException {
+        // Given: A new-format file with a section preset
+        Path outputDir = tempDir.resolve("output");
+        Files.createDirectories(outputDir);
+
+        VideoSettings videoSettings = VideoSettings.builder()
+                .outputFormat(FileFormat.MP4)
+                .build();
+        settingsManager.addSectionPreset(
+                SectionPreset.forVideo("Section Video", null, videoSettings, false));
+
+        // And: The old API saves a legacy preset into the same file (mixed shape,
+        // the reviewer's repro for how mixed files arise in the wild)
+        settingsManager.savePreset(createLegacyPreset(outputDir));
+
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        String originalContent = Files.readString(presetsPath);
+
+        JsonNode mixedRoot = JsonUtils.getObjectMapper().readTree(presetsPath.toFile());
+        assertTrue(mixedRoot.has("presets"), "sanity: file must carry the legacy key");
+        assertTrue(mixedRoot.has("videoPresets"), "sanity: file must carry section keys");
+
+        // When: Load three times
+        PresetsBySection first = settingsManager.loadPresetsBySection();
+        PresetsBySection second = settingsManager.loadPresetsBySection();
+        PresetsBySection third = settingsManager.loadPresetsBySection();
+
+        // Then: Section preset count is stable - no duplicate legacy appends
+        assertEquals(2, first.videoPresets().size());
+        assertEquals(2, second.videoPresets().size(),
+                "second load must not re-migrate and append another copy");
+        assertEquals(2, third.videoPresets().size(),
+                "third load must not re-migrate and append another copy");
+        assertEquals(1, third.videoPresets().stream()
+                .filter(p -> p.name().equals("Legacy Video")).count());
+
+        // And: The file is no longer legacy-shaped - migration consumed the
+        // legacy "presets" key, so subsequent loads take the normal path
+        JsonNode afterRoot = JsonUtils.getObjectMapper().readTree(presetsPath.toFile());
+        assertFalse(afterRoot.has("presets"),
+                "migration save must consume the legacy 'presets' key");
+        assertTrue(afterRoot.has("videoPresets"));
+
+        // And: Exactly one timestamped backup exists, retaining the original
+        // mixed content (no per-load backup litter)
+        List<Path> backups;
+        try (var files = Files.list(configDir)) {
+            backups = files
+                    .filter(p -> p.getFileName().toString().startsWith("presets.json.old."))
+                    .filter(p -> p.getFileName().toString().endsWith(".bak"))
+                    .toList();
+        }
+        assertEquals(1, backups.size(), "only the first load may migrate");
+        assertEquals(originalContent, Files.readString(backups.get(0)));
+    }
+
+    @Test
+    void Migration_SkipsDuplicatesAlreadyInSection() throws IOException {
+        // Given: A mixed file whose legacy preset name already exists in the
+        // matching section (e.g. left behind by earlier duplicate appends)
+        Path outputDir = tempDir.resolve("output");
+        Files.createDirectories(outputDir);
+
+        VideoSettings videoSettings = VideoSettings.builder()
+                .outputFormat(FileFormat.MP4)
+                .build();
+        SectionPreset existing = SectionPreset.forVideo("Legacy Video", null, videoSettings, false);
+
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        JsonUtils.writeJsonFile(
+                Map.of(
+                        "presets", List.of(createLegacyPreset(outputDir)),
+                        "videoPresets", List.of(existing),
+                        "audioPresets", List.of(),
+                        "imagePresets", List.of(),
+                        "documentPresets", List.of()),
+                presetsPath.toFile());
+
+        // When: Load (triggers migration)
+        PresetsBySection loaded = settingsManager.loadPresetsBySection();
+
+        // Then: No duplicate appended - the section keeps exactly one preset
+        assertEquals(1, loaded.videoPresets().size(),
+                "migration must skip a legacy preset whose name already exists in the section");
+        assertEquals("Legacy Video", loaded.videoPresets().get(0).name());
+    }
+
+    @Test
+    void LegacyPresetsArray_NullElements_Ignored() throws IOException {
+        // Given: A legacy presets array containing a null entry
+        Path outputDir = tempDir.resolve("output");
+        Files.createDirectories(outputDir);
+
+        Path presetsPath = configurationManager.getPresetsFilePath();
+
+        // When/Then: loadPresetsBySection does not NPE; the valid preset migrates
+        JsonUtils.writeJsonFile(
+                Map.of("presets", Arrays.asList(null, createLegacyPreset(outputDir))),
+                presetsPath.toFile());
+        PresetsBySection loaded = assertDoesNotThrow(() -> settingsManager.loadPresetsBySection());
+        assertEquals(1, loaded.videoPresets().size(), "null entries must be ignored");
+        assertEquals("Legacy Video", loaded.videoPresets().get(0).name());
+
+        // And: deletePreset on a file with null entries does not NPE
+        JsonUtils.writeJsonFile(
+                Map.of("presets", Arrays.asList(null, createLegacyPreset(outputDir))),
+                presetsPath.toFile());
+        assertDoesNotThrow(() -> settingsManager.deletePreset("Legacy Video"));
+        assertTrue(settingsManager.getPresets().stream()
+                .filter(p -> !p.builtIn())
+                .noneMatch(p -> p.name().equals("Legacy Video")));
+
+        // And: savePreset on a file with null entries does not NPE
+        JsonUtils.writeJsonFile(
+                Map.of("presets", Arrays.asList(null, createLegacyPreset(outputDir))),
+                presetsPath.toFile());
+        assertDoesNotThrow(() -> settingsManager.savePreset(createLegacyPreset(outputDir)));
+    }
+
     private SettingsPreset createLegacyPreset(Path outputDir) {
         VideoSettings videoSettings = VideoSettings.builder()
                 .outputFormat(FileFormat.MP4)
@@ -1032,5 +1347,17 @@ class SettingsManagerTest {
                 .videoSettings(videoSettings)
                 .build();
         return SettingsPreset.createUserPreset("Legacy Video", "Old flat-format preset", settings);
+    }
+
+    private SettingsPreset createUserPresetNamed(String name, Path outputDir) {
+        VideoSettings videoSettings = VideoSettings.builder()
+                .outputFormat(FileFormat.MP4)
+                .codec("libx264")
+                .build();
+        ConversionSettings settings = ConversionSettings.builder()
+                .outputDirectory(outputDir)
+                .videoSettings(videoSettings)
+                .build();
+        return SettingsPreset.createUserPreset(name, "Concurrent delete test preset", settings);
     }
 }

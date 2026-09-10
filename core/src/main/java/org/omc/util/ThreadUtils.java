@@ -1,6 +1,7 @@
 package org.omc.util;
 
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Utility class for thread pool creation and management.
@@ -121,17 +122,23 @@ public final class ThreadUtils {
     /**
      * Creates a thread factory with custom naming and daemon settings.
      *
+     * <p>
+     * Names are unique even when threads are created concurrently: the
+     * counter is atomic, so a racy non-atomic increment cannot produce
+     * duplicate {@code prefix-N} names.
+     * </p>
+     *
      * @param threadNamePrefix The prefix for thread names
      * @return A thread factory
      */
     public static ThreadFactory createThreadFactory(String threadNamePrefix) {
         return new ThreadFactory() {
-            private int counter = 0;
+            private final AtomicInteger counter = new AtomicInteger();
 
             @Override
             public Thread newThread(Runnable r) {
                 Thread thread = new Thread(r);
-                thread.setName(threadNamePrefix + "-" + counter++);
+                thread.setName(threadNamePrefix + "-" + counter.getAndIncrement());
                 thread.setDaemon(true);
                 thread.setUncaughtExceptionHandler((t, e) -> {
                     System.err.println("Uncaught exception in thread " + t.getName() + ": " + e.getMessage());

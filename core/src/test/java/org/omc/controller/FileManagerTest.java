@@ -9,14 +9,19 @@ import org.omc.model.ConversionStatus;
 import org.omc.model.FileFormat;
 import org.omc.model.ValidationResult;
 import org.omc.service.FileHandler;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
@@ -35,6 +40,9 @@ class FileManagerTest {
     private ValidationEngine validationEngine;
 
     private FileManager fileManager;
+
+    @TempDir
+    Path tempDir;
 
     @BeforeEach
     void setUp() {
@@ -161,6 +169,58 @@ class FileManagerTest {
     @Test
     void addFilesFromFolder_ShouldThrowWhenFolderPathIsNull() throws FileOperationException {
         assertThrows(IllegalArgumentException.class, () -> fileManager.addFilesFromFolder(null, false));
+    }
+
+    // 3b. addFilesFromFolder() - per-entry tolerance for unreadable entries
+    @Test
+    void addFilesFromFolder_ShouldSkipUnreadableSubdirAndReturnReadableFiles() throws Exception {
+        Assumptions.assumeTrue(
+                FileSystems.getDefault().supportedFileAttributeViews().contains("posix"),
+                "POSIX file permissions required");
+
+        Path readableFile = Files.createFile(tempDir.resolve("video.mp4"));
+        Path lockedSubdir = Files.createDirectory(tempDir.resolve("locked"));
+        Files.createFile(lockedSubdir.resolve("nested.mp4"));
+        Files.setPosixFilePermissions(lockedSubdir, PosixFilePermissions.fromString("---------"));
+        Assumptions.assumeTrue(!Files.isReadable(lockedSubdir),
+                "effective user must not bypass permission checks (skipped for root)");
+
+        when(fileHandler.exists(tempDir)).thenReturn(true);
+        when(fileHandler.detectFormat(readableFile)).thenReturn(FileFormat.MP4);
+        when(validationEngine.validateFile(readableFile)).thenReturn(ValidationResult.success());
+        when(fileHandler.getFileSize(readableFile)).thenReturn(1000L);
+
+        try {
+            // Unreadable subdirectory must not abort the whole scan
+            List<ConversionFile> added = fileManager.addFilesFromFolder(tempDir, true);
+
+            assertEquals(1, added.size());
+            assertEquals(readableFile, added.get(0).path());
+        } finally {
+            // Restore permissions so @TempDir cleanup can delete the tree
+            Files.setPosixFilePermissions(lockedSubdir, PosixFilePermissions.fromString("rwx------"));
+        }
+    }
+
+    @Test
+    void addFilesFromFolder_ShouldFailFastWhenTopLevelFolderUnreadable() throws Exception {
+        Assumptions.assumeTrue(
+                FileSystems.getDefault().supportedFileAttributeViews().contains("posix"),
+                "POSIX file permissions required");
+
+        Path lockedFolder = Files.createDirectory(tempDir.resolve("lockedroot"));
+        Files.setPosixFilePermissions(lockedFolder, PosixFilePermissions.fromString("---------"));
+        Assumptions.assumeTrue(!Files.isReadable(lockedFolder),
+                "effective user must not bypass permission checks (skipped for root)");
+
+        when(fileHandler.exists(lockedFolder)).thenReturn(true);
+
+        try {
+            assertThrows(FileOperationException.class,
+                    () -> fileManager.addFilesFromFolder(lockedFolder, true));
+        } finally {
+            Files.setPosixFilePermissions(lockedFolder, PosixFilePermissions.fromString("rwx------"));
+        }
     }
 
     // 4. removeFiles() - remove single file, remove multiple files, remove

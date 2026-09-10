@@ -7,11 +7,14 @@ import java.util.Objects;
 import java.util.UUID;
 
 import org.omc.controller.ApplicationWorkflowController;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 
 /**
  * Represents a file in the conversion queue with optional per-file settings
@@ -86,11 +89,20 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public final class ConversionFile {
 
+    private static final Logger LOG = LoggerFactory.getLogger(ConversionFile.class);
+
     private final String id;
     private final Path path;
     private final FileFormat format;
     private final long size; // in bytes
-    private final Object metadata; // VideoMetadata, AudioMetadata, ImageMetadata, or DocumentMetadata
+    // Typed as MediaMetadata so the interface's @JsonTypeInfo/@JsonSubTypes
+    // engage: serialized JSON carries the "type" discriminator and
+    // deserialization restores the concrete subtype. Legacy session files
+    // (flat metadata without "type") degrade to null via the lenient
+    // deserializer instead of failing the whole ConversionFile.
+    // (field-level binding goes through the @JsonCreator parameter below,
+    // where the lenient deserializer is applied)
+    private final MediaMetadata metadata; // VideoMetadata, AudioMetadata, ImageMetadata, or DocumentMetadata
     private final FileSettingsOverride settingsOverride; // Requirement REQ-3.1: Per-file settings override
     private final Path outputPath; // Requirement REQ-FL-3.3: Output file path after successful conversion
 
@@ -108,7 +120,7 @@ public final class ConversionFile {
             @JsonProperty("path") Path path,
             @JsonProperty("format") FileFormat format,
             @JsonProperty("size") long size,
-            @JsonProperty("metadata") Object metadata,
+            @JsonProperty("metadata") @JsonDeserialize(using = MediaMetadataDeserializer.class) MediaMetadata metadata,
             @JsonProperty("settingsOverride") FileSettingsOverride settingsOverride,
             @JsonProperty("outputPath") Path outputPath,
             @JsonProperty("status") ConversionStatus status,
@@ -121,7 +133,9 @@ public final class ConversionFile {
         this.metadata = metadata;
         this.settingsOverride = settingsOverride;
         this.outputPath = outputPath;
-        this.status = status;
+        // Old session files may lack a status: default to PENDING so UI
+        // status switches never see null
+        this.status = status != null ? status : ConversionStatus.PENDING;
         this.progress = progress;
         this.errorMessage = errorMessage;
         this.progressInfo = null; // Not persisted, set at runtime
@@ -165,8 +179,23 @@ public final class ConversionFile {
         return size;
     }
 
+    /**
+     * Returns the extracted media metadata for this file.
+     *
+     * <p>
+     * The concrete type is one of {@link VideoMetadata}, {@link AudioMetadata},
+     * {@link ImageMetadata} or {@link DocumentMetadata}. The value may be
+     * {@code null} when no metadata was extracted, or when the file was
+     * restored from a legacy session whose metadata lacked the polymorphic
+     * {@code "type"} discriminator (the subtype cannot be inferred from flat
+     * fields, so the value degrades to {@code null} rather than failing the
+     * load).
+     * </p>
+     *
+     * @return typed media metadata, or null if none is available
+     */
     @JsonProperty("metadata")
-    public Object metadata() {
+    public MediaMetadata metadata() {
         return metadata;
     }
 
@@ -250,10 +279,25 @@ public final class ConversionFile {
 
     /**
      * Creates a copy with updated status.
+     *
+     * <p>
+     * Status transition finalization: transitioning to
+     * {@link ConversionStatus#COMPLETED} normalizes {@code progress} to 100 so
+     * a completed file never shows stale mid-conversion progress. No
+     * validation is performed on the transition itself - backward transitions
+     * are legitimate (session restore resets IN_PROGRESS to PENDING, UI retry
+     * resets FAILED to PENDING); a PENDING-after-terminal transition is only
+     * logged at debug level.
+     * </p>
      */
     public ConversionFile withStatus(ConversionStatus status) {
+        if (isTerminal() && status == ConversionStatus.PENDING) {
+            LOG.debug("Backward status transition {} -> PENDING for file {} (session restore / retry)",
+                    this.status, fileName());
+        }
+        int finalizedProgress = status == ConversionStatus.COMPLETED ? 100 : progress;
         ConversionFile copy = new ConversionFile(id, path, format, size, metadata, settingsOverride, outputPath, status,
-                progress, errorMessage);
+                finalizedProgress, errorMessage);
         copy.progressInfo = this.progressInfo; // Preserve progress info
         return copy;
     }
@@ -294,6 +338,14 @@ public final class ConversionFile {
 
     /**
      * Creates a copy with cancelled status.
+     *
+     * <p>
+     * Terminal progress semantics: unlike {@link #withStatus} with
+     * {@link ConversionStatus#COMPLETED} (which normalizes progress to 100),
+     * cancellation deliberately <b>preserves</b> the progress reached at
+     * cancellation time so the UI can show how far the conversion got before
+     * being cancelled. This is the defined terminal value for CANCELLED.
+     * </p>
      */
     public ConversionFile withCancelled() {
         ConversionFile copy = new ConversionFile(id, path, format, size, metadata, settingsOverride, outputPath,
@@ -304,8 +356,11 @@ public final class ConversionFile {
 
     /**
      * Creates a copy with updated metadata.
+     *
+     * @param metadata the typed media metadata (can be null to clear)
+     * @return a new ConversionFile instance with the metadata applied
      */
-    public ConversionFile withMetadata(Object metadata) {
+    public ConversionFile withMetadata(MediaMetadata metadata) {
         ConversionFile copy = new ConversionFile(id, path, format, size, metadata, settingsOverride, outputPath, status,
                 progress, errorMessage);
         copy.progressInfo = this.progressInfo; // Preserve progress info

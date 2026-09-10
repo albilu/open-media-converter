@@ -58,6 +58,13 @@ public class FFmpegService {
     private static final String TRUNCATION_MESSAGE = "\n[Output truncated - exceeded 1MB limit]\n";
 
     /**
+     * Maximum wall time for an ffprobe metadata query (duration/frame
+     * count) before forced termination. Package-visible and non-final so
+     * tests can scale it down; not part of the public API.
+     */
+    static long FFPROBE_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(30);
+
+    /**
      * Target video formats whose containers cannot reliably hold audio codecs
      * that are common in other containers (e.g. MP4(AAC)→WebM fails with
      * "Could not find tag for codec aac"). For these targets the audio stream
@@ -726,7 +733,14 @@ public class FFmpegService {
 
             String output = outputCapture.toString();
 
-            if (process.waitFor() != 0) {
+            if (!process.waitFor(FFPROBE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+                logger.warn("ffprobe timed out after {} ms while getting duration for {}",
+                        FFPROBE_TIMEOUT_MILLIS, inputPath);
+                process.destroyForcibly();
+                return null;
+            }
+
+            if (process.exitValue() != 0) {
                 logger.warn("ffprobe failed to get duration for {}", inputPath);
                 return null;
             }
@@ -739,7 +753,11 @@ public class FFmpegService {
                 return Duration.ofMillis((long) (durationSeconds * 1000));
             }
 
-        } catch (IOException | InterruptedException e) {
+        } catch (IOException e) {
+            logger.warn("Failed to get duration using ffprobe: {}", e.getMessage());
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             logger.warn("Failed to get duration using ffprobe: {}", e.getMessage());
             return null;
         }
@@ -800,7 +818,14 @@ public class FFmpegService {
 
             String output = outputCapture.toString();
 
-            if (process.waitFor() != 0) {
+            if (!process.waitFor(FFPROBE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+                logger.warn("ffprobe timed out after {} ms while getting frame count for {}",
+                        FFPROBE_TIMEOUT_MILLIS, inputPath);
+                process.destroyForcibly();
+                return -1;
+            }
+
+            if (process.exitValue() != 0) {
                 logger.warn("ffprobe failed to get frame count for {}", inputPath);
                 return -1;
             }
@@ -856,7 +881,10 @@ public class FFmpegService {
                 }
             }
 
-        } catch (IOException | InterruptedException | NumberFormatException e) {
+        } catch (IOException | NumberFormatException e) {
+            logger.warn("Failed to get frame count using ffprobe: {}", e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             logger.warn("Failed to get frame count using ffprobe: {}", e.getMessage());
         }
 

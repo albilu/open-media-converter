@@ -56,7 +56,7 @@ public final class ImageSettings {
     private ImageSettings(
             @JsonProperty("quality") int quality,
             @JsonProperty("resolution") Resolution resolution,
-            @JsonProperty("maintainAspectRatio") boolean maintainAspectRatio,
+            @JsonProperty("maintainAspectRatio") Boolean maintainAspectRatio,
             @JsonProperty("compressionLevel") int compressionLevel,
             @JsonProperty("resizeMode") ResizeMode resizeMode,
             @JsonProperty("rotation") ImageRotation rotation,
@@ -64,7 +64,9 @@ public final class ImageSettings {
             @JsonProperty("outputFormat") FileFormat outputFormat) {
         this.quality = quality;
         this.resolution = resolution;
-        this.maintainAspectRatio = maintainAspectRatio;
+        // Boxed Boolean: a missing/null key must fall back to the builder
+        // default (true), not to primitive false
+        this.maintainAspectRatio = maintainAspectRatio != null ? maintainAspectRatio : true;
         this.compressionLevel = compressionLevel;
         this.resizeMode = resizeMode == null ? (resolution == null ? ResizeMode.NONE : ResizeMode.FIT) : resizeMode;
         // Requirement REQ-IMG-1.1, REQ-IMG-2.1: Default to NONE for backward
@@ -149,12 +151,25 @@ public final class ImageSettings {
     /**
      * Returns the target output format.
      * Requirement REQ-2.4: Image output format selection.
-     * 
+     *
      * @return the output format (must be IMAGE category)
      */
     @JsonProperty("outputFormat")
     public FileFormat outputFormat() {
         return outputFormat;
+    }
+
+    /**
+     * Copies settings with a different output format, preserving all other
+     * image options (quality, resolution, maintainAspectRatio,
+     * compressionLevel, resize mode, rotation, flip).
+     *
+     * @param format the new output format
+     * @return settings retaining all image options with the new format
+     */
+    public ImageSettings withOutputFormat(FileFormat format) {
+        return new ImageSettings(quality, resolution, maintainAspectRatio, compressionLevel,
+                resizeMode, rotation, flip, format);
     }
 
     /**

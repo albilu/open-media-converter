@@ -34,9 +34,11 @@ public class ProgressEngine {
 
     /**
      * Minimum interval between progress notifications in milliseconds.
-     * Per NFR-FL-1: 100ms interval ensures smooth updates without flickering.
+     * Per NFR-FL-1 and AGENTS.md ("Throttle UI updates (max 2/sec)"):
+     * a 500ms interval caps updates at two per second, smooth enough
+     * for progress bars without flooding the UI thread.
      */
-    private static final long THROTTLE_INTERVAL_MS = 100;
+    private static final long THROTTLE_INTERVAL_MS = 500;
 
     // Thread-safe progress storage
     private final ConcurrentHashMap<String, ConversionProgress> progressMap;
@@ -201,7 +203,8 @@ public class ProgressEngine {
         ConversionProgress updatedProgress = currentProgress.updateWithPercentage(percentage);
         progressMap.put(fileId, updatedProgress);
 
-        logger.debug("Updated progress for file: {} - {:.2f}% (direct percentage update)", fileId, percentage);
+        logger.debug("Updated progress for file: {} - {}% (direct percentage update)",
+                fileId, String.format(java.util.Locale.US, "%.2f", percentage));
 
         // Notify listeners (throttled for intermediate updates)
         notifyProgressListeners(updatedProgress, false);
@@ -302,6 +305,7 @@ public class ProgressEngine {
         int completedFiles = 0;
         int failedFiles = 0;
         int inProgressFiles = 0;
+        int cancelledFiles = 0;
 
         for (ConversionStatus status : statusMap.values()) {
             switch (status) {
@@ -310,8 +314,7 @@ public class ProgressEngine {
                 case IN_PROGRESS -> inProgressFiles++;
                 case PENDING -> {
                 } // Pending files not counted as in progress
-                case CANCELLED -> {
-                } // Cancelled files counted as neither completed nor failed
+                case CANCELLED -> cancelledFiles++;
             }
         }
 
@@ -321,12 +324,13 @@ public class ProgressEngine {
             processedBytes += progress.processedBytes();
         }
 
-        // Build batch progress
+        // Build batch progress (cancelled files are terminal, not pending)
         return BatchProgress.update(
                 totalFiles,
                 completedFiles,
                 failedFiles,
                 inProgressFiles,
+                cancelledFiles,
                 totalBytes,
                 processedBytes,
                 batchStartTime);

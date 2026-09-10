@@ -152,6 +152,31 @@ class BatchProgressTest {
     }
 
     @Test
+    void update_WithCancelledFiles_ExcludesCancelledFromPending() {
+        Instant start = Instant.now().minusSeconds(10);
+
+        BatchProgress progress = BatchProgress.update(
+                10, 5, 0, 1, 2,
+                1000000, 500000,
+                start);
+
+        assertEquals(2, progress.pendingFiles()); // 10 - 5 - 0 - 1 - 2 = 2
+    }
+
+    @Test
+    void update_WithAllTerminalIncludingCancelled_IsComplete() {
+        Instant start = Instant.now().minusSeconds(5);
+
+        BatchProgress progress = BatchProgress.update(
+                2, 1, 0, 0, 1,
+                1000000, 500000,
+                start);
+
+        assertEquals(0, progress.pendingFiles()); // 2 - 1 - 0 - 0 - 1 = 0
+        assertTrue(progress.isComplete());
+    }
+
+    @Test
     void update_WithZeroElapsedTime_HandlesGracefully() {
         Instant start = Instant.now();
 
@@ -257,6 +282,29 @@ class BatchProgressTest {
                 Instant.now());
 
         assertFalse(progress.isComplete());
+    }
+
+    @Test
+    void isComplete_WithCompletedAndCancelledFiles_ReturnsTrue() {
+        // 1 completed + 1 cancelled: nothing pending or in progress
+        BatchProgress progress = new BatchProgress(
+                2, 1, 0, 0, 0,
+                1000000, 500000, 50,
+                Instant.now(), Duration.ofMinutes(1),
+                Duration.ofMinutes(1), 1000.0);
+
+        assertTrue(progress.isComplete());
+    }
+
+    @Test
+    void isComplete_WithOnlyCancelledFiles_ReturnsTrue() {
+        BatchProgress progress = new BatchProgress(
+                2, 0, 0, 0, 0,
+                1000000, 0, 0,
+                Instant.now(), Duration.ofMinutes(1),
+                Duration.ofMinutes(1), 0.0);
+
+        assertTrue(progress.isComplete());
     }
 
     // ===== formatSpeed() Tests =====

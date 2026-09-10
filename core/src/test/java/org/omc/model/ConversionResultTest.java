@@ -58,7 +58,8 @@ class ConversionResultTest {
                     TEST_DURATION,
                     TEST_INPUT_SIZE,
                     TEST_OUTPUT_SIZE,
-                    TEST_TOOL);
+                    TEST_TOOL,
+                    false);
 
             assertNotNull(result);
             assertEquals(TEST_FILE_ID, result.fileId());
@@ -84,7 +85,8 @@ class ConversionResultTest {
                     TEST_DURATION,
                     TEST_INPUT_SIZE,
                     0L,
-                    TEST_TOOL);
+                    TEST_TOOL,
+                    false);
 
             assertNotNull(result);
             assertFalse(result.success());
@@ -105,7 +107,8 @@ class ConversionResultTest {
                     TEST_DURATION,
                     0L,
                     0L,
-                    TEST_TOOL);
+                    TEST_TOOL,
+                    false);
 
             assertNotNull(result);
             assertEquals(0L, result.inputSize());
@@ -124,7 +127,8 @@ class ConversionResultTest {
                     Duration.ZERO,
                     TEST_INPUT_SIZE,
                     TEST_OUTPUT_SIZE,
-                    TEST_TOOL);
+                    TEST_TOOL,
+                    false);
 
             assertNotNull(result);
             assertEquals(Duration.ZERO, result.conversionTime());
@@ -317,8 +321,48 @@ class ConversionResultTest {
         }
 
         @Test
-        @DisplayName("isCancelled detects 'cancelled' in error message")
-        void isCancelled_WithCancelledInMessage_ReturnsTrue() {
+        @DisplayName("isCancelled returns false for failure message that merely contains 'cancelled' (e.g. filename)")
+        void isCancelled_WithCancelledInFailureMessage_ReturnsFalse() {
+            ConversionResult result = ConversionResult.failure(
+                    TEST_FILE_ID,
+                    "Input file not found: /videos/cancelled_video.mp4",
+                    null,
+                    TEST_DURATION,
+                    TEST_INPUT_SIZE,
+                    TEST_TOOL);
+
+            assertFalse(result.isCancelled());
+        }
+
+        @Test
+        @DisplayName("isCancelled defaults to false when JSON lacks the cancelled field (backward compat)")
+        void isCancelled_OldJsonWithoutCancelledField_DefaultsToFalse() throws Exception {
+            ObjectMapper mapper = new ObjectMapper();
+            mapper.registerModule(new JavaTimeModule());
+
+            String oldJson = """
+                    {
+                        "fileId": "file-123",
+                        "success": false,
+                        "errorMessage": "Conversion cancelled by user",
+                        "conversionTime": 120.0,
+                        "inputSize": 10000000,
+                        "outputSize": 0,
+                        "toolUsed": "FFMPEG"
+                    }
+                    """;
+
+            ConversionResult result = mapper.readValue(oldJson, ConversionResult.class);
+
+            assertFalse(result.isCancelled());
+        }
+
+        @Test
+        @DisplayName("isCancelled is flag-based: a 'cancelled' message without the flag returns false")
+        void isCancelled_WithCancelledInMessageButNoFlag_ReturnsFalse() {
+            // A message mentioning "cancelled" alone must NOT classify the
+            // result as cancelled - only the explicit flag (set by the
+            // cancelled factory) does
             ConversionResult result = new ConversionResult(
                     TEST_FILE_ID,
                     false,
@@ -328,7 +372,26 @@ class ConversionResultTest {
                     TEST_DURATION,
                     TEST_INPUT_SIZE,
                     0L,
-                    TEST_TOOL);
+                    TEST_TOOL,
+                    false);
+
+            assertFalse(result.isCancelled());
+        }
+
+        @Test
+        @DisplayName("isCancelled returns true when the explicit flag is set even with a custom message")
+        void isCancelled_WithExplicitFlagSet_ReturnsTrue() {
+            ConversionResult result = new ConversionResult(
+                    TEST_FILE_ID,
+                    false,
+                    null,
+                    "Operation was cancelled due to timeout",
+                    null,
+                    TEST_DURATION,
+                    TEST_INPUT_SIZE,
+                    0L,
+                    TEST_TOOL,
+                    true);
 
             assertTrue(result.isCancelled());
         }
@@ -345,7 +408,8 @@ class ConversionResultTest {
                     TEST_DURATION,
                     TEST_INPUT_SIZE,
                     0L,
-                    TEST_TOOL);
+                    TEST_TOOL,
+                    false);
 
             assertFalse(result.isCancelled());
         }
@@ -1164,5 +1228,25 @@ class ConversionResultTest {
             assertEquals(Optional.of(largeOutputString), result.toolOutput());
             assertTrue(result.toolOutput().get().length() > 50_000); // Should be preserved
         }
+    }
+
+    @Test
+    @DisplayName("formatConversionTime with null conversionTime returns 'unknown'")
+    void formatConversionTime_WithNullConversionTime_ReturnsUnknown() {
+        ConversionResult result = ConversionResult.failure(
+                TEST_FILE_ID, "boom", null, null, TEST_INPUT_SIZE, TEST_TOOL);
+
+        assertEquals("unknown", result.formatConversionTime());
+    }
+
+    @Test
+    @DisplayName("toString with null conversionTime does not throw")
+    void toString_WithNullConversionTime_DoesNotThrow() {
+        ConversionResult result = ConversionResult.failure(
+                TEST_FILE_ID, "boom", null, null, TEST_INPUT_SIZE, TEST_TOOL);
+
+        // toString() calls formatConversionTime(): must stay null-safe
+        assertNotNull(result.toString());
+        assertTrue(result.toString().contains("unknown"));
     }
 }

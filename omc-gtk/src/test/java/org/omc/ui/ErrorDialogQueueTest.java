@@ -101,4 +101,37 @@ class ErrorDialogQueueTest {
         assertThrows(IllegalArgumentException.class, () -> new ErrorDialogQueue(0));
         assertThrows(IllegalArgumentException.class, () -> new ErrorDialogQueue(-1));
     }
+
+    @Test
+    void throwingShowRunnableReleasesSlot() {
+        ErrorDialogQueue queue = new ErrorDialogQueue(1);
+
+        assertThrows(IllegalStateException.class, () -> queue.offer(() -> {
+            throw new IllegalStateException("dialog construction failed");
+        }));
+
+        // The failed show must not leak its slot: the next dialog shows
+        // immediately instead of queueing forever behind the failure.
+        queue.offer(shower("next"));
+        assertEquals(List.of("next"), shown);
+        assertEquals(0, queue.queuedCount());
+    }
+
+    @Test
+    void throwingQueuedRunnableReleasesSlotWhenShown() {
+        ErrorDialogQueue queue = new ErrorDialogQueue(1);
+        queue.offer(shower("e1"));
+        queue.offer(() -> {
+            throw new IllegalStateException("dialog construction failed");
+        });
+        assertEquals(1, queue.queuedCount());
+
+        // Closing e1 transfers the slot to the queued runnable, which throws:
+        // the transferred slot must be released, not leaked.
+        assertThrows(IllegalStateException.class, queue::onDialogClosed);
+
+        queue.offer(shower("after"));
+        assertEquals(List.of("e1", "after"), shown);
+        assertEquals(0, queue.queuedCount());
+    }
 }

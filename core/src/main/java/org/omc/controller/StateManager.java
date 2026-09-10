@@ -190,8 +190,48 @@ public class StateManager {
     }
 
     /**
+     * Atomically updates the current application state.
+     *
+     * <p>
+     * Applies {@code update} to the current state and persists the result,
+     * both under the same monitor as {@link #saveState(ApplicationState)}, so
+     * that concurrent read-modify-write cycles can never overwrite each
+     * other's changes (no lost updates). Validation, version re-stamping,
+     * atomic file writes and error handling are identical to
+     * {@code saveState} because the persistence step delegates to it.
+     * </p>
+     *
+     * <p>
+     * The operator runs while the manager monitor is held: it must be
+     * side-effect free, must not call back into this manager, and must not
+     * return null. If the operator throws, no save happens and the current
+     * state is left untouched.
+     * </p>
+     *
+     * @param update transform applied to the current state
+     * @return the persisted state (with the version re-stamped), also
+     *         visible via {@link #getCurrentState()}
+     * @throws IOException     if the save operation fails
+     * @throws NullPointerException if {@code update} is null or returns null
+     */
+    public synchronized ApplicationState updateState(UnaryOperator<ApplicationState> update)
+            throws IOException {
+        Objects.requireNonNull(update, "update cannot be null");
+
+        ApplicationState current = currentState.get();
+        ApplicationState updated = update.apply(current);
+
+        // Reuses saveState under this (already held, re-entrant) monitor so
+        // null-check, version re-stamping, atomic write and IOException
+        // behavior stay identical to a direct save.
+        saveState(updated);
+
+        return currentState.get();
+    }
+
+    /**
      * Loads window state from current application state.
-     * 
+     *
      * Requirement REQ-005.1: Window state restoration
      *
      * @return Current window state
@@ -232,9 +272,9 @@ public class StateManager {
             throw new IllegalArgumentException("Invalid window state");
         }
 
-        ApplicationState state = currentState.get();
-        ApplicationState updatedState = state.withWindowState(windowState);
-        saveState(updatedState);
+        // Read-modify-write must be atomic so concurrent state updates
+        // (session, sort state) are not overwritten by this save
+        updateState(state -> state.withWindowState(windowState));
 
         logger.info("Window state saved successfully");
     }
@@ -272,9 +312,9 @@ public class StateManager {
         Objects.requireNonNull(sessionState, "sessionState cannot be null");
         logger.debug("Saving session state");
 
-        ApplicationState state = currentState.get();
-        ApplicationState updatedState = state.withSessionState(sessionState);
-        saveState(updatedState);
+        // Read-modify-write must be atomic so concurrent state updates
+        // (window, sort state) are not overwritten by this save
+        updateState(state -> state.withSessionState(sessionState));
 
         logger.info("Session state saved successfully");
     }

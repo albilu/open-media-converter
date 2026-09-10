@@ -590,10 +590,10 @@ public class ValidationEngine {
             return true;
         }
 
-        // Video can generate thumbnail images
-        if (inputCategory == FormatCategory.VIDEO && outputCategory == FormatCategory.IMAGE) {
-            return true;
-        }
+        // Note: VIDEO -> IMAGE is intentionally NOT supported: no tool adapter
+        // can produce an image from a video (FFmpeg only handles video/audio
+        // output), so validation rejects it up front with a clear error
+        // instead of letting it fail later in ToolManager.
 
         // Documents can convert between each other to some extent
         if (inputCategory == FormatCategory.DOCUMENT && outputCategory == FormatCategory.DOCUMENT) {
@@ -858,12 +858,12 @@ public class ValidationEngine {
 
         // Get output format for validation - use default if category settings are not
         // configured
-        // This mirrors ConversionEngine's fallback behavior
+        // Delegates to ConversionEngine's category default so validation always
+        // resolves the same default format the conversion itself will use
         FormatCategory category = file.format().getCategory();
         FileFormat outputFormat = settings.outputFormat(category);
         if (outputFormat == null) {
-            // Use default format for category (same defaults as ConversionEngine)
-            outputFormat = getDefaultFormatForCategory(category);
+            outputFormat = ConversionEngine.defaultFormatForCategory(category);
             logger.debug("No output format configured for category {}, using default: {}",
                     category, outputFormat);
         }
@@ -896,28 +896,5 @@ public class ValidationEngine {
         }
 
         return combinedResult;
-    }
-
-    /**
-     * Returns the default output format for a given category. This should match
-     * ConversionEngine's default format logic.
-     *
-     * @param category the format category
-     * @return default format (MP4 for video, MP3 for audio, PNG for image, PDF
-     *         for document)
-     */
-    private FileFormat getDefaultFormatForCategory(FormatCategory category) {
-        return switch (category) {
-            case VIDEO ->
-                FileFormat.MP4;
-            case AUDIO ->
-                FileFormat.MP3;
-            case IMAGE ->
-                FileFormat.PNG;
-            case DOCUMENT ->
-                FileFormat.PDF;
-            case UNKNOWN ->
-                null;
-        };
     }
 }

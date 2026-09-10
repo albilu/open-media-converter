@@ -45,6 +45,10 @@ public class FileOperationException extends MediaConverterException {
 
     @Override
     public String getDetailedMessage() {
+        // The error code is optional (see base class): stay null-safe
+        if (getErrorCode() == null) {
+            return getMessage() + ": " + filePath;
+        }
         return String.format("[%s] %s: %s", getErrorCode().getCode(), getMessage(), filePath);
     }
 }

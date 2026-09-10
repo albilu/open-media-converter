@@ -105,16 +105,11 @@ public class MainWindowJavaGi extends ApplicationWindow {
 
     // Batch completion tracking
     // Requirement REQ-004.2: Track overall batch progress
-    private int totalFilesInBatch = 0;
-    private int completedFilesInBatch = 0;
-    private int successfulFilesInBatch = 0;
-    private int failedFilesInBatch = 0;
-    private int cancelledFilesInBatch = 0;
-    private boolean batchCompleted = false;
-    // Snapshot of the file IDs that make up the running batch. The final
-    // completion notification derives its counts from the engine's per-file
-    // results instead of the independently incremented counters above.
-    private List<String> batchFileIds = List.of();
+    // Counters, the completion latch and the UI-side "conversion in progress"
+    // flag live in the pure BatchUiState seam (see bottom of this class) so
+    // the semantics are unit-testable headless and a rejected or double
+    // start can never corrupt a running batch.
+    private final BatchUiState batchState = new BatchUiState();
 
     // Coalescer for engine -> UI updates: keeps only the latest progress
     // runnable per file (and per "batch") and flushes them in one GLib idle
@@ -130,6 +125,10 @@ public class MainWindowJavaGi extends ApplicationWindow {
     // Preset action names registered for the current menu; stale entries
     // (deleted/renamed presets) are removed before each popup.
     private final java.util.Set<String> registeredPresetActionNames = new java.util.HashSet<>();
+    // Single reused context menu popover, parented to the file list once.
+    // Creating a new PopoverMenu per right-click leaked a parented widget
+    // each time; only the menu model is rebuilt per invocation.
+    private PopoverMenu contextMenuPopover;
 
     // Shutdown tracking
     // Prevents multiple confirmation dialogs during shutdown
@@ -492,17 +491,22 @@ public class MainWindowJavaGi extends ApplicationWindow {
         // Note: GTK automatically adds visual spacing between different action groups
         buildOpenFileLocationMenuItem(menu, selectedIds);
 
-        // Create PopoverMenu and attach to file list
-        PopoverMenu popoverMenu = PopoverMenu.fromModel(menu);
-        popoverMenu.setParent(fileListColumnView);
+        // Reuse a single popover parented to the file list; swap in the
+        // freshly built menu model for this invocation.
+        if (contextMenuPopover == null) {
+            contextMenuPopover = PopoverMenu.fromModel(menu);
+            contextMenuPopover.setParent(fileListColumnView);
+        } else {
+            contextMenuPopover.setMenuModel(menu);
+        }
 
         // Set the popover position to the click coordinates
         // Create a rectangle at the click position (1x1 pixel area)
         org.gnome.gdk.Rectangle rect = new org.gnome.gdk.Rectangle((int) x, (int) y, 1, 1);
-        popoverMenu.setPointingTo(rect);
+        contextMenuPopover.setPointingTo(rect);
 
         // Show the popover
-        popoverMenu.popup();
+        contextMenuPopover.popup();
 
         logger.debug("Context menu displayed at position ({}, {})", x, y);
     }
@@ -754,23 +758,50 @@ public class MainWindowJavaGi extends ApplicationWindow {
         if (shutdownInProgress) return;
         showStatus("Reading files…");
         fileAdmission.submit(() -> {
+            int added = 0;
+            boolean success = false;
+            String failureMessage = null;
             try {
-                int count = admission.run();
-                GLib.idleAdd(0, () -> {
-                    if (!shutdownInProgress) {
-                        updateFileList();
-                        showStatus(count + " file(s) added");
-                    }
-                    return false;
-                });
+                added = admission.run();
+                success = true;
             } catch (FileOperationException | IllegalArgumentException e) {
                 logger.error("Failed to add files", e);
+                failureMessage = e.getMessage();
+            } catch (RuntimeException e) {
+                logger.error("Unexpected failure adding files", e);
+                failureMessage = "An unexpected error occurred while reading files: " + e.getMessage();
+            }
+            final int addedCount = added;
+            final boolean succeeded = success;
+            final String errorMessage = failureMessage;
+            if (errorMessage != null) {
                 GLib.idleAdd(0, () -> {
-                    if (!shutdownInProgress) showErrorDialog("Add Files", e.getMessage());
+                    if (!shutdownInProgress) showErrorDialog("Add Files", errorMessage);
                     return false;
                 });
             }
+            // Mirror the success path's cleanup for every outcome so the
+            // status bar never stays stuck on "Reading files…".
+            GLib.idleAdd(0, () -> {
+                if (!shutdownInProgress) {
+                    updateFileList();
+                    showStatus(admissionStatusMessage(addedCount, succeeded));
+                }
+                return false;
+            });
         });
+    }
+
+    /**
+     * Terminal status bar message for a background file admission run.
+     * Pure static so it is unit-testable without GTK.
+     *
+     * @param addedCount the number of files the admission added
+     * @param success    whether the admission completed without throwing
+     * @return the status message replacing the transient "Reading files…"
+     */
+    static String admissionStatusMessage(int addedCount, boolean success) {
+        return success ? addedCount + " file(s) added" : "Failed to add files";
     }
 
     /**
@@ -889,18 +920,19 @@ public class MainWindowJavaGi extends ApplicationWindow {
     private void handleConvert() {
         logger.debug("Convert button clicked");
 
-        // Initialize batch tracking counters
-        // Requirement REQ-004.2: Track overall batch progress
-        List<ConversionFile> batchFiles = controller.getFileList();
-        totalFilesInBatch = batchFiles.size();
-        batchFileIds = batchFiles.stream().map(ConversionFile::id).toList();
-        completedFilesInBatch = 0;
-        successfulFilesInBatch = 0;
-        failedFilesInBatch = 0;
-        cancelledFilesInBatch = 0;
-        batchCompleted = false;
+        // Re-entrancy guard (GTK thread only): a second start while a batch
+        // is running must never reset the running batch's counters or UI
+        // state. The controller's CAS rejects the engine side with
+        // IllegalStateException; this keeps the UI side consistent.
+        // This also covers the Ctrl+Return app.convert action, which routes
+        // through triggerConvert() -> handleConvert().
+        if (batchState.isRunning()) {
+            logger.warn("Ignoring convert request: conversion already in progress");
+            return;
+        }
 
-        logger.info("Starting conversion batch with {} files", totalFilesInBatch);
+        List<ConversionFile> batchFiles = controller.getFileList();
+        List<String> fileIds = batchFiles.stream().map(ConversionFile::id).toList();
 
         // Show progress view and disable convert button
         showProgressView();
@@ -908,7 +940,27 @@ public class MainWindowJavaGi extends ApplicationWindow {
         // Can Pause
         showPauseButton();
 
-        controller.handleStartConversion();
+        try {
+            controller.handleStartConversion();
+        } catch (RuntimeException e) {
+            // Start rejected (validation failure or already in progress via
+            // IllegalStateException) or failed (the controller wraps
+            // convertBatch errors such as RejectedExecutionException in a
+            // plain RuntimeException): roll back the pre-start UI changes so
+            // the window stays usable instead of locking the UI.
+            logger.error("Conversion start rejected: {}", e.getMessage());
+            hideProgressView();
+            updateFileList();
+            showErrorDialog("Conversion Error", e.getMessage());
+            showStatus("Conversion not started: " + e.getMessage());
+            return;
+        }
+
+        // Batch counters are initialized only after a successful start, so a
+        // rejected start cannot disturb any (running or previous) batch state.
+        batchState.beginBatch(fileIds);
+        batchState.markStarted();
+        logger.info("Starting conversion batch with {} files", batchState.totalFiles());
         showStatus("Conversion Started");
     }
 
@@ -972,6 +1024,9 @@ public class MainWindowJavaGi extends ApplicationWindow {
         if (shutdownInProgress) return;
         controller.updateWindowState(saveState());
         shutdownInProgress = true;
+        // No further batch lifecycle events will be handled; clear the UI-side
+        // running flag along with the counters.
+        batchState.endBatch();
         // Drop pending coalesced UI updates; the window is going away.
         uiUpdateCoalescer.clear();
         fileAdmission.shutdownNow();
@@ -1048,10 +1103,15 @@ public class MainWindowJavaGi extends ApplicationWindow {
             fileCountLabel.setLabel(files.size() + " files selected");
             totalSizeLabel.setLabel(formatBytes(totalSize));
 
-            // Enable/disable Convert and Clear All buttons based on file list
+            // Enable/disable Convert and Clear All buttons based on file list,
+            // but never while a conversion is running: they are intentionally
+            // disabled for the batch and re-enabled on batch completion
+            // (onBatchComplete -> hideProgressView).
             boolean hasFiles = !files.isEmpty();
-            convertButton.setSensitive(hasFiles);
-            clearAllButton.setSensitive(hasFiles);
+            if (batchState.shouldRefreshListButtonSensitivity()) {
+                convertButton.setSensitive(hasFiles);
+                clearAllButton.setSensitive(hasFiles);
+            }
 
             return false; // Don't repeat
         });
@@ -1116,7 +1176,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
      */
     public void hideProgressView() {
         GLib.idleAdd(0, () -> {
-            // progressView.hide();
+            progressView.hide();
 
             // Re-enable file management buttons
             addFilesButton.setSensitive(true);
@@ -1212,36 +1272,40 @@ public class MainWindowJavaGi extends ApplicationWindow {
                 fileListView.updateFile(fileId, file);
 
                 // Track completion for batch progress
-                completedFilesInBatch++;
                 if (result.success()) {
-                    successfulFilesInBatch++;
+                    batchState.recordSuccess();
                     logger.info("Conversion completed successfully: {} ({}/{} files)",
-                            fileId, completedFilesInBatch, totalFilesInBatch);
+                            fileId, batchState.completedFiles(), batchState.totalFiles());
                     showStatus("Conversion completed: " + result.outputPath().map(Path::toString).orElse(""));
                 } else if (result.isCancelled()) {
-                    cancelledFilesInBatch++;
+                    batchState.recordCancelled();
                     logger.info("Conversion cancelled: {} ({}/{} files)",
-                            fileId, completedFilesInBatch, totalFilesInBatch);
+                            fileId, batchState.completedFiles(), batchState.totalFiles());
                     showStatus("Conversion cancelled: " + fileId);
                 } else {
-                    failedFilesInBatch++;
+                    batchState.recordFailure();
                     logger.error("Conversion failed: {} - {} ({}/{} files)",
                             fileId, result.errorMessage().orElse("Unknown error"),
-                            completedFilesInBatch, totalFilesInBatch);
+                            batchState.completedFiles(), batchState.totalFiles());
                     showStatus("Conversion failed: " + result.errorMessage().orElse("Unknown error"));
                 }
 
                 // Note: Overall progress bar, speed, and time remaining are now updated
                 // automatically via the batch progress listener (see updateBatchProgress
                 // method)
-
-                // Check if batch is complete
-                if (!batchCompleted && completedFilesInBatch >= totalFilesInBatch && totalFilesInBatch > 0) {
-                    batchCompleted = true;
-                    onBatchComplete();
-                }
             } else {
-                logger.warn("File not found for result update: {}", fileId);
+                // Result for a file that was removed from the list mid-batch
+                // (e.g. Delete during conversion): count it as completed but
+                // unclassified (neither success nor failure) so the batch can
+                // still reach completion instead of stalling forever.
+                logger.warn("File not found for result update: {} (counted as completed)", fileId);
+                batchState.recordRemovedFileResult();
+            }
+
+            // Check if batch is complete (runs for present and removed files)
+            if (batchState.isBatchComplete()) {
+                batchState.markBatchCompleted();
+                onBatchComplete();
             }
         });
     }
@@ -1277,11 +1341,13 @@ public class MainWindowJavaGi extends ApplicationWindow {
      */
     private void onBatchComplete() {
         logger.info("Batch conversion complete: {} successful, {} failed, {} cancelled out of {} total files",
-                successfulFilesInBatch, failedFilesInBatch, cancelledFilesInBatch, totalFilesInBatch);
+                batchState.successfulFiles(), batchState.failedFiles(),
+                batchState.cancelledFiles(), batchState.totalFiles());
 
         // Show completion notification, preferring engine-derived counts
         String message = composeBatchCompletionMessage(
-                totalFilesInBatch, successfulFilesInBatch, failedFilesInBatch, cancelledFilesInBatch);
+                batchState.totalFiles(), batchState.successfulFiles(),
+                batchState.failedFiles(), batchState.cancelledFiles());
         int[] engineCounts = deriveBatchCountsFromEngineResults();
         if (engineCounts != null) {
             message = composeBatchCompletionMessage(engineCounts[0], engineCounts[1], engineCounts[2],
@@ -1294,17 +1360,17 @@ public class MainWindowJavaGi extends ApplicationWindow {
         // Requirement REQ-004.2: Show notification on batch completion
         showCompletionNotification(message);
 
-        // Reset batch tracking counters
-        totalFilesInBatch = 0;
-        completedFilesInBatch = 0;
-        successfulFilesInBatch = 0;
-        failedFilesInBatch = 0;
-        cancelledFilesInBatch = 0;
-        batchFileIds = List.of();
+        // Reset batch tracking counters and clear the UI-side running flag
+        // (re-allows Convert and list button sensitivity refreshes)
+        batchState.endBatch();
 
         // Update UI state - hide progress, enable convert button
         hideProgressView();
         convertButton.setSensitive(true);
+
+        // Drop per-file progress tracking for the finished batch so the map
+        // does not grow unboundedly across batches (ids are unique per batch).
+        progressView.clearFileProgress();
 
         // Let controller know conversion is complete (it will save session state)
         // The controller already handles this via its completion listener
@@ -1312,8 +1378,176 @@ public class MainWindowJavaGi extends ApplicationWindow {
     }
 
     /**
+     * Pure batch tracking state for the conversion lifecycle.
+     *
+     * <p>
+     * Holds the per-batch counters, the one-shot completion latch, the batch
+     * file-id snapshot and the UI-side "conversion in progress" flag. Extracted
+     * from the window's fields so the semantics below are unit-testable
+     * headless (GTK widgets cannot be realized without a display; the pure
+     * static batch message helper follows the same pattern):
+     * </p>
+     * <ul>
+     * <li>{@link #beginBatch} refuses to run while a batch is in progress, so
+     * a double start can never corrupt the running batch's counters.</li>
+     * <li>{@link #recordRemovedFileResult} counts a result for a file removed
+     * mid-batch as completed but unclassified, so the batch can still reach
+     * completion instead of stalling.</li>
+     * <li>{@link #shouldRefreshListButtonSensitivity} blocks list-driven
+     * Convert/Clear All sensitivity refreshes while a batch runs.</li>
+     * </ul>
+     *
+     * <p>
+     * All access is confined to the GTK main thread (like the fields it
+     * replaces).
+     * </p>
+     */
+    static final class BatchUiState {
+        private int totalFiles;
+        private int completedFiles;
+        private int successfulFiles;
+        private int failedFiles;
+        private int cancelledFiles;
+        private boolean batchCompleted;
+        private boolean conversionInProgress;
+        private List<String> batchFileIds = List.of();
+
+        static BatchUiState idle() {
+            return new BatchUiState();
+        }
+
+        /** Returns whether a batch started by this window is currently running. */
+        boolean isRunning() {
+            return conversionInProgress;
+        }
+
+        /**
+         * Marks the batch as running. Only called after a successful
+         * {@code controller.handleStartConversion()}.
+         */
+        void markStarted() {
+            conversionInProgress = true;
+        }
+
+        /**
+         * Initializes counters for a new batch. Refuses (without mutation)
+         * while a batch is running so a second start cannot corrupt it.
+         *
+         * @param fileIds the file IDs making up the batch
+         * @return {@code true} if the batch was initialized
+         */
+        boolean beginBatch(List<String> fileIds) {
+            if (conversionInProgress) {
+                return false;
+            }
+            batchFileIds = List.copyOf(fileIds);
+            totalFiles = fileIds.size();
+            completedFiles = 0;
+            successfulFiles = 0;
+            failedFiles = 0;
+            cancelledFiles = 0;
+            batchCompleted = false;
+            return true;
+        }
+
+        /** Resets all counters, the completion latch, the id snapshot and the running flag. */
+        void endBatch() {
+            totalFiles = 0;
+            completedFiles = 0;
+            successfulFiles = 0;
+            failedFiles = 0;
+            cancelledFiles = 0;
+            batchCompleted = false;
+            conversionInProgress = false;
+            batchFileIds = List.of();
+        }
+
+        void recordSuccess() {
+            completedFiles++;
+            successfulFiles++;
+        }
+
+        void recordFailure() {
+            completedFiles++;
+            failedFiles++;
+        }
+
+        void recordCancelled() {
+            completedFiles++;
+            cancelledFiles++;
+        }
+
+        /**
+         * Records a terminal result for a file that was removed from the list
+         * mid-batch: completed, but neither success nor failure.
+         */
+        void recordRemovedFileResult() {
+            completedFiles++;
+        }
+
+        /**
+         * Returns whether all files of the current batch are accounted for.
+         * One-shot: latched off by {@link #markBatchCompleted()} until the
+         * next {@link #beginBatch} or {@link #endBatch}.
+         */
+        boolean isBatchComplete() {
+            return !batchCompleted && totalFiles > 0 && completedFiles >= totalFiles;
+        }
+
+        /** Latches completion so batch completion handling fires exactly once per batch. */
+        void markBatchCompleted() {
+            batchCompleted = true;
+        }
+
+        /**
+         * Whether list updates may refresh Convert/Clear All sensitivity.
+         * Blocked while a conversion runs (the buttons belong to the batch
+         * lifecycle and are restored on completion).
+         */
+        boolean shouldRefreshListButtonSensitivity() {
+            return !conversionInProgress;
+        }
+
+        int totalFiles() {
+            return totalFiles;
+        }
+
+        int completedFiles() {
+            return completedFiles;
+        }
+
+        int successfulFiles() {
+            return successfulFiles;
+        }
+
+        int failedFiles() {
+            return failedFiles;
+        }
+
+        int cancelledFiles() {
+            return cancelledFiles;
+        }
+
+        boolean batchCompleted() {
+            return batchCompleted;
+        }
+
+        List<String> batchFileIds() {
+            return batchFileIds;
+        }
+    }
+
+    /**
      * Composes the user-facing batch completion message from result counts.
      * Pure static method so the wording is unit-testable without GTK.
+     *
+     * <p>
+     * Files removed mid-conversion complete the batch but are unclassified:
+     * they count as neither successful, failed nor cancelled. Their count is
+     * derived as {@code totalFiles - successful - failed - cancelled} so the
+     * message accounts for them instead of claiming successes that never
+     * happened (e.g. 1 success + 1 removed is not "all successful").
+     * </p>
      *
      * @param totalFiles total files in the batch
      * @param successful successfully converted files
@@ -1325,7 +1559,22 @@ public class MainWindowJavaGi extends ApplicationWindow {
         if (cancelled == totalFiles) {
             // All files were cancelled
             return "All conversions cancelled";
-        } else if (failed == 0 && cancelled == 0) {
+        }
+        int removed = totalFiles - successful - failed - cancelled;
+        if (removed > 0) {
+            // Some files were removed mid-conversion: report what actually
+            // happened to each file instead of an all-successful claim.
+            StringBuilder sb = new StringBuilder(String.format("%d files processed:", totalFiles));
+            sb.append(String.format(" %d succeeded", successful));
+            if (failed > 0) {
+                sb.append(String.format(", %d failed", failed));
+            }
+            if (cancelled > 0) {
+                sb.append(String.format(", %d cancelled", cancelled));
+            }
+            sb.append(String.format(", %d removed during conversion", removed));
+            return sb.toString();
+        } else if (failed == 0 && cancelled == 0 && successful == totalFiles) {
             return String.format("All %d files converted successfully!", totalFiles);
         } else if (successful == 0) {
             return String.format("All %d files failed to convert.", totalFiles);
@@ -1352,6 +1601,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
      *         own counters)
      */
     private int[] deriveBatchCountsFromEngineResults() {
+        List<String> batchFileIds = batchState.batchFileIds();
         if (batchFileIds.isEmpty()) {
             return null;
         }

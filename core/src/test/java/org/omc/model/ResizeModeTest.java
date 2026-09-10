@@ -7,11 +7,20 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 
 /**
  * Unit tests for ResizeMode enum.
@@ -28,6 +37,8 @@ import org.junit.jupiter.api.Test;
  */
 @DisplayName("ResizeMode Tests")
 class ResizeModeTest {
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     // ===========================
     // Enum Values Tests
@@ -158,20 +169,46 @@ class ResizeModeTest {
     }
 
     @Test
-    @DisplayName("fromDisplayName throws exception for unknown display name")
-    void fromDisplayName_WithUnknownDisplayName_ThrowsException() {
-        IllegalArgumentException exception = assertThrows(
-                IllegalArgumentException.class,
-                () -> ResizeMode.fromDisplayName("Invalid Mode"));
-
-        assertTrue(exception.getMessage().contains("Unknown resize mode"));
-        assertTrue(exception.getMessage().contains("Invalid Mode"));
+    @DisplayName("fromDisplayName returns FIT for unknown value instead of throwing")
+    void fromDisplayName_WithUnknownDisplayName_ReturnsFitDefault() {
+        // Unknown values must never break settings/preset deserialization:
+        // the creator resolves to the safe default instead of throwing.
+        assertEquals(ResizeMode.FIT, ResizeMode.fromDisplayName("Invalid Mode"));
     }
 
     @Test
-    @DisplayName("fromDisplayName throws exception for null")
-    void fromDisplayName_WithNull_ThrowsException() {
-        assertThrows(IllegalArgumentException.class, () -> ResizeMode.fromDisplayName(null));
+    @DisplayName("fromDisplayName returns null for null (absent value)")
+    void fromDisplayName_WithNull_ReturnsNull() {
+        // Null means "absent": ImageSettings applies its own resolution-aware
+        // default (NONE/FIT), so the creator must pass the null through.
+        assertNull(ResizeMode.fromDisplayName(null));
+    }
+
+    // ===========================
+    // Fallback Logging Tests
+    // ===========================
+
+    @Test
+    @DisplayName("fromDisplayName logs a warning when an unknown value falls back to FIT")
+    void fromDisplayName_WithUnknownValue_LogsWarnWithRejectedValueAndFallback() {
+        Logger resizeModeLogger = (Logger) LoggerFactory.getLogger(ResizeMode.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        resizeModeLogger.addAppender(appender);
+        try {
+            ResizeMode result = ResizeMode.fromDisplayName("Invalid Mode");
+
+            assertEquals(ResizeMode.FIT, result);
+            assertEquals(1, appender.list.size(), "unknown->FIT fallback must log exactly one warning");
+            ILoggingEvent event = appender.list.getFirst();
+            assertEquals(Level.WARN, event.getLevel());
+            String message = event.getFormattedMessage();
+            assertTrue(message.contains("Invalid Mode"), "warning must include the rejected value");
+            assertTrue(message.contains("FIT"), "warning must name the FIT fallback");
+        } finally {
+            resizeModeLogger.detachAppender(appender);
+            appender.stop();
+        }
     }
 
     // ===========================
@@ -197,15 +234,86 @@ class ResizeModeTest {
     }
 
     // ===========================
+    // JSON Persistence Tests (name-based, like every other enum)
+    // ===========================
+
+    @Test
+    @DisplayName("JSON serialization writes the enum name, not the display name")
+    void jsonSerialization_WritesEnumName() throws Exception {
+        String json = objectMapper.writeValueAsString(ResizeMode.FIT);
+
+        assertEquals("\"FIT\"", json);
+    }
+
+    @Test
+    @DisplayName("JSON deserialization accepts the enum name")
+    void jsonDeserialization_WithEnumName_ReturnsMode() throws Exception {
+        assertEquals(ResizeMode.FIT, objectMapper.readValue("\"FIT\"", ResizeMode.class));
+        assertEquals(ResizeMode.NEAREST_NEIGHBOR,
+                objectMapper.readValue("\"NEAREST_NEIGHBOR\"", ResizeMode.class));
+    }
+
+    @Test
+    @DisplayName("JSON deserialization accepts the enum name for every mode (exhaustive)")
+    void jsonDeserialization_WithEnumName_AcceptsEveryMode() throws Exception {
+        for (ResizeMode mode : ResizeMode.values()) {
+            assertEquals(mode, objectMapper.readValue("\"" + mode.name() + "\"", ResizeMode.class),
+                    "Name-based read should work for " + mode.name());
+        }
+    }
+
+    @Test
+    @DisplayName("JSON deserialization accepts legacy display names for backward compatibility")
+    void jsonDeserialization_WithLegacyDisplayName_ReturnsMode() throws Exception {
+        assertEquals(ResizeMode.FIT,
+                objectMapper.readValue("\"Fit (maintain aspect)\"", ResizeMode.class));
+        assertEquals(ResizeMode.NONE, objectMapper.readValue("\"None\"", ResizeMode.class));
+        assertEquals(ResizeMode.FILL, objectMapper.readValue("\"Fill (crop)\"", ResizeMode.class));
+    }
+
+    @Test
+    @DisplayName("JSON deserialization accepts the legacy display name for every mode (exhaustive)")
+    void jsonDeserialization_WithLegacyDisplayName_AcceptsEveryMode() throws Exception {
+        for (ResizeMode mode : ResizeMode.values()) {
+            assertEquals(mode,
+                    objectMapper.readValue("\"" + mode.getDisplayName() + "\"", ResizeMode.class),
+                    "Legacy display-name read should work for " + mode.getDisplayName());
+        }
+    }
+
+    @Test
+    @DisplayName("JSON round-trip through ImageSettings persists and restores the mode")
+    void jsonRoundTrip_ThroughImageSettings_PreservesMode() throws Exception {
+        ImageSettings original = ImageSettings.builder()
+                .resolution(new Resolution(1920, 1080))
+                .resizeMode(ResizeMode.LANCZOS)
+                .outputFormat(FileFormat.WEBP)
+                .build();
+
+        ImageSettings deserialized = objectMapper.readValue(
+                objectMapper.writeValueAsString(original), ImageSettings.class);
+
+        assertEquals(ResizeMode.LANCZOS, deserialized.resizeMode());
+    }
+
+    @Test
+    @DisplayName("JSON deserialization of an unknown value resolves to FIT, not an exception")
+    void jsonDeserialization_WithUnknownValue_ResolvesToFit() throws Exception {
+        assertEquals(ResizeMode.FIT, objectMapper.readValue("\"xyz\"", ResizeMode.class));
+    }
+
+    // ===========================
     // Edge Cases
     // ===========================
 
     @Test
-    @DisplayName("fromDisplayName is case-sensitive")
-    void fromDisplayName_IsCaseSensitive() {
-        assertThrows(IllegalArgumentException.class, () -> ResizeMode.fromDisplayName("none"));
-        assertThrows(IllegalArgumentException.class, () -> ResizeMode.fromDisplayName("NONE"));
-        assertThrows(IllegalArgumentException.class, () -> ResizeMode.fromDisplayName("lanczos"));
+    @DisplayName("Name matching is exact; unrecognized casing resolves to FIT")
+    void fromDisplayName_NameMatchingIsCaseSensitive() {
+        // Exact name matches
+        assertEquals(ResizeMode.NONE, ResizeMode.fromDisplayName("NONE"));
+        // Wrong casing is not a name and not a display name: safe default
+        assertEquals(ResizeMode.FIT, ResizeMode.fromDisplayName("none"));
+        assertEquals(ResizeMode.FIT, ResizeMode.fromDisplayName("lanczos"));
     }
 
     @Test

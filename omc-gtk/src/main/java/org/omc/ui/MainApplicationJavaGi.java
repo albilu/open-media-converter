@@ -98,6 +98,19 @@ public class MainApplicationJavaGi extends Application {
         addAction(aboutAction);
         logger.debug("Registered app.about action");
 
+        // Help action (referenced by the app menu's Help item in
+        // main_window.ui). Opens the About dialog, which carries version,
+        // description and link information until a dedicated help view exists.
+        org.gnome.gio.SimpleAction helpAction = new org.gnome.gio.SimpleAction("help", null);
+        helpAction.onActivate(param -> {
+            logger.debug("Help action activated");
+            if (mainWindow != null) {
+                AboutDialogHelper.show(mainWindow);
+            }
+        });
+        addAction(helpAction);
+        logger.debug("Registered app.help action");
+
         // Quit action (Ctrl+Q)
         // Requirement REQ-102.2: Ctrl+Q keyboard shortcut
         org.gnome.gio.SimpleAction quitAction = new org.gnome.gio.SimpleAction("quit", null);

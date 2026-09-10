@@ -45,6 +45,13 @@ public class PandocService {
     /** Message appended when output is truncated due to size limit */
     private static final String TRUNCATION_MESSAGE = "\n[Output truncated - exceeded 1MB limit]\n";
 
+    /**
+     * Maximum wall time for a Pandoc process before forced termination
+     * (1 hour, mirroring FFmpegService). Package-visible and non-final so
+     * tests can scale it down; not part of the public API.
+     */
+    static long PROCESS_TIMEOUT_MILLIS = java.util.concurrent.TimeUnit.HOURS.toMillis(1);
+
     private final Path pandocPath;
     private final LibreOfficeService pdfRenderer;
 
@@ -243,11 +250,13 @@ public class PandocService {
             // Pandoc doesn't provide progress updates, so we simulate progress
             Thread progressThread = simulateProgress(process, progressCallback, inputSize);
 
-            // Wait for process completion with periodic interruption checks
+            // Wait for process to complete with timeout (1 hour default)
+            // Check for interruption periodically so cancellation can work
             int exitCode = -1;
             boolean finished = false;
+            long startWaitTime = System.currentTimeMillis();
 
-            while (!finished) {
+            while (!finished && (System.currentTimeMillis() - startWaitTime) < PROCESS_TIMEOUT_MILLIS) {
                 // Check for interruption (from cancel operation)
                 if (Thread.currentThread().isInterrupted()) {
                     logger.info("Pandoc process interrupted, destroying process");
@@ -258,6 +267,19 @@ public class PandocService {
 
                 // Wait for process with short timeout to allow interruption checks
                 finished = process.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }
+
+            if (!finished) {
+                logger.error("Pandoc process timed out after 1 hour");
+                process.destroyForcibly();
+                progressThread.interrupt(); // Stop progress simulation
+                throw new ToolExecutionException(
+                        "Pandoc process timed out after 1 hour",
+                        ErrorCode.TOOL_EXECUTION_FAILED,
+                        "pandoc",
+                        pandocPath.toString(),
+                        null,
+                        "Process timeout after 1 hour");
             }
 
             exitCode = process.exitValue();
@@ -587,8 +609,9 @@ public class PandocService {
                     Thread.sleep(500);
                 }
 
-                // Final progress update
-                if (!process.isAlive()) {
+                // Final progress update (skipped when cancelled/timed out so a
+                // destroyed process is not reported as 100% complete)
+                if (!process.isAlive() && !Thread.currentThread().isInterrupted()) {
                     callback.onProgress(100.0, inputSize, 0.0);
                 }
 

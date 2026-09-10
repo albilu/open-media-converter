@@ -162,6 +162,23 @@ class DocumentSettingsTest {
     }
 
     @Test
+    void validation_OutputFormatJpeg_ShouldBeRejected() throws Exception {
+        // Given: JPEG is an IMAGE-only format (no document tool supports it)
+        // Then: Builder must reject it as DOCUMENT output
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> DocumentSettings.builder()
+                        .outputFormat(FileFormat.JPEG)
+                        .build());
+        assertTrue(ex.getMessage().contains("DOCUMENT"));
+
+        // And: Deserialized settings bypass the builder, so isValid() must reject JPEG
+        DocumentSettings deserialized = objectMapper.readValue(
+                "{\"outputFormat\":\"JPEG\"}", DocumentSettings.class);
+        assertFalse(deserialized.isValid(),
+                "DocumentSettings with JPEG output must be invalid: JPEG is not a DOCUMENT format");
+    }
+
+    @Test
     void validation_OutputFormatNull_ShouldThrowException() {
         // Given: Null outputFormat
         assertThrows(IllegalArgumentException.class, () -> DocumentSettings.builder()
@@ -342,5 +359,87 @@ class DocumentSettingsTest {
 
         // Then: Should be true
         assertTrue(settings.generateTableOfContents());
+    }
+
+    // ========== Missing-Field Safe Defaults (JSON deserialization) ==========
+
+    @Test
+    void jsonDeserialization_WithMinimalJson_ShouldUseBuilderDefaultsForAllMissingFields() throws Exception {
+        // Given: settings/preset JSON carrying only the output format
+        String json = "{\"outputFormat\":\"PDF\"}";
+
+        // When
+        DocumentSettings deserialized = objectMapper.readValue(json, DocumentSettings.class);
+
+        // Then: every missing field must deserialize to its Builder default
+        assertNull(deserialized.templatePath());
+        assertTrue(deserialized.preserveFormatting(), "missing preserveFormatting must default to builder true");
+        assertFalse(deserialized.embedFonts());
+        assertFalse(deserialized.generateTableOfContents());
+        assertEquals(25, deserialized.marginTop());
+        assertEquals(25, deserialized.marginBottom());
+        assertEquals(25, deserialized.marginLeft());
+        assertEquals(25, deserialized.marginRight());
+        assertEquals(FileFormat.PDF, deserialized.outputFormat());
+        assertTrue(deserialized.isValid(), "minimal JSON must deserialize to a valid settings object");
+    }
+
+    @Test
+    void jsonDeserialization_WithEmptyObject_ShouldUseBuilderDefaultsAndKeepNullFormat() throws Exception {
+        // Given: JSON with no keys at all (the builder cannot build a null
+        // format; deserialization must not invent one either)
+        String json = "{}";
+
+        // When
+        DocumentSettings deserialized = objectMapper.readValue(json, DocumentSettings.class);
+
+        // Then: all other fields still fall back to Builder defaults
+        assertNull(deserialized.templatePath());
+        assertTrue(deserialized.preserveFormatting());
+        assertFalse(deserialized.embedFonts());
+        assertFalse(deserialized.generateTableOfContents());
+        assertEquals(25, deserialized.marginTop());
+        assertEquals(25, deserialized.marginBottom());
+        assertEquals(25, deserialized.marginLeft());
+        assertEquals(25, deserialized.marginRight());
+        assertNull(deserialized.outputFormat());
+        assertFalse(deserialized.isValid(), "null outputFormat must stay invalid");
+    }
+
+    @Test
+    void jsonDeserialization_WithExplicitValues_ShouldNotAlterThem() throws Exception {
+        // Given: complete JSON with explicit values
+        String json = "{\"templatePath\":\"/tmp/template.odt\",\"preserveFormatting\":false,"
+                + "\"embedFonts\":true,\"generateTableOfContents\":true,"
+                + "\"marginTop\":5,\"marginBottom\":10,\"marginLeft\":15,\"marginRight\":20,"
+                + "\"outputFormat\":\"ODT\"}";
+
+        // When
+        DocumentSettings deserialized = objectMapper.readValue(json, DocumentSettings.class);
+
+        // Then: explicit values are preserved exactly
+        assertEquals(Path.of("/tmp/template.odt"), deserialized.templatePath());
+        assertFalse(deserialized.preserveFormatting());
+        assertTrue(deserialized.embedFonts());
+        assertTrue(deserialized.generateTableOfContents());
+        assertEquals(5, deserialized.marginTop());
+        assertEquals(10, deserialized.marginBottom());
+        assertEquals(15, deserialized.marginLeft());
+        assertEquals(20, deserialized.marginRight());
+        assertEquals(FileFormat.ODT, deserialized.outputFormat());
+    }
+
+    @Test
+    void jsonDeserialization_WithExplicitInvalidMargin_ShouldNotBeFixed() throws Exception {
+        // Given: an explicit out-of-range margin (missing-key defaulting must
+        // not "fix" explicit values)
+        String json = "{\"marginTop\":999,\"outputFormat\":\"PDF\"}";
+
+        // When
+        DocumentSettings deserialized = objectMapper.readValue(json, DocumentSettings.class);
+
+        // Then: the explicit 999 stays and remains invalid
+        assertEquals(999, deserialized.marginTop());
+        assertFalse(deserialized.isValid());
     }
 }

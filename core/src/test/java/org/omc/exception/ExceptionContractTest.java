@@ -65,6 +65,14 @@ class ExceptionContractTest {
     }
 
     @Test
+    void fileOperationException_withNullErrorCode_detailedMessageDoesNotThrow() {
+        FileOperationException exception = new FileOperationException("boom", null, "/tmp/out.mp4");
+
+        // The error code is optional (see base class): must not NPE
+        assertEquals("boom: /tmp/out.mp4", exception.getDetailedMessage());
+    }
+
+    @Test
     void toolExecutionException_truncatesOutputBeyondOneMegabyte() {
         String hugeOutput = "x".repeat(2 * ONE_MB);
 

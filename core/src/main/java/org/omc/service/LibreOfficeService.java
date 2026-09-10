@@ -47,6 +47,13 @@ public class LibreOfficeService {
     private static final int MAX_OUTPUT_SIZE = 1_048_576; // 1MB
     private static final String TRUNCATION_MESSAGE = "\n[Output truncated - exceeded 1MB limit]\n";
 
+    /**
+     * Maximum wall time for a LibreOffice process before forced termination
+     * (1 hour, mirroring FFmpegService). Package-visible and non-final so
+     * tests can scale it down; not part of the public API.
+     */
+    static long PROCESS_TIMEOUT_MILLIS = TimeUnit.HOURS.toMillis(1);
+
     // LibreOffice-supported document formats for input
     private static final List<FileFormat> SUPPORTED_INPUT_FORMATS = List.of(
             FileFormat.DOCX, FileFormat.XLSX, FileFormat.PPTX,
@@ -237,11 +244,13 @@ public class LibreOfficeService {
             // LibreOffice doesn't provide progress updates, so we simulate progress
             Thread progressThread = simulateProgress(process, progressCallback, inputSize);
 
-            // Wait for process completion with periodic interruption checks
+            // Wait for process to complete with timeout (1 hour default)
+            // Check for interruption periodically so cancellation can work
             int exitCode = -1;
             boolean finished = false;
+            long startWaitTime = System.currentTimeMillis();
 
-            while (!finished) {
+            while (!finished && (System.currentTimeMillis() - startWaitTime) < PROCESS_TIMEOUT_MILLIS) {
                 // Check for interruption (from cancel operation)
                 if (Thread.currentThread().isInterrupted()) {
                     logger.info("LibreOffice process interrupted, destroying process");
@@ -252,6 +261,19 @@ public class LibreOfficeService {
 
                 // Wait for process with short timeout to allow interruption checks
                 finished = process.waitFor(500, TimeUnit.MILLISECONDS);
+            }
+
+            if (!finished) {
+                logger.error("LibreOffice process timed out after 1 hour");
+                process.destroyForcibly();
+                progressThread.interrupt(); // Stop progress simulation
+                throw new ToolExecutionException(
+                        "LibreOffice process timed out after 1 hour",
+                        ErrorCode.TOOL_EXECUTION_FAILED,
+                        "libreoffice",
+                        libreOfficePath.toString(),
+                        null,
+                        "Process timeout after 1 hour");
             }
 
             exitCode = process.exitValue();
@@ -595,8 +617,9 @@ public class LibreOfficeService {
                     Thread.sleep(500);
                 }
 
-                // Final progress update
-                if (!process.isAlive()) {
+                // Final progress update (skipped when cancelled/timed out so a
+                // destroyed process is not reported as 100% complete)
+                if (!process.isAlive() && !Thread.currentThread().isInterrupted()) {
                     callback.onProgress(100.0, inputSize, 0.0);
                 }
 

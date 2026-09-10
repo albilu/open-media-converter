@@ -27,6 +27,7 @@ import org.omc.controller.FileManager;
 import org.omc.controller.SettingsManager;
 import org.omc.controller.StateManager;
 import org.omc.core.ConversionEngine;
+import org.mockito.ArgumentCaptor;
 import org.omc.model.ApplicationState;
 import org.omc.model.ConversionFile;
 import org.omc.model.FileFormat;
@@ -269,16 +270,20 @@ class FileListSortIntegrationTest extends BaseFileListSortTest {
     @Test
     @DisplayName("Test save sort state via controller")
     void testSaveSortStateViaController() throws Exception {
-        // Setup mock
+        // Note: the controller persists sort state atomically via
+        // StateManager.updateState (no getCurrentState read-modify-write)
         ApplicationState currentState = ApplicationState.defaultState();
-        when(stateManager.getCurrentState()).thenReturn(currentState);
 
         // Save sort state via controller
         FileListSortState sortState = FileListSortState.byName(SortDirection.DESCENDING);
         controller.saveSortState(sortState);
 
-        // Verify state manager saveState was called
-        verify(stateManager, times(1)).saveState(any(ApplicationState.class));
+        // Verify the controller routed the update through the atomic
+        // StateManager.updateState primitive (sort state persisted under lock)
+        ArgumentCaptor<java.util.function.UnaryOperator<ApplicationState>> operator =
+                ArgumentCaptor.forClass(java.util.function.UnaryOperator.class);
+        verify(stateManager, times(1)).updateState(operator.capture());
+        assertEquals(sortState, operator.getValue().apply(currentState).fileListSortState());
     }
 
     @Test

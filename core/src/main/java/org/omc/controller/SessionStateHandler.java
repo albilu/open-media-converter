@@ -123,21 +123,18 @@ class SessionStateHandler {
                     null // lastUsedPreset
             );
 
-            // Get current sort state to preserve it during shutdown
-            // Requirement REQ-FL-4.5: Persist sort state across application restarts
-            ApplicationState currentState = stateManager.getCurrentState();
-            FileListSortState sortState = currentState.fileListSortState();
-
-            // Create new state with all current values including sort state
-            ApplicationState state = new ApplicationState(
+            // Merge into the current state atomically: the sort state read
+            // here must not race (and silently discard or be discarded by) a
+            // concurrent save such as a user sort change on the GTK thread.
+            // Requirement REQ-FL-4.5: Preserve current sort state
+            stateManager.updateState(currentState -> new ApplicationState(
                     windowState,
                     sessionState,
                     currentSettings,
-                    sortState, // Preserve current sort state
+                    currentState.fileListSortState(),
                     ApplicationState.CURRENT_STATE_VERSION,
-                    System.currentTimeMillis());
+                    System.currentTimeMillis()));
 
-            stateManager.saveState(state);
             logger.debug("Application state saved successfully");
 
         } catch (Exception e) {
@@ -176,14 +173,10 @@ class SessionStateHandler {
         try {
             logger.debug("Saving sort state: {}", sortState);
 
-            // Get current application state
-            ApplicationState currentState = stateManager.getCurrentState();
-
-            // Update with new sort state
-            ApplicationState updatedState = currentState.withFileListSortState(sortState);
-
-            // Save updated state
-            stateManager.saveState(updatedState);
+            // Read-modify-write must be atomic: a concurrent save (e.g.
+            // batch-completion saveApplicationState on a worker thread) must
+            // not silently discard this sort update or vice versa
+            stateManager.updateState(currentState -> currentState.withFileListSortState(sortState));
 
             logger.debug("Sort state saved successfully");
         } catch (Exception e) {

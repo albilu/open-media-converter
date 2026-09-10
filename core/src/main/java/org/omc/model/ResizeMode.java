@@ -1,5 +1,8 @@
 package org.omc.model;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonValue;
 
@@ -56,6 +59,12 @@ public enum ResizeMode {
      */
     NEAREST_NEIGHBOR("Nearest Neighbor");
 
+    /**
+     * Makes the silent unknown-value coercion observable in logs (relevant to
+     * the SettingsManager salvage path).
+     */
+    private static final Logger LOG = LoggerFactory.getLogger(ResizeMode.class);
+
     private final String displayName;
 
     /**
@@ -77,30 +86,66 @@ public enum ResizeMode {
     }
 
     /**
-     * Returns the display name when converting to JSON.
-     * 
-     * @return the display name
+     * Returns the value used for JSON persistence: the enum name.
+     *
+     * <p>
+     * Persistence uses the stable enum name (like every other enum in this
+     * package) so rewording display labels can never break settings or preset
+     * deserialization. Use {@link #getDisplayName()} for UI labels.
+     * </p>
+     *
+     * @return the enum name (e.g. "FIT")
      */
     @JsonValue
+    public String getJsonName() {
+        return name();
+    }
+
+    /**
+     * Returns the human-readable display name.
+     *
+     * @return the display name
+     */
     @Override
     public String toString() {
         return displayName;
     }
 
     /**
-     * Creates a ResizeMode from a display name string.
-     * 
-     * @param displayName the display name
-     * @return the corresponding ResizeMode
-     * @throws IllegalArgumentException if the display name is not recognized
+     * Resolves a ResizeMode from a persisted or legacy value.
+     *
+     * <p>
+     * Resolution order:
+     * </p>
+     * <ol>
+     * <li>exact enum name match (e.g. "FIT") — current persistence format</li>
+     * <li>legacy display name match (e.g. "Fit (maintain aspect)") — files
+     * written by older versions</li>
+     * <li>otherwise {@link #FIT} — deterministic safe default so a corrupt or
+     * unrecognized value can never break settings/preset deserialization</li>
+     * </ol>
+     *
+     * @param value the enum name or legacy display name; null passes through
+     *              as null so callers (e.g. ImageSettings) can apply their own
+     *              absent-value defaults
+     * @return the corresponding ResizeMode, or null if the input is null
      */
     @JsonCreator
-    public static ResizeMode fromDisplayName(String displayName) {
+    public static ResizeMode fromDisplayName(String value) {
+        if (value == null) {
+            return null;
+        }
         for (ResizeMode mode : values()) {
-            if (mode.displayName.equals(displayName)) {
+            if (mode.name().equals(value)) {
                 return mode;
             }
         }
-        throw new IllegalArgumentException("Unknown resize mode: " + displayName);
+        for (ResizeMode mode : values()) {
+            if (mode.displayName.equals(value)) {
+                return mode;
+            }
+        }
+        LOG.warn("Unknown ResizeMode value '{}'; falling back to FIT", value);
+        return FIT;
     }
 }

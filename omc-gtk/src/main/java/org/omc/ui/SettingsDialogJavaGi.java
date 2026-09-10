@@ -59,7 +59,6 @@ public class SettingsDialogJavaGi {
 
     // Constants for dropdown indices
     private static final int RESOLUTION_INDEX_ORIGINAL = 0;
-    private static final int RESOLUTION_INDEX_CUSTOM = 8;
 
     // Constants for codec/resolution/preset arrays
     // Requirement REQ-VID-1.1, REQ-VID-1.2, REQ-VID-1.3: Include GPU codec options
@@ -71,6 +70,132 @@ public class SettingsDialogJavaGi {
     private static final int[] AUDIO_CHANNELS = { -1, 1, 2, 3, 6, 8 };
     private static final String[] VIDEO_PRESETS = { "ultrafast", "superfast", "veryfast", "faster", "fast", "medium",
             "slow", "slower", "veryslow" };
+
+    /**
+     * One entry per preset resolution in the video resolution dropdown. The
+     * dropdown labels, the widget-to-model read path and the model-to-widget
+     * load path are all derived from this single array so a displayed label
+     * always round-trips to the same value.
+     */
+    record VideoResolutionOption(String name, Resolution resolution) {
+        String label() {
+            return name + " (" + resolution.getWidth() + "x" + resolution.getHeight() + ")";
+        }
+    }
+
+    private static final VideoResolutionOption[] VIDEO_RESOLUTION_OPTIONS = {
+            new VideoResolutionOption("8K", new Resolution(7680, 4320)),
+            new VideoResolutionOption("4K", Resolution.UHD_4K),
+            new VideoResolutionOption("1440p", Resolution.QHD_1440P),
+            new VideoResolutionOption("1080p", Resolution.FULL_HD_1080P),
+            new VideoResolutionOption("720p", Resolution.HD_720P),
+            new VideoResolutionOption("480p", new Resolution(854, 480)),
+            new VideoResolutionOption("360p", new Resolution(640, 360)),
+    };
+
+    // Derived from the shared options array: Original(0), presets(1..N), Custom(N+1)
+    private static final int RESOLUTION_INDEX_CUSTOM = VIDEO_RESOLUTION_OPTIONS.length + 1;
+
+    /**
+     * Frame rates offered by the video frame rate dropdown, in display order.
+     * Index 0 of the dropdown is "Original"; there is no custom frame rate
+     * entry, so values outside this array load as "Original".
+     */
+    private static final int[] VIDEO_FRAME_RATE_OPTIONS = { 24, 25, 30, 50, 60, 120 };
+
+    /**
+     * Returns the dropdown labels for the video resolution dropdown, derived
+     * from {@link #VIDEO_RESOLUTION_OPTIONS}: "Original", one label per preset
+     * option, then "Custom".
+     *
+     * @return the ordered dropdown labels
+     */
+    static String[] videoResolutionDropdownLabels() {
+        String[] labels = new String[VIDEO_RESOLUTION_OPTIONS.length + 2];
+        labels[0] = "Original";
+        for (int i = 0; i < VIDEO_RESOLUTION_OPTIONS.length; i++) {
+            labels[i + 1] = VIDEO_RESOLUTION_OPTIONS[i].label();
+        }
+        labels[labels.length - 1] = "Custom";
+        return labels;
+    }
+
+    /**
+     * Maps a video resolution dropdown index to its resolution.
+     *
+     * @param index the dropdown index (0 = Original, 1..N = presets, N+1 = Custom)
+     * @return the preset resolution, or null for Original/Custom/invalid indices
+     *         (Custom resolutions are read from the width/height entries)
+     */
+    static Resolution videoResolutionForDropdownIndex(int index) {
+        if (index <= RESOLUTION_INDEX_ORIGINAL || index > VIDEO_RESOLUTION_OPTIONS.length) {
+            return null;
+        }
+        return VIDEO_RESOLUTION_OPTIONS[index - 1].resolution();
+    }
+
+    /**
+     * Maps a resolution to its video resolution dropdown index.
+     *
+     * @param resolution the resolution to select
+     * @return 0 for null (Original), the matching preset index, or
+     *         {@link #RESOLUTION_INDEX_CUSTOM} for non-preset resolutions
+     */
+    static int videoDropdownIndexForResolution(Resolution resolution) {
+        if (resolution == null) {
+            return RESOLUTION_INDEX_ORIGINAL;
+        }
+        for (int i = 0; i < VIDEO_RESOLUTION_OPTIONS.length; i++) {
+            if (VIDEO_RESOLUTION_OPTIONS[i].resolution().equals(resolution)) {
+                return i + 1;
+            }
+        }
+        return RESOLUTION_INDEX_CUSTOM;
+    }
+
+    /**
+     * Returns the dropdown labels for the video frame rate dropdown, derived
+     * from {@link #VIDEO_FRAME_RATE_OPTIONS}: "Original" plus one "N fps" label
+     * per entry.
+     *
+     * @return the ordered dropdown labels
+     */
+    static String[] videoFrameRateDropdownLabels() {
+        String[] labels = new String[VIDEO_FRAME_RATE_OPTIONS.length + 1];
+        labels[0] = "Original";
+        for (int i = 0; i < VIDEO_FRAME_RATE_OPTIONS.length; i++) {
+            labels[i + 1] = VIDEO_FRAME_RATE_OPTIONS[i] + " fps";
+        }
+        return labels;
+    }
+
+    /**
+     * Maps a video frame rate dropdown index to its frame rate value.
+     *
+     * @param index the dropdown index (0 = Original, 1..N = listed rates)
+     * @return the frame rate in fps, or -1 for Original/invalid indices
+     */
+    static int videoFrameRateForDropdownIndex(int index) {
+        if (index < 1 || index > VIDEO_FRAME_RATE_OPTIONS.length) {
+            return -1;
+        }
+        return VIDEO_FRAME_RATE_OPTIONS[index - 1];
+    }
+
+    /**
+     * Maps a frame rate to its video frame rate dropdown index.
+     *
+     * @param frameRate the frame rate in fps
+     * @return the matching dropdown index, or 0 (Original) when not listed
+     */
+    static int videoDropdownIndexForFrameRate(int frameRate) {
+        for (int i = 0; i < VIDEO_FRAME_RATE_OPTIONS.length; i++) {
+            if (VIDEO_FRAME_RATE_OPTIONS[i] == frameRate) {
+                return i + 1;
+            }
+        }
+        return 0;
+    }
 
     /**
      * Returns the native byte length of a UI definition string as marshaled to
@@ -1285,8 +1410,13 @@ public class SettingsDialogJavaGi {
 
         showPresetNameDialog("Save Audio Preset", presetName -> {
             try {
-                // Gather current audio settings
-                AudioSettings settings = currentSettings.audioSettings();
+                // Read current audio settings from UI (live widgets, not the
+                // dialog-open snapshot)
+                AudioSettings settings = readAudioSettings();
+                if (settings == null) {
+                    showError("Failed to read audio settings");
+                    return;
+                }
 
                 // Create preset
                 SectionPreset preset = SectionPreset.forAudio(presetName, null, settings, false);
@@ -1486,8 +1616,13 @@ public class SettingsDialogJavaGi {
 
         showPresetNameDialog("Save Image Preset", presetName -> {
             try {
-                // Gather current image settings
-                ImageSettings settings = currentSettings.imageSettings();
+                // Read current image settings from UI (live widgets, not the
+                // dialog-open snapshot)
+                ImageSettings settings = readImageSettings();
+                if (settings == null) {
+                    showError("Failed to read image settings");
+                    return;
+                }
 
                 // Create preset
                 SectionPreset preset = SectionPreset.forImage(presetName, null, settings, false);
@@ -1687,8 +1822,13 @@ public class SettingsDialogJavaGi {
 
         showPresetNameDialog("Save Document Preset", presetName -> {
             try {
-                // Gather current document settings
-                DocumentSettings settings = currentSettings.documentSettings();
+                // Read current document settings from UI (live widgets, not
+                // the dialog-open snapshot)
+                DocumentSettings settings = readDocumentSettings();
+                if (settings == null) {
+                    showError("Failed to read document settings");
+                    return;
+                }
 
                 // Create preset
                 SectionPreset preset = SectionPreset.forDocument(presetName, null, settings, false);
@@ -2311,8 +2451,8 @@ public class SettingsDialogJavaGi {
         // Set resolution
         if (videoSettings.resolution() != null) {
             if (videoResolutionDropdown != null) {
-                // Set to "Custom" option
-                videoResolutionDropdown.setSelected(RESOLUTION_INDEX_CUSTOM);
+                // Presets select their own label; custom resolutions select "Custom"
+                videoResolutionDropdown.setSelected(videoDropdownIndexForResolution(videoSettings.resolution()));
             }
 
             if (videoWidthEntry != null) {
@@ -2337,15 +2477,7 @@ public class SettingsDialogJavaGi {
 
         // Set frame rate
         if (videoFrameRateDropdown != null) {
-            int frameRate = videoSettings.frameRate();
-            int frameRateIndex = switch (frameRate) {
-                case -1 -> 0; // Original
-                case 24 -> 1;
-                case 30 -> 2;
-                case 60 -> 3;
-                default -> 0;
-            };
-            videoFrameRateDropdown.setSelected(frameRateIndex);
+            videoFrameRateDropdown.setSelected(videoDropdownIndexForFrameRate(videoSettings.frameRate()));
         }
 
         // Set preset
@@ -2595,16 +2727,8 @@ public class SettingsDialogJavaGi {
         Resolution resolution = null;
         if (videoResolutionDropdown != null) {
             int resIndex = videoResolutionDropdown.getSelected();
-            if (resIndex == 0) {
-                // Original
-                resolution = null;
-            } else if (resIndex >= 1 && resIndex <= 4) {
-                // Presets
-                Resolution[] presets = { Resolution.SD_480P, Resolution.HD_720P, Resolution.FULL_HD_1080P,
-                        Resolution.UHD_4K };
-                resolution = presets[resIndex - 1];
-            } else if (resIndex == RESOLUTION_INDEX_CUSTOM) {
-                // Custom
+            if (resIndex == RESOLUTION_INDEX_CUSTOM) {
+                // Custom: manual width/height entry
                 if (videoWidthEntry != null && videoHeightEntry != null) {
                     try {
                         int width = Integer.parseInt(videoWidthEntry.getText());
@@ -2614,6 +2738,9 @@ public class SettingsDialogJavaGi {
                         logger.warn("Invalid custom resolution: {}", e.getMessage());
                     }
                 }
+            } else {
+                // Original or a preset, mapped via the shared options array
+                resolution = videoResolutionForDropdownIndex(resIndex);
             }
         }
         if (resolution != null) {
@@ -2631,14 +2758,7 @@ public class SettingsDialogJavaGi {
         // Frame rate
         if (videoFrameRateDropdown != null) {
             int frameRateIndex = videoFrameRateDropdown.getSelected();
-            int frameRate = switch (frameRateIndex) {
-                case 0 -> -1; // Original
-                case 1 -> 24;
-                case 2 -> 30;
-                case 3 -> 60;
-                default -> -1;
-            };
-            builder.frameRate(frameRate);
+            builder.frameRate(videoFrameRateForDropdownIndex(frameRateIndex));
         }
 
         // Preset
@@ -3203,7 +3323,7 @@ public class SettingsDialogJavaGi {
         videoCodecDropdown.setModel(codecList);
         videoCodecDropdown.setSelected(0); // Default: H.264
 
-        logger.debug("Populated video codec dropdown with {} codecs (including GPU codecs)", 6);
+        logger.debug("Populated video codec dropdown with {} codecs (including GPU codecs)", codecList.getNItems());
     }
 
     /**
@@ -3215,17 +3335,7 @@ public class SettingsDialogJavaGi {
             return;
         }
 
-        var resolutionList = new org.gnome.gtk.StringList(new String[] {
-                "Original",
-                "8K (7680x4320)",
-                "4K (3840x2160)",
-                "1440p (2560x1440)",
-                "1080p (1920x1080)",
-                "720p (1280x720)",
-                "480p (854x480)",
-                "360p (640x360)",
-                "Custom"
-        });
+        var resolutionList = new org.gnome.gtk.StringList(videoResolutionDropdownLabels());
 
         videoResolutionDropdown.setModel(resolutionList);
         videoResolutionDropdown.setSelected(0); // Default: Original
@@ -3269,7 +3379,7 @@ public class SettingsDialogJavaGi {
             videoHeightEntry.setSensitive(false);
         }
 
-        logger.debug("Populated video resolution dropdown with {} options", 9);
+        logger.debug("Populated video resolution dropdown with {} options", VIDEO_RESOLUTION_OPTIONS.length + 2);
     }
 
     /**
@@ -3281,20 +3391,12 @@ public class SettingsDialogJavaGi {
             return;
         }
 
-        var frameRateList = new org.gnome.gtk.StringList(new String[] {
-                "Original",
-                "24 fps",
-                "25 fps",
-                "30 fps",
-                "50 fps",
-                "60 fps",
-                "120 fps"
-        });
+        var frameRateList = new org.gnome.gtk.StringList(videoFrameRateDropdownLabels());
 
         videoFrameRateDropdown.setModel(frameRateList);
         videoFrameRateDropdown.setSelected(0); // Default: Original
 
-        logger.debug("Populated video frame rate dropdown with {} options", 7);
+        logger.debug("Populated video frame rate dropdown with {} options", VIDEO_FRAME_RATE_OPTIONS.length + 1);
     }
 
     /**

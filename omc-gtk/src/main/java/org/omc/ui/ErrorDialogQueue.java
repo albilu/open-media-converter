@@ -43,12 +43,23 @@ final class ErrorDialogQueue {
      * allows it; otherwise queued and shown when {@link #onDialogClosed()} is
      * called for an earlier dialog.
      *
+     * <p>
+     * If the show runnable throws (the dialog never opened), the slot it
+     * reserved is released so later dialogs cannot queue forever behind the
+     * leaked slot; the exception is rethrown to the caller.
+     * </p>
+     *
      * @param showDialog runnable that shows the dialog (main thread)
      */
     synchronized void offer(Runnable showDialog) {
         if (active < maxConcurrent) {
             active++;
-            showDialog.run();
+            try {
+                showDialog.run();
+            } catch (RuntimeException | Error e) {
+                active--;
+                throw e;
+            }
         } else {
             pending.add(showDialog);
         }
@@ -58,11 +69,22 @@ final class ErrorDialogQueue {
      * Notifies the queue that a shown dialog was closed, freeing a slot. Shows
      * the next queued dialog, if any. Spurious calls (no queued dialogs) are
      * ignored.
+     *
+     * <p>
+     * If the next queued runnable throws (that dialog never opened), the
+     * transferred slot is released instead of leaking it; the exception is
+     * rethrown to the caller.
+     * </p>
      */
     synchronized void onDialogClosed() {
         Runnable next = pending.poll();
         if (next != null) {
-            next.run();
+            try {
+                next.run();
+            } catch (RuntimeException | Error e) {
+                active--;
+                throw e;
+            }
             return;
         }
         if (active > 0) {

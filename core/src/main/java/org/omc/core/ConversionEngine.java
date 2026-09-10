@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -32,7 +33,6 @@ import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 import org.omc.exception.ToolExecutionException;
-import org.omc.model.AudioSettings;
 import org.omc.model.BatchConversionResult;
 import org.omc.model.BatchProgress;
 import org.omc.model.ConversionFile;
@@ -40,13 +40,9 @@ import org.omc.model.ConversionProgress;
 import org.omc.model.ConversionResult;
 import org.omc.model.ConversionSettings;
 import org.omc.model.ConversionTool;
-import org.omc.model.DocumentSettings;
 import org.omc.model.FileFormat;
-import org.omc.model.FileSettingsOverride;
 import org.omc.model.FormatCategory;
-import org.omc.model.ImageSettings;
 import org.omc.model.ValidationResult;
-import org.omc.model.VideoSettings;
 import org.omc.service.FileHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -331,9 +327,9 @@ public class ConversionEngine implements ProcessRegistry {
 
                     // Log space metrics if available
                     if (batchResult.totalInputSize() > 0) {
-                        logger.debug("Batch space metrics: {} - compression ratio {:.1f}%",
+                        logger.debug("Batch space metrics: {} - compression ratio {}%",
                                 batchResult.formatSpaceSaved(),
-                                batchResult.overallCompressionRatio());
+                                String.format(Locale.US, "%.1f", batchResult.overallCompressionRatio()));
                     }
 
                     return batchResult;
@@ -440,9 +436,7 @@ public class ConversionEngine implements ProcessRegistry {
                         }
 
                         // Resolve output format for logging
-                        FormatCategory category = file.format().getCategory();
-                        Object resolvedSettings = resolveSettingsForFile(file, settings);
-                        FileFormat outputFormat = getOutputFormatFromSettings(resolvedSettings, category);
+                        FileFormat outputFormat = resolveOutputFormat(file, settings);
 
                         logger.info("Starting conversion: {} -> {}",
                                 file.fileName(), outputFormat);
@@ -573,6 +567,13 @@ public class ConversionEngine implements ProcessRegistry {
      */
     public void resumeConversion() {
         userPaused.set(false);
+        // Re-arm disk-space auto-pause: a user resume ends any disk-space
+        // pause in progress, so the monitor may auto-pause again on the next
+        // low-disk detection. Without this reset diskSpacePaused stays true
+        // and the monitor's re-arm CAS(false, true) never succeeds again.
+        // Auto-resume on disk recovery is unaffected: it is gated on
+        // userPaused, which is cleared above only by an explicit user action.
+        diskSpacePaused.set(false);
         if (paused.compareAndSet(true, false)) {
             synchronized (paused) {
                 paused.notifyAll();
@@ -644,6 +645,12 @@ public class ConversionEngine implements ProcessRegistry {
                     List<Runnable> pending = executorService.shutdownNow();
                     logger.warn("Cancelled {} pending tasks", pending.size());
 
+                    // Workers blocked in Process.waitFor survive shutdownNow;
+                    // destroy registered processes the same way
+                    // cancelConversion() does so blocked workers are released
+                    // and external tool processes are not orphaned.
+                    destroyActiveProcesses();
+
                     // Wait again after forcing shutdown
                     executorService.awaitTermination(5, TimeUnit.SECONDS);
                 }
@@ -683,14 +690,12 @@ public class ConversionEngine implements ProcessRegistry {
 
         // First, forcibly destroy all active processes
         // This is the most reliable way to stop conversions immediately
-        for (Map.Entry<String, Process> entry : activeProcesses.entrySet()) {
-            Process process = entry.getValue();
-            if (process != null && process.isAlive()) {
-                logger.info("Forcibly destroying process for conversion: {}", entry.getKey());
-                process.destroyForcibly();
-            }
-        }
-        activeProcesses.clear();
+        destroyActiveProcesses();
+
+        // Snapshot the conversions that are still active at cancel time.
+        // Cancelling a future below removes its entry from activeConversions
+        // synchronously on this thread, so the snapshot must be taken first.
+        Set<String> activeFileIds = Set.copyOf(activeConversions.keySet());
 
         // Then cancel all active futures. Note: CompletableFuture.cancel does NOT
         // interrupt worker threads; running tasks abort cooperatively by observing
@@ -703,8 +708,32 @@ public class ConversionEngine implements ProcessRegistry {
             }
         }
 
+        // Retain results of conversions that already completed (REQ-FL-2.2);
+        // drop only entries for conversions still active at cancel time -
+        // those entries are stale for the cancelled run, and the
+        // cancelRequested guard in the completion callback prevents late
+        // completions from repopulating them.
+        for (String fileId : activeFileIds) {
+            conversionResults.remove(fileId);
+        }
         activeConversions.clear();
-        conversionResults.clear();
+    }
+
+    /**
+     * Forcibly destroys all registered conversion processes.
+     * Used by {@link #cancelConversion()} and by the {@link #shutdown()}
+     * timeout path, where workers blocked in Process.waitFor survive
+     * executor interruption.
+     */
+    private void destroyActiveProcesses() {
+        for (Map.Entry<String, Process> entry : activeProcesses.entrySet()) {
+            Process process = entry.getValue();
+            if (process != null && process.isAlive()) {
+                logger.info("Forcibly destroying process for conversion: {}", entry.getKey());
+                process.destroyForcibly();
+            }
+        }
+        activeProcesses.clear();
     }
 
     /**
@@ -814,9 +843,19 @@ public class ConversionEngine implements ProcessRegistry {
                     autoPauseForDiskSpace();
                 }
             } else {
-                // Disk space OK - auto-resume only if the pause came from disk
-                // space (never clears an explicit user pause)
-                if (diskSpacePaused.compareAndSet(true, false)) {
+                // Disk space OK - reset the auto-pause flag (best-effort, re-arms
+                // future low-disk auto-pauses even under an explicit user pause)
+                diskSpacePaused.compareAndSet(true, false);
+                // Auto-resume whenever the engine is paused without an explicit
+                // user pause. This must NOT be gated on the flag CAS above: a
+                // user resume can interleave with an in-flight monitor auto-pause
+                // (monitor CAS'd the flag true, user resume reset it to false,
+                // monitor then re-paused the engine), leaving the engine paused
+                // with diskSpacePaused already false. In that state the CAS above
+                // fails and the engine would stay paused until manual action.
+                // autoResumeAfterDiskSpace re-checks userPaused, so an explicit
+                // user pause is still never lifted.
+                if (!userPaused.get() && paused.get()) {
                     logger.info("Disk space above threshold ({} MB available). Resuming conversions.",
                             availableSpace / (1024 * 1024));
                     autoResumeAfterDiskSpace();
@@ -904,8 +943,7 @@ public class ConversionEngine implements ProcessRegistry {
             // Step 1: Resolve effective settings for this file
             // Requirement REQ-007: Support per-file settings overrides
             FormatCategory category = file.format().getCategory();
-            Object resolvedSettings = resolveSettingsForFile(file, settings);
-            FileFormat outputFormat = getOutputFormatFromSettings(resolvedSettings, category);
+            FileFormat outputFormat = resolveOutputFormat(file, settings);
 
             if (file.hasCustomSettings()) {
                 logger.info("Using custom settings override for file: {}", file.fileName());
@@ -1020,8 +1058,8 @@ public class ConversionEngine implements ProcessRegistry {
                 // This fixes the issue where FFmpeg's output size grows faster than encoding
                 // progress
                 // for compressed video, causing the UI to reach 100% prematurely
-                logger.trace("Progress callback: fileId={}, percentage={:.2f}%, bytesProcessed={}, speed={}",
-                        fileId, percentage, bytesProcessed, speed);
+                logger.trace("Progress callback: fileId={}, percentage={}%, bytesProcessed={}, speed={}",
+                        fileId, String.format(Locale.US, "%.2f", percentage), bytesProcessed, speed);
 
                 // Update progress engine with direct percentage
                 progressEngine.updateProgressWithPercentage(fileId, percentage);
@@ -1223,9 +1261,10 @@ public class ConversionEngine implements ProcessRegistry {
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         logger.info("Retry interrupted for {}", file.fileName());
-                        return ConversionResult.failure(
+                        // Interrupted retry is a cancellation: route through the
+                        // cancelled factory so the explicit flag is set
+                        return ConversionResult.cancelled(
                                 fileId,
-                                "Conversion cancelled during retry",
                                 "", // No tool output for interrupted retry
                                 Duration.ZERO,
                                 file.size(),
@@ -1261,9 +1300,10 @@ public class ConversionEngine implements ProcessRegistry {
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         logger.info("Retry interrupted for {}", file.fileName());
-                        return ConversionResult.failure(
+                        // Interrupted retry is a cancellation: route through the
+                        // cancelled factory so the explicit flag is set
+                        return ConversionResult.cancelled(
                                 fileId,
-                                "Conversion cancelled during retry",
                                 "", // No tool output for interrupted retry
                                 Duration.ZERO,
                                 file.size(),
@@ -1367,7 +1407,7 @@ public class ConversionEngine implements ProcessRegistry {
         Map<String, Path> outputs = new HashMap<>();
         for (ConversionFile file : files) {
             ConversionSettings effective = settings.forFile(file);
-            Path proposed = generateOutputPath(file, effective, effective.outputFormat(file.format().getCategory()));
+            Path proposed = generateOutputPath(file, effective, resolveOutputFormat(file, settings));
             Path candidate = proposed;
             int suffix = 2;
             while (claimed.contains(canonicalPath(candidate))
@@ -1401,70 +1441,43 @@ public class ConversionEngine implements ProcessRegistry {
     }
 
     /**
-     * Resolves the effective settings for a conversion file.
-     * Priority: File override > Section settings based on category.
-     * Requirement REQ-007: Support per-file settings overrides.
-     * 
-     * @param file           the conversion file
-     * @param globalSettings the global conversion settings
-     * @return section-specific settings object (VideoSettings, AudioSettings, etc.)
-     *         or null for UNKNOWN
+     * Single canonical output-format resolution shared by output-path
+     * planning ({@link #planOutputPaths}) and conversion execution
+     * ({@link #performConversion}), so the planned file extension always
+     * matches the format actually converted to.
+     *
+     * <p>
+     * Resolution applies the per-file override merge
+     * ({@link ConversionSettings#forFile}, which also fills missing sections
+     * via {@code withDefaults}) and then falls back to the category default
+     * (MP4/MP3/PNG/PDF) when the merged section carries no output format.
+     * Because {@code forFile} fills missing sections, a null section is
+     * unreachable after the merge; only a section with a null output format
+     * needs the default fallback.
+     * </p>
+     *
+     * @param file     the file being converted (determines category and override)
+     * @param settings the global conversion settings
+     * @return the resolved output format, or null for UNKNOWN category
      */
-    private Object resolveSettingsForFile(ConversionFile file, ConversionSettings globalSettings) {
+    private FileFormat resolveOutputFormat(ConversionFile file, ConversionSettings settings) {
         FormatCategory category = file.format().getCategory();
-
-        // Check for file-specific override first
-        if (file.hasCustomSettings()) {
-            FileSettingsOverride override = file.settingsOverride();
-
-            return switch (category) {
-                case VIDEO -> override.videoSettings();
-                case AUDIO -> override.audioSettings();
-                case IMAGE -> override.imageSettings();
-                case DOCUMENT -> override.documentSettings();
-                case UNKNOWN -> null;
-            };
-        }
-
-        // Fall back to section settings
-        return switch (category) {
-            case VIDEO -> globalSettings.videoSettings();
-            case AUDIO -> globalSettings.audioSettings();
-            case IMAGE -> globalSettings.imageSettings();
-            case DOCUMENT -> globalSettings.documentSettings();
-            case UNKNOWN -> null;
-        };
+        FileFormat format = settings.forFile(file).outputFormat(category);
+        return format != null ? format : defaultFormatForCategory(category);
     }
 
     /**
-     * Extracts output format from resolved section-specific settings.
-     * 
-     * @param settings the section-specific settings object
-     * @param category the format category
-     * @return the output format, or default format if settings is null
-     */
-    private FileFormat getOutputFormatFromSettings(Object settings, FormatCategory category) {
-        if (settings == null) {
-            return getDefaultFormatForCategory(category);
-        }
-
-        return switch (category) {
-            case VIDEO -> ((VideoSettings) settings).outputFormat();
-            case AUDIO -> ((AudioSettings) settings).outputFormat();
-            case IMAGE -> ((ImageSettings) settings).outputFormat();
-            case DOCUMENT -> ((DocumentSettings) settings).outputFormat();
-            case UNKNOWN -> null;
-        };
-    }
-
-    /**
-     * Returns the default output format for a given category.
+     * Returns the default output format for a given category. Single source
+     * of truth for the category default (MP4/MP3/PNG/PDF), shared by output
+     * planning and execution here and by {@link ValidationEngine} so a
+     * validated request always resolves the same default the conversion
+     * will use.
      * 
      * @param category the format category
-     * @return default format (MP4 for video, MP3 for audio, PNG for image, PDF for
-     *         document)
+     * @return default format (MP4 for video, MP3 for audio, PNG for image,
+     *         PDF for document), or null for UNKNOWN category
      */
-    private FileFormat getDefaultFormatForCategory(FormatCategory category) {
+    static FileFormat defaultFormatForCategory(FormatCategory category) {
         return switch (category) {
             case VIDEO -> FileFormat.MP4;
             case AUDIO -> FileFormat.MP3;
@@ -1480,8 +1493,14 @@ public class ConversionEngine implements ProcessRegistry {
      * Returns early if the engine is shutting down or cancellation is requested.
      */
     private void waitIfPaused() {
-        while (paused.get() && !shuttingDown.get() && !cancelRequested.get()) {
-            synchronized (paused) {
+        // The condition is (re-)checked while holding the monitor so a resume
+        // that fires between the loop check and wait() cannot be missed - the
+        // waiter would otherwise sleep through the notifyAll and only wake on
+        // the 1s poll. Semantics are unchanged: 1s poll cap, and
+        // cancelRequested/shuttingDown still break the wait via the loop
+        // condition.
+        synchronized (paused) {
+            while (paused.get() && !shuttingDown.get() && !cancelRequested.get()) {
                 try {
                     logger.debug("Conversion task waiting - engine is paused");
                     paused.wait(1000); // Wake up periodically to check shutdown/cancel

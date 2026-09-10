@@ -481,7 +481,26 @@ class ProgressEngineTest {
         assertEquals(0, batchProgress.inProgressFiles());
         assertEquals(0, batchProgress.completedFiles());
         assertEquals(0, batchProgress.failedFiles());
-        assertEquals(1, batchProgress.pendingFiles()); // Cancelled not counted as pending
+        assertEquals(0, batchProgress.pendingFiles()); // Cancelled files are terminal, not pending
+        assertTrue(batchProgress.isComplete());
+    }
+
+    @Test
+    void testBatchProgress_CompletedAndCancelled_NoPhantomPending() {
+        // Given - a 2-file batch where one file completes and one is cancelled
+        progressEngine.startBatch(Arrays.asList("file1", "file2"), Map.of("file1", 1000L, "file2", 2000L));
+        progressEngine.startTracking("file1", 1000L);
+        progressEngine.completeTracking("file1", ConversionResult.success("file1", Path.of("/output"), null,
+                Duration.ofSeconds(1), 1000L, 800L, mockTool));
+        progressEngine.cancelTracking("file2");
+
+        // When
+        BatchProgress batchProgress = progressEngine.getBatchProgress();
+
+        // Then - cancelled files must not linger as phantom pending files
+        assertEquals(0, batchProgress.pendingFiles(), "Cancelled files must not count as pending");
+        assertEquals(0, batchProgress.inProgressFiles());
+        assertTrue(batchProgress.isComplete(), "Batch with only terminal files must be complete");
     }
 
     // Listener tests
@@ -492,8 +511,8 @@ class ProgressEngineTest {
         progressEngine.addProgressListener(progressListener);
         progressEngine.startTracking("file1", 1000L);
 
-        // When - add delay to exceed throttle interval (100ms)
-        Thread.sleep(150);
+        // When - add delay to exceed throttle interval (500ms)
+        Thread.sleep(600);
         progressEngine.updateProgress("file1", 500L);
 
         // Then
@@ -521,7 +540,7 @@ class ProgressEngineTest {
         progressEngine.startTracking("file1", 1000L);
 
         // When
-        Thread.sleep(150); // Exceed throttle interval
+        Thread.sleep(600); // Exceed throttle interval (500ms)
         progressEngine.removeProgressListener(progressListener);
         progressEngine.updateProgress("file1", 500L);
 
@@ -535,7 +554,7 @@ class ProgressEngineTest {
         progressEngine.addProgressListener(progressListener);
         progressEngine.startTracking("file1", 1000L);
 
-        // When - send multiple rapid updates within throttle interval (100ms)
+        // When - send multiple rapid updates within throttle interval (500ms)
         progressEngine.updateProgressWithPercentage("file1", 10.0);
         progressEngine.updateProgressWithPercentage("file1", 20.0);
         progressEngine.updateProgressWithPercentage("file1", 30.0);
@@ -545,10 +564,32 @@ class ProgressEngineTest {
         verify(progressListener, times(1)).accept(any(ConversionProgress.class));
 
         // When - wait for throttle interval to pass and send another update
-        Thread.sleep(150); // Exceed throttle interval (100ms)
+        Thread.sleep(600); // Exceed throttle interval (500ms)
         progressEngine.updateProgressWithPercentage("file1", 40.0);
 
         // Then - should now get the second notification
+        verify(progressListener, times(2)).accept(any(ConversionProgress.class));
+    }
+
+    @Test
+    void testProgressThrottling_MaxTwoUpdatesPerSecond() throws InterruptedException {
+        // Given - AGENTS.md spec: throttle UI updates to max 2/sec (500ms interval)
+        progressEngine.addProgressListener(progressListener);
+        progressEngine.startTracking("file1", 1000L);
+
+        // When - an update 300ms after the forced start notification
+        progressEngine.updateProgressWithPercentage("file1", 10.0);
+        Thread.sleep(300);
+        progressEngine.updateProgressWithPercentage("file1", 20.0);
+
+        // Then - 300ms < 500ms interval: the intermediate update is throttled
+        verify(progressListener, times(1)).accept(any(ConversionProgress.class));
+
+        // When - another update after the full 500ms interval has elapsed
+        Thread.sleep(350);
+        progressEngine.updateProgressWithPercentage("file1", 30.0);
+
+        // Then - the update is delivered
         verify(progressListener, times(2)).accept(any(ConversionProgress.class));
     }
 

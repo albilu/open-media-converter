@@ -29,7 +29,7 @@ public enum FileFormat {
     M4A(FormatCategory.AUDIO, null, List.of("m4a"), "audio/mp4"),
 
     // Image formats (REQ-006.3)
-    JPEG(FormatCategory.IMAGE, FormatCategory.DOCUMENT, List.of("jpg", "jpeg", "jpe"), "image/jpeg"),
+    JPEG(FormatCategory.IMAGE, null, List.of("jpg", "jpeg", "jpe"), "image/jpeg"),
     PNG(FormatCategory.IMAGE, null, List.of("png"), "image/png"),
     GIF(FormatCategory.IMAGE, null, List.of("gif"), "image/gif"),
     BMP(FormatCategory.IMAGE, null, List.of("bmp", "dib"), "image/bmp"),

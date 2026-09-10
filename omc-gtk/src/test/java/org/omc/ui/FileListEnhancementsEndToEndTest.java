@@ -13,6 +13,7 @@ import org.omc.model.ConversionProgress;
 import org.omc.model.ConversionResult;
 import org.omc.model.ConversionFile;
 import org.omc.model.PresetsBySection;
+import org.mockito.ArgumentCaptor;
 import org.omc.model.ApplicationState;
 import org.omc.model.FileListSortState;
 import org.omc.model.ConversionTool;
@@ -234,10 +235,15 @@ class FileListEnhancementsEndToEndTest {
         // Save sort state via controller
         controller.saveSortState(sortState);
 
-        // Verify StateManager was called to save
-        verify(stateManager, atLeastOnce()).saveState(argThat(state -> state.fileListSortState() != null &&
-                state.fileListSortState().sortField() == FileListSortState.SortField.NAME &&
-                state.fileListSortState().sortDir() == FileListSortState.SortDirection.DESCENDING));
+        // Verify StateManager was called to save via the atomic update
+        // primitive, and that the operator writes the expected sort state
+        ArgumentCaptor<java.util.function.UnaryOperator<ApplicationState>> operator =
+                ArgumentCaptor.forClass(java.util.function.UnaryOperator.class);
+        verify(stateManager, atLeastOnce()).updateState(operator.capture());
+        ApplicationState updated = operator.getValue().apply(ApplicationState.defaultState());
+        assertNotNull(updated.fileListSortState());
+        assertEquals(FileListSortState.SortField.NAME, updated.fileListSortState().sortField());
+        assertEquals(FileListSortState.SortDirection.DESCENDING, updated.fileListSortState().sortDir());
 
         // Step 3: Simulate app restart - load state
         lenient().when(stateManager.loadState()).thenReturn(currentState);

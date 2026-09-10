@@ -12,10 +12,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.omc.core.ProgressCallback;
 import org.omc.exception.ToolExecutionException;
@@ -508,6 +510,44 @@ class LibreOfficeServiceTest {
         // may not occur
         // This is acceptable - the test verifies truncation logic exists and works when
         // needed
+    }
+
+    // ========================================
+    // Execution timeout tests
+    // ========================================
+
+    /**
+     * A wedged soffice process must not hang the worker forever: the
+     * service must destroy the process and fail after the configured
+     * timeout, mirroring FFmpegService.
+     */
+    @Test
+    @Timeout(value = 30)
+    void testConvertDocument_HangingProcess_TimesOutAndFails() throws Exception {
+        String os = System.getProperty("os.name").toLowerCase();
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                os.contains("nix") || os.contains("nux") || os.contains("mac"),
+                "Requires POSIX executable scripts");
+
+        Path hangingSoffice = tempDir.resolve("soffice-hanging");
+        Files.writeString(hangingSoffice, "#!/bin/sh\nexec sleep 60\n");
+        Files.setPosixFilePermissions(hangingSoffice, PosixFilePermissions.fromString("rwxr-xr-x"));
+        LibreOfficeService hangingService = new LibreOfficeService(hangingSoffice);
+
+        Path input = tempDir.resolve("input.html");
+        Files.writeString(input, "<html><body>Test Document</body></html>");
+        Path output = tempDir.resolve("output.pdf");
+
+        long originalTimeout = LibreOfficeService.PROCESS_TIMEOUT_MILLIS;
+        LibreOfficeService.PROCESS_TIMEOUT_MILLIS = 1200;
+        try {
+            ToolExecutionException exception = assertThrows(ToolExecutionException.class,
+                    () -> hangingService.convertDocument(input, output, defaultSettings, noOpCallback));
+            assertTrue(exception.getMessage().contains("timed out"),
+                    "Timeout failure expected but got: " + exception.getMessage());
+        } finally {
+            LibreOfficeService.PROCESS_TIMEOUT_MILLIS = originalTimeout;
+        }
     }
 
     // ========================================

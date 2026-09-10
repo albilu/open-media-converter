@@ -78,11 +78,32 @@ public final class BatchProgress {
 
     /**
      * Creates an updated batch progress.
+     *
+     * <p>
+     * Equivalent to {@link #update(int, int, int, int, int, long, long, Instant)}
+     * with no cancelled files.
+     * </p>
      */
     public static BatchProgress update(int totalFiles, int completedFiles, int failedFiles,
             int inProgressFiles, long totalBytes, long processedBytes,
             Instant startTime) {
-        int pendingFiles = totalFiles - completedFiles - failedFiles - inProgressFiles;
+        return update(totalFiles, completedFiles, failedFiles, inProgressFiles, 0,
+                totalBytes, processedBytes, startTime);
+    }
+
+    /**
+     * Creates an updated batch progress.
+     *
+     * <p>
+     * Cancelled files are terminal: they are subtracted from the pending count
+     * so a batch whose remaining files are all cancelled reports zero pending
+     * files instead of phantom pending entries.
+     * </p>
+     */
+    public static BatchProgress update(int totalFiles, int completedFiles, int failedFiles,
+            int inProgressFiles, int cancelledFiles, long totalBytes, long processedBytes,
+            Instant startTime) {
+        int pendingFiles = totalFiles - completedFiles - failedFiles - inProgressFiles - cancelledFiles;
 
         Instant now = Instant.now();
         Duration elapsed = Duration.between(startTime, now);
@@ -162,9 +183,17 @@ public final class BatchProgress {
 
     /**
      * Checks if the batch is complete.
+     *
+     * <p>
+     * The batch is complete when no files are pending or in progress, i.e.
+     * every file reached a terminal state (completed, failed or cancelled).
+     * Cancelled files count towards completion: {@code completedFiles +
+     * failedFiles >= totalFiles} alone would leave a batch with cancellations
+     * permanently incomplete.
+     * </p>
      */
     public boolean isComplete() {
-        return (completedFiles + failedFiles) >= totalFiles;
+        return pendingFiles == 0 && inProgressFiles == 0;
     }
 
     /**

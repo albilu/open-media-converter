@@ -12,10 +12,13 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Unit tests for ToolDiscovery service.
@@ -365,6 +368,65 @@ class ToolDiscoveryTest {
         assertEquals(config1.getFfmpegPath(), config2.getFfmpegPath());
         assertEquals(config1.getPandocPath(), config2.getPandocPath());
         assertEquals(config1.getLibreOfficePath(), config2.getLibreOfficePath());
+    }
+
+    @Test
+    void testFindSystemBinary_EmptyPathSegment_NotResolvedAgainstCwd() throws IOException {
+        assumeTrue(isUnixLike(), "Requires POSIX executable scripts");
+
+        // A binary name that never exists in the well-known system
+        // directories, so discovery can only reach it via $PATH
+        String binaryName = "omc-empty-path-segment-probe";
+
+        // The trust probe executes no-slash commands via $PATH lookup, so
+        // plant the executable in a writable directory on this JVM's $PATH
+        // (outside SYSTEM_PATHS) to make the probe deterministically trusted
+        Path pathDir = findWritablePathEntry();
+        assumeTrue(pathDir != null, "No writable $PATH entry outside SYSTEM_PATHS; skipping");
+        Path pathProbe = pathDir.resolve(binaryName);
+        // Plant a matching file in the current working directory: an empty
+        // $PATH segment resolves the candidate against CWD and then executes
+        // it (untrusted execution vector)
+        Path cwdProbe = Path.of(binaryName);
+        try {
+            Files.writeString(pathProbe, "#!/bin/sh\necho 'probe 1.0'\n");
+            Files.setPosixFilePermissions(pathProbe, PosixFilePermissions.fromString("rwxr-xr-x"));
+            Files.writeString(cwdProbe, "#!/bin/sh\necho 'probe 1.0'\n");
+            Files.setPosixFilePermissions(cwdProbe, PosixFilePermissions.fromString("rwxr-xr-x"));
+
+            Path emptyDir = Files.createDirectories(tempDir.resolve("empty-path-entry"));
+            // Leading ':' produces an empty first segment in the split
+            String pathEnv = ":" + emptyDir.toAbsolutePath();
+
+            Optional<Path> found = toolDiscovery.findSystemBinary(binaryName, pathEnv);
+            assertTrue(found.isEmpty(),
+                    "empty $PATH segment must be skipped, not resolved against the working directory");
+        } finally {
+            Files.deleteIfExists(cwdProbe);
+            Files.deleteIfExists(pathProbe);
+        }
+    }
+
+    /**
+     * Returns the first user-writable directory on this JVM's $PATH that is
+     * not one of the well-known SYSTEM_PATHS directories.
+     */
+    private static Path findWritablePathEntry() {
+        String pathEnv = System.getenv("PATH");
+        if (pathEnv == null) {
+            return null;
+        }
+        List<String> systemPaths = List.of("/usr/bin/", "/usr/local/bin/", "/opt/bin/", "/snap/bin/");
+        for (String entry : pathEnv.split(":")) {
+            if (entry.isBlank() || systemPaths.contains(entry) || !Path.of(entry).isAbsolute()) {
+                continue;
+            }
+            Path dir = Path.of(entry);
+            if (Files.isDirectory(dir) && Files.isWritable(dir)) {
+                return dir;
+            }
+        }
+        return null;
     }
 
     // Helper methods

@@ -16,6 +16,9 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+
 /**
  * Comprehensive tests for BatchConversionResult model.
  * Requirement REQ-004.2: Batch conversion with aggregated results.
@@ -455,5 +458,30 @@ class BatchConversionResultTest {
                         ConversionTool.FFMPEG),
                 ConversionResult.failure("file3", "Conversion failed", null, Duration.ofSeconds(10), 0L,
                         ConversionTool.FFMPEG));
+    }
+
+    @Test
+    void jsonDeserialization_WithoutResults_DefaultsToEmptyList() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+
+        // Given: JSON with no results key at all
+        BatchConversionResult batch = mapper.readValue("{}", BatchConversionResult.class);
+
+        // Then: results must be an empty list, not an NPE
+        assertNotNull(batch.results());
+        assertTrue(batch.results().isEmpty());
+        assertEquals(0, batch.totalCount());
+    }
+
+    @Test
+    void jsonDeserialization_WithNullResults_DefaultsToEmptyList() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+
+        // Given: JSON carrying an explicit null results list
+        BatchConversionResult batch = mapper.readValue("{\"results\": null}", BatchConversionResult.class);
+
+        // Then: results must be an empty list, not an NPE
+        assertNotNull(batch.results());
+        assertTrue(batch.results().isEmpty());
     }
 }

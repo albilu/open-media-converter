@@ -415,4 +415,135 @@ class AudioSettingsTest {
         assertTrue(flac.isValid());
         assertTrue(copy.isValid());
     }
+
+    // ========== Missing-Field Safe Defaults (JSON deserialization) ==========
+
+    @Test
+    void jsonDeserialization_WithMinimalJson_ShouldUseBuilderDefaultsForAllMissingFields() throws Exception {
+        // Given: settings/preset JSON carrying only the output format
+        String json = "{\"outputFormat\":\"MP3\"}";
+
+        // When
+        AudioSettings deserialized = objectMapper.readValue(json, AudioSettings.class);
+
+        // Then: every missing field must deserialize to its Builder default
+        assertEquals("libmp3lame", deserialized.codec());
+        assertEquals(192, deserialized.bitrate());
+        assertEquals(-1, deserialized.sampleRate());
+        assertEquals(-1, deserialized.channels());
+        assertEquals(5, deserialized.quality());
+        assertEquals(FileFormat.MP3, deserialized.outputFormat());
+        assertTrue(deserialized.isValid(), "minimal JSON must deserialize to a valid settings object");
+    }
+
+    @Test
+    void jsonDeserialization_WithEmptyObject_ShouldUseBuilderDefaultsAndKeepNullFormat() throws Exception {
+        // Given: JSON with no keys at all (the builder cannot build a null
+        // format; deserialization must not invent one either)
+        String json = "{}";
+
+        // When
+        AudioSettings deserialized = objectMapper.readValue(json, AudioSettings.class);
+
+        // Then: all other fields still fall back to Builder defaults
+        assertEquals("libmp3lame", deserialized.codec());
+        assertEquals(192, deserialized.bitrate());
+        assertEquals(-1, deserialized.sampleRate());
+        assertEquals(-1, deserialized.channels());
+        assertEquals(5, deserialized.quality());
+        assertNull(deserialized.outputFormat());
+        assertFalse(deserialized.isValid(), "null outputFormat must stay invalid");
+    }
+
+    @Test
+    void jsonDeserialization_WithExplicitValues_ShouldNotAlterThem() throws Exception {
+        // Given: complete JSON with explicit values
+        String json = "{\"codec\":\"copy\",\"bitrate\":256,\"sampleRate\":48000,"
+                + "\"channels\":2,\"quality\":3,\"outputFormat\":\"OGG\"}";
+
+        // When
+        AudioSettings deserialized = objectMapper.readValue(json, AudioSettings.class);
+
+        // Then: explicit values are preserved exactly
+        assertEquals("copy", deserialized.codec());
+        assertEquals(256, deserialized.bitrate());
+        assertEquals(48000, deserialized.sampleRate());
+        assertEquals(2, deserialized.channels());
+        assertEquals(3, deserialized.quality());
+        assertEquals(FileFormat.OGG, deserialized.outputFormat());
+    }
+
+    @Test
+    void jsonDeserialization_WithExplicitInvalidBitrate_ShouldNotBeFixed() throws Exception {
+        // Given: an explicit out-of-range bitrate (missing-key defaulting must
+        // not "fix" explicit values)
+        String json = "{\"bitrate\":0,\"outputFormat\":\"MP3\"}";
+
+        // When
+        AudioSettings deserialized = objectMapper.readValue(json, AudioSettings.class);
+
+        // Then: the explicit 0 stays and remains invalid
+        assertEquals(0, deserialized.bitrate());
+        assertFalse(deserialized.isValid());
+    }
+
+    // ========== withOutputFormat Tests ==========
+
+    @Test
+    void withOutputFormat_ShouldPreserveAllFields() {
+        // Given: AudioSettings with every field set to a non-default value
+        AudioSettings original = AudioSettings.builder()
+                .codec("aac")
+                .bitrate(256)
+                .sampleRate(48000)
+                .channels(2)
+                .quality(3)
+                .outputFormat(FileFormat.AAC)
+                .build();
+
+        // When: Changing only the output format
+        AudioSettings updated = original.withOutputFormat(FileFormat.WAV);
+
+        // Then: All fields except the format must be preserved; the codec is
+        // rewritten for container compatibility exactly like Builder.outputFormat
+        // (aac in a WAV container becomes pcm_s16le)
+        assertEquals(FileFormat.WAV, updated.outputFormat());
+        assertEquals("pcm_s16le", updated.codec());
+        assertEquals(256, updated.bitrate());
+        assertEquals(48000, updated.sampleRate());
+        assertEquals(2, updated.channels());
+        assertEquals(3, updated.quality());
+    }
+
+    @Test
+    void withOutputFormat_WithContainerCompatibleCodec_ShouldKeepCodec() {
+        // Given: Codec already compatible with the target container
+        AudioSettings original = AudioSettings.builder()
+                .codec("flac")
+                .outputFormat(FileFormat.FLAC)
+                .build();
+
+        // When: Re-selecting a container the codec fits
+        AudioSettings updated = original.withOutputFormat(FileFormat.FLAC);
+
+        // Then: Codec is kept unchanged
+        assertEquals("flac", updated.codec());
+        assertEquals(FileFormat.FLAC, updated.outputFormat());
+    }
+
+    @Test
+    void withOutputFormat_WithCopyCodec_ShouldRetainCopyCodec() {
+        // Given: Stream-copy codec (compatibility depends on the source stream)
+        AudioSettings original = AudioSettings.builder()
+                .codec("copy")
+                .outputFormat(FileFormat.MP3)
+                .build();
+
+        // When: Changing the output format
+        AudioSettings updated = original.withOutputFormat(FileFormat.OGG);
+
+        // Then: Copy codec must survive the format change
+        assertEquals("copy", updated.codec());
+        assertEquals(FileFormat.OGG, updated.outputFormat());
+    }
 }

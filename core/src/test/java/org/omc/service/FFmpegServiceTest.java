@@ -2663,6 +2663,129 @@ class FFmpegServiceTest {
         }
 
         // ========================================
+        // ffprobe helper timeout / interrupt tests
+        // ========================================
+
+        /**
+         * Creates an executable ffprobe stub that closes its output streams
+         * (so readLine reaches EOF; stderr is merged into stdout) and then
+         * never exits.
+         */
+        private Path createHangingFfprobeStub() throws IOException {
+                Path stub = tempDir.resolve("ffprobe-hanging");
+                Files.writeString(stub, "#!/bin/sh\nexec 1>&- 2>&-\nexec sleep 60\n");
+                Files.setPosixFilePermissions(stub,
+                                java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+                return stub;
+        }
+
+        private static java.lang.reflect.Method ffprobeHelper(String name) throws Exception {
+                java.lang.reflect.Method method = FFmpegService.class.getDeclaredMethod(name, Path.class);
+                method.setAccessible(true);
+                return method;
+        }
+
+        @Test
+        void testGetDuration_Interrupted_PreservesInterruptFlag() throws Exception {
+                Path stub = createHangingFfprobeStub();
+                FFmpegService hangingService = new FFmpegService(stub, stub);
+                java.lang.reflect.Method getDuration = ffprobeHelper("getDuration");
+
+                Thread worker = new Thread(() -> {
+                        try {
+                                getDuration.invoke(hangingService, tempDir.resolve("input.mp4"));
+                        } catch (ReflectiveOperationException e) {
+                                // method returns null on interrupt; only unexpected here
+                        }
+                });
+                worker.start();
+                Thread.sleep(500); // let the worker block in waitFor()
+                worker.interrupt();
+                worker.join(5000);
+
+                assertFalse(worker.isAlive(), "getDuration must return after interruption");
+                assertTrue(worker.isInterrupted(), "interrupt flag must be restored by getDuration");
+        }
+
+        @Test
+        void testGetTotalFrames_Interrupted_PreservesInterruptFlag() throws Exception {
+                Path stub = createHangingFfprobeStub();
+                FFmpegService hangingService = new FFmpegService(stub, stub);
+                java.lang.reflect.Method getTotalFrames = ffprobeHelper("getTotalFrames");
+
+                Thread worker = new Thread(() -> {
+                        try {
+                                getTotalFrames.invoke(hangingService, tempDir.resolve("input.mp4"));
+                        } catch (ReflectiveOperationException e) {
+                                // method returns -1 on interrupt; only unexpected here
+                        }
+                });
+                worker.start();
+                Thread.sleep(500); // let the worker block in waitFor()
+                worker.interrupt();
+                worker.join(5000);
+
+                assertFalse(worker.isAlive(), "getTotalFrames must return after interruption");
+                assertTrue(worker.isInterrupted(), "interrupt flag must be restored by getTotalFrames");
+        }
+
+        @Test
+        void testGetDuration_NeverExitingProcess_ReturnsNullAfterTimeout() throws Exception {
+                Path stub = createHangingFfprobeStub();
+                FFmpegService hangingService = new FFmpegService(stub, stub);
+                java.lang.reflect.Method getDuration = ffprobeHelper("getDuration");
+
+                long originalTimeout = FFmpegService.FFPROBE_TIMEOUT_MILLIS;
+                FFmpegService.FFPROBE_TIMEOUT_MILLIS = 800;
+                Object[] result = { "unset" };
+                Thread worker = new Thread(() -> {
+                        try {
+                                result[0] = getDuration.invoke(hangingService, tempDir.resolve("input.mp4"));
+                        } catch (ReflectiveOperationException e) {
+                                result[0] = e;
+                        }
+                });
+                worker.start();
+                try {
+                        worker.join(10000);
+                        assertFalse(worker.isAlive(), "getDuration must be bounded by the ffprobe timeout");
+                        assertNull(result[0], "getDuration must return null on timeout");
+                } finally {
+                        FFmpegService.FFPROBE_TIMEOUT_MILLIS = originalTimeout;
+                        worker.interrupt(); // unwedge the worker if the assertion failed
+                        worker.join(5000);
+                }
+        }
+
+        @Test
+        void testGetTotalFrames_NeverExitingProcess_ReturnsMinusOneAfterTimeout() throws Exception {
+                Path stub = createHangingFfprobeStub();
+                FFmpegService hangingService = new FFmpegService(stub, stub);
+                java.lang.reflect.Method getTotalFrames = ffprobeHelper("getTotalFrames");
+
+                long originalTimeout = FFmpegService.FFPROBE_TIMEOUT_MILLIS;
+                FFmpegService.FFPROBE_TIMEOUT_MILLIS = 800;
+                Object[] result = { "unset" };
+                Thread worker = new Thread(() -> {
+                        try {
+                                result[0] = getTotalFrames.invoke(hangingService, tempDir.resolve("input.mp4"));
+                        } catch (ReflectiveOperationException e) {
+                                result[0] = e;
+                        }
+                });
+                worker.start();
+                try {
+                        worker.join(10000);
+                        assertFalse(worker.isAlive(), "getTotalFrames must be bounded by the ffprobe timeout");
+                        assertEquals(-1L, result[0], "getTotalFrames must return -1 on timeout");
+                } finally {
+                        FFmpegService.FFPROBE_TIMEOUT_MILLIS = originalTimeout;
+                        worker.interrupt(); // unwedge the worker if the assertion failed
+                        worker.join(5000);
+                }
+        }
+
+        // ========================================
         // Helper Methods for Integration Tests
         // ========================================
 

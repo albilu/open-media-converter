@@ -57,22 +57,26 @@ public final class DocumentSettings {
     @JsonCreator
     private DocumentSettings(
             @JsonProperty("templatePath") Path templatePath,
-            @JsonProperty("preserveFormatting") boolean preserveFormatting,
+            @JsonProperty("preserveFormatting") Boolean preserveFormatting,
             @JsonProperty("embedFonts") boolean embedFonts,
             @JsonProperty("generateTableOfContents") boolean generateTableOfContents,
-            @JsonProperty("marginTop") int marginTop,
-            @JsonProperty("marginBottom") int marginBottom,
-            @JsonProperty("marginLeft") int marginLeft,
-            @JsonProperty("marginRight") int marginRight,
+            @JsonProperty("marginTop") Integer marginTop,
+            @JsonProperty("marginBottom") Integer marginBottom,
+            @JsonProperty("marginLeft") Integer marginLeft,
+            @JsonProperty("marginRight") Integer marginRight,
             @JsonProperty("outputFormat") FileFormat outputFormat) {
+        // Missing/null keys must fall back to the Builder defaults (safe
+        // defaults for missing fields), not to primitive zero/false values;
+        // embedFonts and generateTableOfContents keep primitives because their
+        // Builder defaults (false) match the missing-key default already
         this.templatePath = templatePath;
-        this.preserveFormatting = preserveFormatting;
+        this.preserveFormatting = preserveFormatting != null ? preserveFormatting : true;
         this.embedFonts = embedFonts;
         this.generateTableOfContents = generateTableOfContents;
-        this.marginTop = marginTop;
-        this.marginBottom = marginBottom;
-        this.marginLeft = marginLeft;
-        this.marginRight = marginRight;
+        this.marginTop = marginTop != null ? marginTop : 25;
+        this.marginBottom = marginBottom != null ? marginBottom : 25;
+        this.marginLeft = marginLeft != null ? marginLeft : 25;
+        this.marginRight = marginRight != null ? marginRight : 25;
         this.outputFormat = outputFormat;
     }
 

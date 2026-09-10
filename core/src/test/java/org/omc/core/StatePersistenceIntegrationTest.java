@@ -278,9 +278,12 @@ class StatePersistenceIntegrationTest {
                 assertEquals(1920, loadedVideo.resolution().getWidth());
                 assertEquals(1080, loadedVideo.resolution().getHeight());
 
-                // Verify audio settings
+                // Verify audio settings. The builder rewrites "opus" for the
+                // MP3 container (MediaCodecPolicy.audioCodec maps the known
+                // opus alias to the container default libmp3lame); persistence
+                // must round-trip that rewritten value unchanged.
                 AudioSettings loadedAudio = loadedSettings.audioSettings();
-                assertEquals("opus", loadedAudio.codec());
+                assertEquals("libmp3lame", loadedAudio.codec());
                 assertEquals(192, loadedAudio.bitrate());
         }
 

@@ -751,4 +751,132 @@ class ConversionSettingsTest {
         assertTrue(toString.contains("deleteOriginalFile=true"));
         assertTrue(toString.contains("ConversionSettings{"));
     }
+
+    @Test
+    void builderOutputFormat_WithExistingDocumentSettings_ShouldPreserveDocumentFields() {
+        // Given: Document settings with customized margins, template and flags
+        Path templatePath = Path.of("/templates/custom-template.docx");
+        DocumentSettings original = DocumentSettings.builder()
+                .marginTop(50)
+                .marginBottom(50)
+                .marginLeft(50)
+                .marginRight(50)
+                .templatePath(templatePath)
+                .embedFonts(true)
+                .generateTableOfContents(true)
+                .preserveFormatting(false)
+                .outputFormat(FileFormat.PDF)
+                .build();
+        ConversionSettings.Builder builder = ConversionSettings.builder()
+                .documentSettings(original);
+
+        // When: Changing the document output format via the top-level builder
+        ConversionSettings settings = builder
+                .outputFormat(FileFormat.HTML)
+                .build();
+
+        // Then: All document fields except the format must be preserved
+        assertEquals(FileFormat.HTML, settings.documentSettings().outputFormat());
+        assertEquals(50, settings.documentSettings().marginTop());
+        assertEquals(50, settings.documentSettings().marginBottom());
+        assertEquals(50, settings.documentSettings().marginLeft());
+        assertEquals(50, settings.documentSettings().marginRight());
+        assertEquals(templatePath, settings.documentSettings().templatePath());
+        assertTrue(settings.documentSettings().embedFonts());
+        assertTrue(settings.documentSettings().generateTableOfContents());
+        assertFalse(settings.documentSettings().preserveFormatting());
+    }
+
+    @Test
+    void builderOutputFormat_WithExistingImageSettings_ShouldPreserveResolutionAndResizeMode() {
+        // Given: Image settings with every field configured to a non-default value
+        ImageSettings original = ImageSettings.builder()
+                .resolution(new Resolution(1920, 1080))
+                .resizeMode(ResizeMode.LANCZOS)
+                .quality(90)
+                .maintainAspectRatio(false)
+                .compressionLevel(7)
+                .rotation(ImageRotation.CLOCKWISE_90)
+                .flip(ImageFlip.HORIZONTAL)
+                .outputFormat(FileFormat.PNG)
+                .build();
+        ConversionSettings.Builder builder = ConversionSettings.builder()
+                .imageSettings(original);
+
+        // When: Changing the image output format via the top-level builder
+        ConversionSettings settings = builder
+                .outputFormat(FileFormat.JPEG)
+                .build();
+
+        // Then: All image fields except the format must be preserved
+        assertEquals(FileFormat.JPEG, settings.imageSettings().outputFormat());
+        assertEquals(90, settings.imageSettings().quality());
+        assertEquals(new Resolution(1920, 1080), settings.imageSettings().resolution());
+        assertFalse(settings.imageSettings().maintainAspectRatio());
+        assertEquals(7, settings.imageSettings().compressionLevel());
+        assertEquals(ResizeMode.LANCZOS, settings.imageSettings().resizeMode());
+        assertEquals(ImageRotation.CLOCKWISE_90, settings.imageSettings().rotation());
+        assertEquals(ImageFlip.HORIZONTAL, settings.imageSettings().flip());
+    }
+
+    @Test
+    void builderOutputFormat_WithExistingVideoSettings_ShouldPreserveVideoFields() {
+        // Given: Video settings with every field set to a non-default value
+        VideoSettings original = VideoSettings.builder()
+                .codec("libx265")
+                .bitrate(8000)
+                .resolution(new Resolution(1280, 720))
+                .frameRate(60)
+                .preset("slow")
+                .crf(20)
+                .aspectRatio(AspectRatio.RATIO_16_9)
+                .outputFormat(FileFormat.MP4)
+                .build();
+        ConversionSettings.Builder builder = ConversionSettings.builder()
+                .videoSettings(original);
+
+        // When: Changing the video output format via the top-level builder
+        ConversionSettings settings = builder
+                .outputFormat(FileFormat.MKV)
+                .build();
+
+        // Then: All 8 video fields except the format must be preserved
+        assertEquals(FileFormat.MKV, settings.videoSettings().outputFormat());
+        assertEquals("libx265", settings.videoSettings().codec());
+        assertEquals(8000, settings.videoSettings().bitrate());
+        assertEquals(new Resolution(1280, 720), settings.videoSettings().resolution());
+        assertEquals(60, settings.videoSettings().frameRate());
+        assertEquals("slow", settings.videoSettings().preset());
+        assertEquals(20, settings.videoSettings().crf());
+        assertEquals(AspectRatio.RATIO_16_9, settings.videoSettings().aspectRatio());
+    }
+
+    @Test
+    void builderOutputFormat_WithExistingAudioSettings_ShouldPreserveAudioFields() {
+        // Given: Audio settings with every field set to a non-default value
+        AudioSettings original = AudioSettings.builder()
+                .codec("aac")
+                .bitrate(256)
+                .sampleRate(48000)
+                .channels(2)
+                .quality(3)
+                .outputFormat(FileFormat.AAC)
+                .build();
+        ConversionSettings.Builder builder = ConversionSettings.builder()
+                .audioSettings(original);
+
+        // When: Changing the audio output format via the top-level builder
+        ConversionSettings settings = builder
+                .outputFormat(FileFormat.OGG)
+                .build();
+
+        // Then: All 6 audio fields except the format must be preserved; the
+        // codec is rewritten for container compatibility (aac -> libvorbis in OGG)
+        assertEquals(FileFormat.OGG, settings.audioSettings().outputFormat());
+        assertEquals("libvorbis", settings.audioSettings().codec());
+        assertEquals(256, settings.audioSettings().bitrate());
+        assertEquals(48000, settings.audioSettings().sampleRate());
+        assertEquals(2, settings.audioSettings().channels());
+        assertEquals(3, settings.audioSettings().quality());
+    }
 }

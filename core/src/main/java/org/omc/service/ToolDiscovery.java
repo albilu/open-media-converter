@@ -414,6 +414,17 @@ public class ToolDiscovery {
      * @return the path to the binary, or empty if not found
      */
     private Optional<Path> findSystemBinary(String binaryName) {
+        return findSystemBinary(binaryName, System.getenv("PATH"));
+    }
+
+    /**
+     * Finds a binary in system paths, probing an explicit $PATH value.
+     *
+     * @param binaryName the name of the binary
+     * @param pathEnv    the PATH environment variable to search
+     * @return the path to the binary, or empty if not found
+     */
+    Optional<Path> findSystemBinary(String binaryName, String pathEnv) {
         // Check well-known system directories FIRST so a malicious binary
         // planted early on $PATH cannot hijack discovery (PATH hijack).
         for (String systemPath : SYSTEM_PATHS) {
@@ -425,10 +436,15 @@ public class ToolDiscovery {
 
         // Fall back to $PATH entries, still requiring the binary to report a
         // parseable version (proves it is the real tool, not a shim).
-        String pathEnv = System.getenv("PATH");
+        // Empty segments are skipped: Paths.get("", name) resolves relative
+        // to the working directory and would probe/execute an untrusted
+        // binary planted there.
         if (pathEnv != null) {
             String[] paths = pathEnv.split(":");
             for (String pathDir : paths) {
+                if (pathDir.isBlank()) {
+                    continue; // Never resolve against the working directory
+                }
                 Path binaryPath = Paths.get(pathDir, binaryName);
                 if (isTrustedBinary(binaryPath, binaryName)) {
                     return Optional.of(binaryPath);

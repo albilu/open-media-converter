@@ -5,12 +5,20 @@ import org.omc.model.ConversionStatus;
 import org.omc.model.FileSettingsOverride;
 import org.omc.model.VideoSettings;
 import org.omc.model.FileFormat;
+import org.omc.model.MediaMetadata;
+import org.omc.model.VideoMetadata;
+import org.omc.model.AudioMetadata;
+import org.omc.model.ImageMetadata;
+import org.omc.model.DocumentMetadata;
+import org.omc.util.JsonUtils;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 
 /**
  * Unit tests for ConversionFile class.
@@ -320,7 +328,13 @@ class ConversionFileTest {
                 .withSettingsOverride(override);
 
         // When: Set metadata
-        Object metadata = new Object();
+        MediaMetadata metadata = VideoMetadata.builder()
+                .duration(Duration.ofSeconds(120))
+                .width(1920)
+                .height(1080)
+                .videoCodec("h264")
+                .frameRate(30.0)
+                .build();
         ConversionFile result = original.withMetadata(metadata);
 
         // Then: New instance with metadata, original unchanged, settings preserved
@@ -595,7 +609,7 @@ class ConversionFileTest {
         ConversionFile afterStatus = original.withStatus(ConversionStatus.IN_PROGRESS);
         ConversionFile afterProgress = original.withProgress(75);
         ConversionFile afterError = original.withError("Test error");
-        ConversionFile afterMetadata = original.withMetadata(new Object());
+        ConversionFile afterMetadata = original.withMetadata(null);
         VideoSettings settings = VideoSettings.builder().build();
         FileSettingsOverride override = FileSettingsOverride.forVideo("Test", settings);
         ConversionFile afterSettings = original.withSettingsOverride(override);
@@ -611,5 +625,313 @@ class ConversionFileTest {
         assertEquals(outputPath, afterMetadata.outputPath().get());
         assertTrue(afterSettings.outputPath().isPresent());
         assertEquals(outputPath, afterSettings.outputPath().get());
+    }
+
+    @Test
+    void jsonDeserialization_WithoutStatus_DefaultsToPending() throws Exception {
+        // Given: Old session file JSON without a status field
+        String json = """
+                {
+                  "id": "legacy-id",
+                  "path": "/test/file.mp4",
+                  "format": "MP4",
+                  "size": 1024
+                }
+                """;
+
+        // When: Deserialize
+        ConversionFile file = objectMapper.readValue(json, ConversionFile.class);
+
+        // Then: Status must never be null (UI switches on it)
+        assertEquals(ConversionStatus.PENDING, file.status());
+    }
+
+    @Test
+    void jsonDeserialization_WithNullStatus_DefaultsToPending() throws Exception {
+        // Given: Session file JSON carrying an explicit null status
+        String json = """
+                {
+                  "id": "legacy-id",
+                  "path": "/test/file.mp4",
+                  "format": "MP4",
+                  "size": 1024,
+                  "status": null
+                }
+                """;
+
+        // When: Deserialize
+        ConversionFile file = objectMapper.readValue(json, ConversionFile.class);
+
+        // Then: null status resolves to PENDING
+        assertEquals(ConversionStatus.PENDING, file.status());
+    }
+
+    // ==================== Metadata Polymorphic JSON Tests ====================
+
+    @Test
+    void jsonSerialization_WithVideoMetadata_ShouldEmitTypeDiscriminator() throws Exception {
+        // Given: ConversionFile with typed VideoMetadata
+        MediaMetadata metadata = VideoMetadata.builder()
+                .duration(Duration.ofSeconds(120))
+                .width(1920)
+                .height(1080)
+                .videoCodec("h264")
+                .frameRate(30.0)
+                .build();
+        ConversionFile file = ConversionFile.create(testPath, testFormat, testSize)
+                .withMetadata(metadata);
+
+        // When: Serialize with the shared JsonUtils mapper
+        String json = JsonUtils.getObjectMapper().writeValueAsString(file);
+
+        // Then: The metadata object must carry the polymorphic "type" property
+        JsonNode metadataNode = JsonUtils.getObjectMapper().readTree(json).get("metadata");
+        assertNotNull(metadataNode);
+        assertNotNull(metadataNode.get("type"));
+        assertEquals("video", metadataNode.get("type").asText());
+    }
+
+    @Test
+    void jsonRoundtrip_WithVideoMetadata_ShouldPreserveTypedMetadata() throws Exception {
+        // Given: ConversionFile with typed VideoMetadata (non-default values on
+        // every field so all of them traverse JSON)
+        VideoMetadata metadata = VideoMetadata.builder()
+                .duration(Duration.ofSeconds(120))
+                .width(1920)
+                .height(1080)
+                .videoCodec("h264")
+                .audioCodec("aac")
+                .videoBitrate(8_000)
+                .audioBitrate(192)
+                .frameRate(30.0)
+                .build();
+        ConversionFile file = ConversionFile.create(testPath, testFormat, testSize)
+                .withMetadata(metadata);
+
+        // When: Round-trip through JSON
+        String json = JsonUtils.getObjectMapper().writeValueAsString(file);
+        ConversionFile deserialized = JsonUtils.getObjectMapper().readValue(json, ConversionFile.class);
+
+        // Then: The metadata type survives (no LinkedHashMap degradation)
+        JsonNode metadataNode = JsonUtils.getObjectMapper().readTree(json).get("metadata");
+        assertNotNull(metadataNode);
+        assertEquals("video", metadataNode.get("type").asText());
+        MediaMetadata restored = deserialized.metadata();
+        assertNotNull(restored);
+        VideoMetadata video = assertInstanceOf(VideoMetadata.class, restored);
+        assertEquals(Duration.ofSeconds(120), video.getDuration());
+        assertEquals(1920, video.getWidth());
+        assertEquals(1080, video.getHeight());
+        assertEquals("h264", video.getVideoCodec());
+        assertEquals("aac", video.getAudioCodec());
+        assertEquals(8_000L, video.getVideoBitrate());
+        assertEquals(192L, video.getAudioBitrate());
+        assertEquals(30.0, video.getFrameRate());
+        assertEquals(metadata, restored);
+    }
+
+    @Test
+    void jsonRoundtrip_WithAudioMetadata_ShouldPreserveTypedMetadata() throws Exception {
+        // Given: ConversionFile with typed AudioMetadata
+        AudioMetadata metadata = AudioMetadata.builder()
+                .duration(Duration.ofSeconds(180))
+                .codec("aac")
+                .bitrate(128000)
+                .sampleRate(44100)
+                .channels(2)
+                .build();
+        ConversionFile file = ConversionFile.create(testPath, testFormat, testSize)
+                .withMetadata(metadata);
+
+        // When: Round-trip through JSON
+        String json = JsonUtils.getObjectMapper().writeValueAsString(file);
+        JsonNode metadataNode = JsonUtils.getObjectMapper().readTree(json).get("metadata");
+        assertNotNull(metadataNode);
+        assertEquals("audio", metadataNode.get("type").asText());
+        ConversionFile deserialized = JsonUtils.getObjectMapper().readValue(json, ConversionFile.class);
+
+        // Then: The metadata type survives (no LinkedHashMap degradation)
+        MediaMetadata restored = deserialized.metadata();
+        assertNotNull(restored);
+        assertInstanceOf(AudioMetadata.class, restored);
+        AudioMetadata audioRestored = (AudioMetadata) restored;
+        assertEquals(metadata.getDuration(), audioRestored.getDuration());
+        assertEquals(metadata.getCodec(), audioRestored.getCodec());
+        assertEquals(metadata.getBitrate(), audioRestored.getBitrate());
+        assertEquals(metadata.getSampleRate(), audioRestored.getSampleRate());
+        assertEquals(metadata.getChannels(), audioRestored.getChannels());
+        assertEquals(metadata, restored);
+    }
+
+    @Test
+    void jsonRoundtrip_WithImageMetadata_ShouldPreserveTypedMetadata() throws Exception {
+        // Given: ConversionFile with typed ImageMetadata
+        ImageMetadata metadata = ImageMetadata.builder()
+                .width(1920)
+                .height(1080)
+                .colorSpace("RGB")
+                .bitDepth(8)
+                .hasAlpha(false)
+                .build();
+        ConversionFile file = ConversionFile.create(testPath, testFormat, testSize)
+                .withMetadata(metadata);
+
+        // When: Round-trip through JSON
+        String json = JsonUtils.getObjectMapper().writeValueAsString(file);
+        JsonNode metadataNode = JsonUtils.getObjectMapper().readTree(json).get("metadata");
+        assertNotNull(metadataNode);
+        assertEquals("image", metadataNode.get("type").asText());
+        ConversionFile deserialized = JsonUtils.getObjectMapper().readValue(json, ConversionFile.class);
+
+        // Then: The metadata type survives (no LinkedHashMap degradation)
+        MediaMetadata restored = deserialized.metadata();
+        assertNotNull(restored);
+        assertInstanceOf(ImageMetadata.class, restored);
+        ImageMetadata imageRestored = (ImageMetadata) restored;
+        assertEquals(metadata.getWidth(), imageRestored.getWidth());
+        assertEquals(metadata.getHeight(), imageRestored.getHeight());
+        assertEquals(metadata.getColorSpace(), imageRestored.getColorSpace());
+        assertEquals(metadata.getBitDepth(), imageRestored.getBitDepth());
+        assertEquals(metadata.hasAlpha(), imageRestored.hasAlpha());
+        assertEquals(metadata, restored);
+    }
+
+    @Test
+    void jsonRoundtrip_WithDocumentMetadata_ShouldPreserveTypedMetadata() throws Exception {
+        // Given: ConversionFile with typed DocumentMetadata
+        DocumentMetadata metadata = DocumentMetadata.builder()
+                .pageCount(10)
+                .title("Test Document")
+                .author("John Doe")
+                .subject("Testing")
+                .creator("Test Creator")
+                .build();
+        ConversionFile file = ConversionFile.create(testPath, testFormat, testSize)
+                .withMetadata(metadata);
+
+        // When: Round-trip through JSON
+        String json = JsonUtils.getObjectMapper().writeValueAsString(file);
+        JsonNode metadataNode = JsonUtils.getObjectMapper().readTree(json).get("metadata");
+        assertNotNull(metadataNode);
+        assertEquals("document", metadataNode.get("type").asText());
+        ConversionFile deserialized = JsonUtils.getObjectMapper().readValue(json, ConversionFile.class);
+
+        // Then: The metadata type survives (no LinkedHashMap degradation)
+        MediaMetadata restored = deserialized.metadata();
+        assertNotNull(restored);
+        assertInstanceOf(DocumentMetadata.class, restored);
+        DocumentMetadata documentRestored = (DocumentMetadata) restored;
+        assertEquals(metadata.getPageCount(), documentRestored.getPageCount());
+        assertEquals(metadata.getTitle(), documentRestored.getTitle());
+        assertEquals(metadata.getAuthor(), documentRestored.getAuthor());
+        assertEquals(metadata.getSubject(), documentRestored.getSubject());
+        assertEquals(metadata.getCreator(), documentRestored.getCreator());
+        assertEquals(metadata, restored);
+    }
+
+    @Test
+    void jsonDeserialization_LegacyMetadataWithoutType_ShouldNotFailAndYieldNullMetadata() throws Exception {
+        // Given: Session file written by a prior version: flat metadata fields
+        // without the "type" discriminator
+        String legacyJson = """
+                {
+                  "id": "legacy-metadata-id",
+                  "path": "/test/cancelled_video.mp4",
+                  "format": "MP4",
+                  "size": 1024,
+                  "metadata": {
+                    "duration": 120.5,
+                    "width": 1920,
+                    "height": 1080,
+                    "bitrate": 5000000
+                  },
+                  "status": "PENDING",
+                  "progress": 0
+                }
+                """;
+
+        // When: Deserialize - must not fail the whole ConversionFile
+        ConversionFile file = assertDoesNotThrow(
+                () -> JsonUtils.getObjectMapper().readValue(legacyJson, ConversionFile.class));
+
+        // Then: File is intact; unknowable legacy metadata degrades to null
+        assertNotNull(file);
+        assertEquals("legacy-metadata-id", file.id());
+        assertEquals(ConversionStatus.PENDING, file.status());
+        assertNull(file.metadata());
+    }
+
+    @Test
+    void jsonDeserialization_UnknownMetadataType_ShouldNotFailAndYieldNullMetadata() throws Exception {
+        // Given: Session file written by a newer version carrying a metadata
+        // subtype this version does not know
+        String futureJson = """
+                {
+                  "id": "future-type-id",
+                  "path": "/test/file.mp4",
+                  "format": "MP4",
+                  "size": 1024,
+                  "metadata": {
+                    "type": "hologram",
+                    "duration": 120.5
+                  },
+                  "status": "PENDING",
+                  "progress": 0
+                }
+                """;
+
+        // When: Deserialize - must not fail the whole ConversionFile
+        ConversionFile file = assertDoesNotThrow(
+                () -> JsonUtils.getObjectMapper().readValue(futureJson, ConversionFile.class));
+
+        // Then: File is intact; the unknowable metadata degrades to null
+        assertNotNull(file);
+        assertEquals("future-type-id", file.id());
+        assertNull(file.metadata());
+    }
+
+    // ==================== Status Transition Finalization Tests ====================
+
+    @Test
+    void withStatus_Completed_ShouldNormalizeProgressTo100() {
+        // Given: File mid-conversion at 37%
+        ConversionFile file = ConversionFile.create(testPath, testFormat, testSize)
+                .withStatus(ConversionStatus.IN_PROGRESS)
+                .withProgress(37);
+
+        // When: Transition to COMPLETED
+        ConversionFile completed = file.withStatus(ConversionStatus.COMPLETED);
+
+        // Then: A completed file must never show stale progress
+        assertEquals(ConversionStatus.COMPLETED, completed.status());
+        assertEquals(100, completed.progress());
+    }
+
+    @Test
+    void withStatus_PendingAfterCompleted_ShouldBeAllowedWithoutThrowing() {
+        // Given: A completed file (e.g. session restore / UI retry resets it)
+        ConversionFile completed = ConversionFile.create(testPath, testFormat, testSize)
+                .withProgress(80)
+                .withStatus(ConversionStatus.COMPLETED);
+
+        // When/Then: Backward transition is legitimate and must not throw
+        ConversionFile pending = assertDoesNotThrow(
+                () -> completed.withStatus(ConversionStatus.PENDING));
+        assertEquals(ConversionStatus.PENDING, pending.status());
+    }
+
+    @Test
+    void withCancelled_ShouldKeepProgressReached() {
+        // Given: File cancelled mid-conversion at 42%
+        ConversionFile file = ConversionFile.create(testPath, testFormat, testSize)
+                .withStatus(ConversionStatus.IN_PROGRESS)
+                .withProgress(42);
+
+        // When: Cancel
+        ConversionFile cancelled = file.withCancelled();
+
+        // Then: Progress is intentionally preserved to show how far it got
+        assertEquals(ConversionStatus.CANCELLED, cancelled.status());
+        assertEquals(42, cancelled.progress());
     }
 }

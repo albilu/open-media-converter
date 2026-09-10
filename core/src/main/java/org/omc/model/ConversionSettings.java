@@ -466,54 +466,28 @@ public final class ConversionSettings {
                     if (videoSettings == null) {
                         videoSettings = VideoSettings.builder().outputFormat(outputFormat).build();
                     } else {
-                        videoSettings = VideoSettings.builder()
-                                .codec(videoSettings.codec())
-                                .bitrate(videoSettings.bitrate())
-                                .resolution(videoSettings.resolution())
-                                .frameRate(videoSettings.frameRate())
-                                .preset(videoSettings.preset())
-                                .crf(videoSettings.crf())
-                                .aspectRatio(videoSettings.aspectRatio())
-                                .outputFormat(outputFormat)
-                                .build();
+                        videoSettings = videoSettings.withOutputFormat(outputFormat);
                     }
                 }
                 case AUDIO -> {
                     if (audioSettings == null) {
                         audioSettings = AudioSettings.builder().outputFormat(outputFormat).build();
                     } else {
-                        audioSettings = AudioSettings.builder()
-                                .codec(audioSettings.codec())
-                                .bitrate(audioSettings.bitrate())
-                                .sampleRate(audioSettings.sampleRate())
-                                .channels(audioSettings.channels())
-                                .quality(audioSettings.quality())
-                                .outputFormat(outputFormat)
-                                .build();
+                        audioSettings = audioSettings.withOutputFormat(outputFormat);
                     }
                 }
                 case IMAGE -> {
                     if (imageSettings == null) {
                         imageSettings = ImageSettings.builder().outputFormat(outputFormat).build();
                     } else {
-                        imageSettings = ImageSettings.builder()
-                                .quality(imageSettings.quality())
-                                .maintainAspectRatio(imageSettings.maintainAspectRatio())
-                                .compressionLevel(imageSettings.compressionLevel())
-                                .rotation(imageSettings.rotation())
-                                .flip(imageSettings.flip())
-                                .outputFormat(outputFormat)
-                                .build();
+                        imageSettings = imageSettings.withOutputFormat(outputFormat);
                     }
                 }
                 case DOCUMENT -> {
                     if (documentSettings == null) {
                         documentSettings = DocumentSettings.builder().outputFormat(outputFormat).build();
                     } else {
-                        // Assuming DocumentSettings has similar builder
-                        documentSettings = DocumentSettings.builder()
-                                .outputFormat(outputFormat)
-                                .build();
+                        documentSettings = documentSettings.withOutputFormat(outputFormat);
                     }
                 }
             }

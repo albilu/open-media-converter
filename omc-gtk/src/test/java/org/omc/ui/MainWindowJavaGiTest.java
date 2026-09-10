@@ -155,7 +155,7 @@ class MainWindowJavaGiTest {
     void testUpdateFileResult_shouldTriggerBatchCompletion_whenAllFilesComplete() throws Exception {
         // Arrange
         initializeBatchTracking(2);
-        setCompletedFilesInBatch(1); // One file already completed
+        batchState().recordSuccess(); // One file already completed
 
         ConversionResult successResult = ConversionResult.success("file2", Path.of("/output/result.mp4"), null,
                 Duration.ofSeconds(10), 1024L, 512L, ConversionTool.FFMPEG);
@@ -179,9 +179,7 @@ class MainWindowJavaGiTest {
     void testOnBatchComplete_shouldShowSuccessNotification_whenAllFilesSuccessful() throws Exception {
         // Arrange
         initializeBatchTracking(3);
-        setCompletedFilesInBatch(3);
-        setSuccessfulFilesInBatch(3);
-        setFailedFilesInBatch(0);
+        for (int i = 0; i < 3; i++) batchState().recordSuccess();
 
         // Act
         invokeOnBatchComplete();
@@ -195,9 +193,7 @@ class MainWindowJavaGiTest {
     void testOnBatchComplete_shouldShowFailureNotification_whenAllFilesFailed() throws Exception {
         // Arrange
         initializeBatchTracking(2);
-        setCompletedFilesInBatch(2);
-        setSuccessfulFilesInBatch(0);
-        setFailedFilesInBatch(2);
+        for (int i = 0; i < 2; i++) batchState().recordFailure();
 
         // Act
         invokeOnBatchComplete();
@@ -210,9 +206,8 @@ class MainWindowJavaGiTest {
     void testOnBatchComplete_shouldShowMixedNotification_whenSomeFilesFailed() throws Exception {
         // Arrange
         initializeBatchTracking(5);
-        setCompletedFilesInBatch(5);
-        setSuccessfulFilesInBatch(3);
-        setFailedFilesInBatch(2);
+        for (int i = 0; i < 3; i++) batchState().recordSuccess();
+        for (int i = 0; i < 2; i++) batchState().recordFailure();
 
         // Act
         invokeOnBatchComplete();
@@ -225,9 +220,8 @@ class MainWindowJavaGiTest {
     void testOnBatchComplete_shouldResetBatchTrackingCounters() throws Exception {
         // Arrange
         initializeBatchTracking(3);
-        setCompletedFilesInBatch(3);
-        setSuccessfulFilesInBatch(2);
-        setFailedFilesInBatch(1);
+        for (int i = 0; i < 2; i++) batchState().recordSuccess();
+        batchState().recordFailure();
 
         // Act
         invokeOnBatchComplete();
@@ -243,8 +237,7 @@ class MainWindowJavaGiTest {
     void testOnBatchComplete_shouldHideProgressViewAndEnableConvertButton() throws Exception {
         // Arrange
         initializeBatchTracking(1);
-        setCompletedFilesInBatch(1);
-        setSuccessfulFilesInBatch(1);
+        batchState().recordSuccess();
 
         // Act
         invokeOnBatchComplete();
@@ -252,6 +245,9 @@ class MainWindowJavaGiTest {
         // Assert
         verify(progressView).hide();
         verify(convertButton).setSensitive(true);
+        // Per-file progress tracking must be cleared at batch completion so
+        // the map does not grow unboundedly across batches.
+        verify(progressView).clearFileProgress();
     }
 
     @Test
@@ -295,66 +291,36 @@ class MainWindowJavaGiTest {
         when(builder.getObject("statusBarLabel")).thenReturn(statusBarLabel);
     }
 
+    private MainWindowJavaGi.BatchUiState batchState() throws Exception {
+        Field field = MainWindowJavaGi.class.getDeclaredField("batchState");
+        field.setAccessible(true);
+        return (MainWindowJavaGi.BatchUiState) field.get(window);
+    }
+
     private void initializeBatchTracking(int totalFiles) throws Exception {
-        setTotalFilesInBatch(totalFiles);
-        setCompletedFilesInBatch(0);
-        setSuccessfulFilesInBatch(0);
-        setFailedFilesInBatch(0);
-        setBatchCompleted(false);
+        MainWindowJavaGi.BatchUiState state = batchState();
+        state.endBatch();
+        assertTrue(state.beginBatch(java.util.Collections.nCopies(totalFiles, "file")));
     }
 
     private int getTotalFilesInBatch() throws Exception {
-        return getPrivateField("totalFilesInBatch");
-    }
-
-    private void setTotalFilesInBatch(int value) throws Exception {
-        setPrivateField("totalFilesInBatch", value);
+        return batchState().totalFiles();
     }
 
     private int getCompletedFilesInBatch() throws Exception {
-        return getPrivateField("completedFilesInBatch");
-    }
-
-    private void setCompletedFilesInBatch(int value) throws Exception {
-        setPrivateField("completedFilesInBatch", value);
+        return batchState().completedFiles();
     }
 
     private int getSuccessfulFilesInBatch() throws Exception {
-        return getPrivateField("successfulFilesInBatch");
-    }
-
-    private void setSuccessfulFilesInBatch(int value) throws Exception {
-        setPrivateField("successfulFilesInBatch", value);
+        return batchState().successfulFiles();
     }
 
     private int getFailedFilesInBatch() throws Exception {
-        return getPrivateField("failedFilesInBatch");
-    }
-
-    private void setFailedFilesInBatch(int value) throws Exception {
-        setPrivateField("failedFilesInBatch", value);
+        return batchState().failedFiles();
     }
 
     private boolean getBatchCompleted() throws Exception {
-        Field field = MainWindowJavaGi.class.getDeclaredField("batchCompleted");
-        field.setAccessible(true);
-        return (boolean) field.get(window);
-    }
-
-    private void setBatchCompleted(boolean value) throws Exception {
-        setPrivateField("batchCompleted", value);
-    }
-
-    private int getPrivateField(String fieldName) throws Exception {
-        Field field = MainWindowJavaGi.class.getDeclaredField(fieldName);
-        field.setAccessible(true);
-        return (int) field.get(window);
-    }
-
-    private void setPrivateField(String fieldName, Object value) throws Exception {
-        Field field = MainWindowJavaGi.class.getDeclaredField(fieldName);
-        field.setAccessible(true);
-        field.set(window, value);
+        return batchState().batchCompleted();
     }
 
     private void invokeOnBatchComplete() throws Exception {

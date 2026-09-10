@@ -262,9 +262,29 @@ public final class PathUtils {
             return pathString;
         }
 
+        return expandHome(pathString, System.getProperty("user.home"));
+    }
+
+    /**
+     * Expands home directory symbol (~) in path using the given home directory.
+     *
+     * <p>
+     * The expansion is a literal string concatenation: the home directory is
+     * never treated as a regex replacement, so {@code $} or {@code \}
+     * characters in it survive unchanged.
+     * </p>
+     *
+     * @param pathString The path string potentially containing ~
+     * @param home       The home directory to substitute for ~
+     * @return The expanded path
+     */
+    static String expandHome(String pathString, String home) {
+        if (pathString == null || pathString.isBlank()) {
+            return pathString;
+        }
+
         if (pathString.startsWith("~/") || pathString.equals("~")) {
-            String home = System.getProperty("user.home");
-            return pathString.replaceFirst("^~", home);
+            return home + pathString.substring(1);
         }
 
         return pathString;

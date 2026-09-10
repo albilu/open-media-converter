@@ -3,8 +3,11 @@
 package org.omc.controller;
 
 import java.io.IOException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -20,8 +23,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import org.omc.core.ValidationEngine;
 import org.omc.exception.ErrorCode;
@@ -222,16 +223,34 @@ public class FileManager {
 
         List<Path> filePaths = new ArrayList<>();
 
-        try (Stream<Path> stream = recursive ? Files.walk(folderPath) : Files.list(folderPath)) {
+        try {
+            Files.walkFileTree(folderPath, Set.of(), recursive ? Integer.MAX_VALUE : 1,
+                    new SimpleFileVisitor<>() {
+                        @Override
+                        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                            if (Files.isRegularFile(file)) {
+                                FileFormat format = fileHandler.detectFormat(file);
+                                if (format != FileFormat.UNKNOWN) {
+                                    filePaths.add(file);
+                                }
+                            }
+                            return FileVisitResult.CONTINUE;
+                        }
 
-            filePaths = stream
-                    .filter(Files::isRegularFile)
-                    .filter(path -> {
-                        FileFormat format = fileHandler.detectFormat(path);
-                        return format != FileFormat.UNKNOWN;
-                    })
-                    .collect(Collectors.toList());
-
+                        @Override
+                        public FileVisitResult visitFileFailed(Path file, IOException exc) throws IOException {
+                            if (file.equals(folderPath)) {
+                                // The scan root itself is unreadable: the scan
+                                // cannot even start, so fail fast.
+                                throw exc;
+                            }
+                            // A single unreadable entry (e.g. a locked
+                            // subdirectory) must not abort the whole scan;
+                            // skip it and keep collecting readable files.
+                            logger.warn("Skipping unreadable entry during folder scan: {}", file, exc);
+                            return FileVisitResult.CONTINUE;
+                        }
+                    });
         } catch (IOException e) {
             logger.error("Failed to scan folder: {}", folderPath, e);
             throw new FileOperationException(

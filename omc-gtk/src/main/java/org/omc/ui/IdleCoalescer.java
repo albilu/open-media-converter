@@ -41,8 +41,10 @@ public final class IdleCoalescer {
     /**
      * Schedules a flush task on the main loop. Implementations must eventually
      * run the task on the UI thread. Returning {@code false} means the task
-     * could not be scheduled, in which case the caller runs it inline as a
-     * last-resort fallback so updates are never lost.
+     * could not be scheduled: the coalescer resets its flush flag and keeps
+     * the work queued, and the next {@code submit}/{@code submitForced}
+     * retries scheduling the flush. The coalescer itself never runs the flush
+     * inline; queued work is only dropped by {@link #clear()} during shutdown.
      */
     @FunctionalInterface
     public interface IdleScheduler {
@@ -62,9 +64,10 @@ public final class IdleCoalescer {
             });
             return sourceId != 0;
         } catch (Throwable t) {
-            // GTK not available (tests, early shutdown): let the caller fall
-            // back to inline execution instead of losing the update.
-            logger.warn("GLib idle scheduling failed; falling back to inline flush", t);
+            // GTK not available (tests, early shutdown): report the failed
+            // schedule; the queued work stays pending and is retried on the
+            // next submit (or dropped by clear() during shutdown).
+            logger.warn("GLib idle scheduling failed; pending work will be retried on next submit", t);
             return false;
         }
     };

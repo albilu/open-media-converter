@@ -222,7 +222,7 @@ class ApplicationWorkflowControllerTest {
 
         // Assert
         assertTrue(result);
-        verify(stateManager).saveState(any(ApplicationState.class));
+        verify(stateManager).updateState(any());
         verify(settingsManager).saveSettings(any());
         verify(conversionEngine).shutdown();
         assertFalse(controller.isInitialized());
@@ -277,12 +277,12 @@ class ApplicationWorkflowControllerTest {
     }
 
     @Test
-    void shutdown_should_returnFalse_when_exceptionOccursDuringSave() throws Exception {
+    void shutdown_should_succeedDespiteSaveFailure_becauseHandlerSwallowsIt() throws Exception {
         // Arrange
         initializeController();
         List<ConversionFile> mockFiles = List.of();
         when(fileManager.getFiles()).thenReturn(mockFiles);
-        doThrow(new IOException("Save failed")).when(stateManager).saveState(any());
+        doThrow(new IOException("Save failed")).when(stateManager).updateState(any());
 
         // Act
         boolean result = controller.shutdown();
@@ -416,7 +416,7 @@ class ApplicationWorkflowControllerTest {
     }
 
     @Test
-    void saveApplicationState_should_callStateManagerSave() throws Exception {
+    void saveApplicationState_should_callStateManagerAtomicUpdate() throws Exception {
         // Arrange
         initializeController();
         List<ConversionFile> mockFiles = List.of(mock(ConversionFile.class));
@@ -425,8 +425,23 @@ class ApplicationWorkflowControllerTest {
         // Act
         controller.shutdown(true);
 
-        // Assert
-        verify(stateManager).saveState(any(ApplicationState.class));
+        // Assert: the save goes through the atomic RMW primitive so
+        // concurrent updates (e.g. sort state) cannot be lost
+        verify(stateManager).updateState(any());
+    }
+
+    @Test
+    void saveSortState_should_routeThroughAtomicUpdateState() throws Exception {
+        // Arrange
+        initializeController();
+
+        // Act
+        controller.saveSortState(
+                FileListSortState.byName(FileListSortState.SortDirection.DESCENDING));
+
+        // Assert: the sort-state save goes through the atomic RMW primitive
+        // (read-modify-write of the current state happens under one monitor)
+        verify(stateManager).updateState(any());
     }
 
     @Test
@@ -560,8 +575,9 @@ class ApplicationWorkflowControllerTest {
         when(mockState.sessionState()).thenReturn(mockSessionState);
         when(mockSessionState.pendingFiles()).thenReturn(List.of());
 
-        // Mock getCurrentState() for shutdown - needed by saveApplicationState()
-        // Use lenient() since not all tests call shutdown
+        // Mock getCurrentState() for sort-order reads (getSavedSortState);
+        // state saves go through the atomic updateState() primitive
+        // Use lenient() since not all tests read the current state
         lenient().when(mockState.fileListSortState()).thenReturn(FileListSortState.unsorted());
         lenient().when(stateManager.getCurrentState()).thenReturn(mockState);
 
@@ -687,7 +703,7 @@ class ApplicationWorkflowControllerTest {
 
         // Assert
         verify(fileManager).removeFiles(fileIds);
-        verify(stateManager).saveState(any());
+        verify(stateManager).updateState(any());
     }
 
     @Test
@@ -703,7 +719,7 @@ class ApplicationWorkflowControllerTest {
 
         // Assert
         verify(fileManager).removeFiles(fileIds);
-        verify(stateManager).saveState(any());
+        verify(stateManager).updateState(any());
     }
 
     @Test
@@ -718,7 +734,7 @@ class ApplicationWorkflowControllerTest {
         FileOperationException thrown = assertThrows(FileOperationException.class,
                 () -> controller.handleRemoveFiles(fileIds));
         assertTrue(thrown.getMessage().contains("Remove failed"));
-        verify(stateManager, never()).saveState(any());
+        verify(stateManager, never()).updateState(any());
     }
 
     @Test
@@ -738,7 +754,7 @@ class ApplicationWorkflowControllerTest {
 
         // Assert
         verify(fileManager).clearFiles();
-        verify(stateManager).saveState(any());
+        verify(stateManager).updateState(any());
     }
 
     @Test
@@ -753,7 +769,7 @@ class ApplicationWorkflowControllerTest {
 
         // Assert
         verify(fileManager).clearFiles();
-        verify(stateManager).saveState(any());
+        verify(stateManager).updateState(any());
     }
 
     @Test
@@ -766,7 +782,7 @@ class ApplicationWorkflowControllerTest {
         // Act & Assert
         RuntimeException thrown = assertThrows(RuntimeException.class, () -> controller.handleClearFiles());
         assertTrue(thrown.getMessage().contains("Clear failed"));
-        verify(stateManager, never()).saveState(any());
+        verify(stateManager, never()).updateState(any());
     }
 
     // ===== Settings Workflow Tests =====
@@ -944,11 +960,13 @@ class ApplicationWorkflowControllerTest {
         initializeController();
         when(fileManager.getFiles()).thenReturn(List.of());
 
-        // Act - should not throw, just log warning and return gracefully
-        controller.handleStartConversion();
+        // Act & Assert - validation failure must propagate so the UI can roll
+        // back its locked state
+        assertThrows(IllegalStateException.class, () -> controller.handleStartConversion());
 
         // Assert - conversion engine should never be called
         verify(conversionEngine, never()).convertBatch(any(), any());
+        assertFalse(controller.isConversionInProgress());
     }
 
     @Test
@@ -973,11 +991,13 @@ class ApplicationWorkflowControllerTest {
         ConversionFile convFile = ConversionFile.create(file, FileFormat.MP4, 1024L);
         when(fileManager.getFiles()).thenReturn(List.of(convFile));
 
-        // Act - should not throw, just log warning and return gracefully
-        controller.handleStartConversion();
+        // Act & Assert - validation failure must propagate so the UI can roll
+        // back its locked state
+        assertThrows(IllegalStateException.class, () -> controller.handleStartConversion());
 
         // Assert - conversion engine should never be called
         verify(conversionEngine, never()).convertBatch(any(), any());
+        assertFalse(controller.isConversionInProgress());
     }
 
     @Test
@@ -1003,11 +1023,13 @@ class ApplicationWorkflowControllerTest {
         ConversionFile convFile = ConversionFile.create(file, FileFormat.MP4, 1024L);
         when(fileManager.getFiles()).thenReturn(List.of(convFile));
 
-        // Act - should not throw, just log warning and return gracefully
-        controller.handleStartConversion();
+        // Act & Assert - validation failure must propagate so the UI can roll
+        // back its locked state
+        assertThrows(IllegalStateException.class, () -> controller.handleStartConversion());
 
         // Assert - conversion engine should never be called
         verify(conversionEngine, never()).convertBatch(any(), any());
+        assertFalse(controller.isConversionInProgress());
     }
 
     @Test
@@ -1045,6 +1067,68 @@ class ApplicationWorkflowControllerTest {
 
         // Act & Assert
         assertThrows(RuntimeException.class, () -> controller.handleStartConversion());
+        assertFalse(controller.isConversionInProgress());
+    }
+
+    @Test
+    void testHandleStartConversion_LosingStartDuringValidationWindow_ThrowsAndKeepsWinnersFlag() {
+        // Arrange: emulate the race window where a concurrent starter has already
+        // passed the in-progress check but not yet claimed the flag, while another
+        // start wins the race and begins running its batch.
+        initializeController();
+
+        Path file = Path.of("/test/input.mp4");
+        ConversionFile convFile = ConversionFile.create(file, FileFormat.MP4, 1024L);
+        when(fileManager.getFiles()).thenAnswer(invocation -> {
+            // Simulate the concurrent winner: it claims the flag and its batch
+            // is now running on the engine
+            setConversionInProgress(true);
+            return List.of(convFile);
+        });
+        lenient().doThrow(new RuntimeException("engine rejects overlapping batch"))
+                .when(conversionEngine).convertBatch(any(), any());
+
+        // Act: the losing start discovers the race only when claiming the flag
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> controller.handleStartConversion());
+
+        // Assert: loser fails cleanly without touching engine state and without
+        // clearing the winner's flag
+        assertEquals("Conversion already in progress", thrown.getMessage());
+        verify(conversionEngine, never()).convertBatch(any(), any());
+        assertTrue(controller.isConversionInProgress());
+    }
+
+    @Test
+    void testHandleStartConversion_SecondStartWhileBatchRunning_DoesNotClearFlagAndCompletionHandlerClearsIt() {
+        // Arrange
+        initializeController();
+        ArgumentCaptor<BiConsumer<String, ConversionResult>> completionCallbackCaptor = ArgumentCaptor
+                .forClass(BiConsumer.class);
+        verify(conversionEngine).onConversionComplete(completionCallbackCaptor.capture());
+        BiConsumer<String, ConversionResult> completionCallback = completionCallbackCaptor.getValue();
+
+        Path file = Path.of("/test/input.mp4");
+        ConversionFile convFile = ConversionFile.create(file, FileFormat.MP4, 1024L);
+        when(fileManager.getFiles()).thenReturn(List.of(convFile));
+
+        // Act: first start wins and its batch is running
+        controller.handleStartConversion();
+        assertTrue(controller.isConversionInProgress());
+
+        // Second start while the batch is genuinely active: must throw and must
+        // not disturb the running batch's flag
+        assertThrows(IllegalStateException.class, () -> controller.handleStartConversion());
+        assertTrue(controller.isConversionInProgress());
+
+        // The completion handler (not the failed second start) clears the flag
+        when(conversionEngine.getActiveConversionCount()).thenReturn(0);
+        ConversionResult successResult = ConversionResult.success("file1", Path.of("/output/result.mp4"), null,
+                Duration.ofSeconds(10), 1024L, 512L, ConversionTool.FFMPEG);
+        completionCallback.accept("file1", successResult);
+
+        // Assert
+        verify(conversionEngine, times(1)).convertBatch(any(), any());
         assertFalse(controller.isConversionInProgress());
     }
 
@@ -1154,6 +1238,39 @@ class ApplicationWorkflowControllerTest {
         assertThrows(RuntimeException.class, () -> controller.handleResumeConversion());
     }
 
+    // ===== Legacy Conversion Control API Tests =====
+
+    @Test
+    void testCancelConversion_FlagClearedByCompletionHandler_NotEagerly() {
+        // Arrange
+        initializeController();
+        ArgumentCaptor<BiConsumer<String, ConversionResult>> completionCallbackCaptor = ArgumentCaptor
+                .forClass(BiConsumer.class);
+        verify(conversionEngine).onConversionComplete(completionCallbackCaptor.capture());
+        BiConsumer<String, ConversionResult> completionCallback = completionCallbackCaptor.getValue();
+
+        Path file = Path.of("/test/input.mp4");
+        ConversionFile convFile = ConversionFile.create(file, FileFormat.MP4, 1024L);
+        when(fileManager.getFiles()).thenReturn(List.of(convFile));
+        controller.handleStartConversion();
+        assertTrue(controller.isConversionInProgress());
+
+        // Act: legacy cancel requests engine cancellation...
+        controller.cancelConversion();
+
+        // Assert: ...but the flag must stay set until the completion handler
+        // reports that the running conversions actually finished
+        verify(conversionEngine).cancelConversion();
+        assertTrue(controller.isConversionInProgress());
+
+        when(conversionEngine.getActiveConversionCount()).thenReturn(0);
+        ConversionResult cancelledResult = ConversionResult.cancelled("file1", null,
+                Duration.ofSeconds(1), 1024L, ConversionTool.FFMPEG);
+        completionCallback.accept("file1", cancelledResult);
+
+        assertFalse(controller.isConversionInProgress());
+    }
+
     @Test
     void testHandleCancelConversion_NotInitialized() {
         // Arrange
@@ -1250,7 +1367,7 @@ class ApplicationWorkflowControllerTest {
 
         // Assert
         assertFalse(controller.isConversionInProgress());
-        verify(stateManager).saveState(any(ApplicationState.class));
+        verify(stateManager).updateState(any());
     }
 
     @Test
@@ -1282,7 +1399,7 @@ class ApplicationWorkflowControllerTest {
 
         // Assert
         assertFalse(controller.isConversionInProgress());
-        verify(stateManager).saveState(any(ApplicationState.class));
+        verify(stateManager).updateState(any());
     }
 
     @Test
@@ -1312,7 +1429,7 @@ class ApplicationWorkflowControllerTest {
 
         // Assert
         assertTrue(controller.isConversionInProgress()); // Still in progress
-        verify(stateManager, never()).saveState(any()); // No state save
+        verify(stateManager, never()).updateState(any()); // No state save
     }
 
     // ===== Task 28: Integration Tests for outputPath Updates =====

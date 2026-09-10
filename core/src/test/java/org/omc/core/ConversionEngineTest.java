@@ -20,6 +20,7 @@ import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
@@ -27,6 +28,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -37,12 +39,16 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
@@ -57,6 +63,7 @@ import org.omc.model.ConversionTool;
 import org.omc.model.DocumentSettings;
 import org.omc.model.FileFormat;
 import org.omc.model.FileSettingsOverride;
+import org.omc.model.FormatCategory;
 import org.omc.model.ImageSettings;
 import org.omc.model.ValidationResult;
 import org.omc.model.VideoSettings;
@@ -65,6 +72,8 @@ import org.omc.exception.FileOperationException;
 import org.omc.service.FileHandler;
 import org.slf4j.Logger;
 import org.slf4j.Logger;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * Comprehensive unit tests for ConversionEngine.
@@ -1878,11 +1887,12 @@ class ConversionEngineTest {
         }
 
         /**
-         * Requirement: REQ-FL-2.2 - Test conversion results are cleared on
-         * cancellation.
+         * Requirement: REQ-FL-2.2 - Cancellation retains the results of
+         * conversions that already completed (adapted from the old behavior
+         * where cancel wiped the whole results map).
          */
         @Test
-        void testCancelConversion_ClearsConversionResults() throws Exception {
+        void testCancelConversion_RetainsCompletedConversionResults() throws Exception {
                 // Arrange
                 setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
 
@@ -1905,9 +1915,11 @@ class ConversionEngineTest {
                 // Cancel
                 conversionEngine.cancelConversion();
 
-                // Assert
+                // Assert - the completed conversion's result must survive the cancel
                 ConversionResult resultAfterCancel = conversionEngine.getConversionResult(testFile.id());
-                assertNull(resultAfterCancel, "Result should be cleared after cancellation");
+                assertNotNull(resultAfterCancel,
+                                "Result of an already-completed conversion must survive cancellation");
+                assertTrue(resultAfterCancel.success());
         }
 
         /**
@@ -2751,6 +2763,446 @@ class ConversionEngineTest {
                 // Then - the new conversion must complete successfully
                 assertTrue(result.success(), "Engine must be reusable after cancelConversion: "
                                 + result.errorMessage().orElse("unknown error"));
+        }
+
+        // ==================== Output-format resolution consistency tests ====================
+
+        /**
+         * Defect: planOutputPaths and performConversion resolved the output
+         * format differently for a file whose settings override does not
+         * include a section matching the file's category. Path planning used
+         * the forFile-merged section (global format), while execution read the
+         * raw override section (null) and fell back to the category default.
+         * The planned extension and the executed format must agree.
+         */
+        @Test
+        void convertSingle_OverrideWithoutMatchingSection_UsesMergedSectionFormatForPlanningAndExecution()
+                        throws Exception {
+                Path outputDir = Files.createTempDirectory("omm-format-merge-out");
+                try {
+                        // Video file carrying an image-only override (videoSettings() == null)
+                        FileSettingsOverride imageOnlyOverride = FileSettingsOverride.forImage(
+                                        "image-preset",
+                                        ImageSettings.builder().outputFormat(FileFormat.PNG).build());
+                        ConversionFile videoFile = testFile.withSettingsOverride(imageOnlyOverride);
+
+                        // Global settings explicitly configure WEBM for video (not the MP4 default)
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputDirectory(outputDir)
+                                        .videoSettings(VideoSettings.builder()
+                                                        .outputFormat(FileFormat.WEBM)
+                                                        .build())
+                                        .build();
+
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.WEBM);
+
+                        // When
+                        ConversionResult result = conversionEngine.convertSingle(videoFile, settings)
+                                        .get(5, TimeUnit.SECONDS);
+
+                        // Then - planning and execution must both use the merged section format
+                        assertTrue(result.success(), () -> "Conversion should succeed: "
+                                        + result.errorMessage().orElse("unknown error"));
+                        verify(toolManager).selectTool(eq(FileFormat.MP4), eq(FileFormat.WEBM));
+                        verify(toolManager).executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), eq(FileFormat.WEBM), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class));
+                        assertTrue(result.outputPath().isPresent(), "Result must carry the final output path");
+                        assertTrue(result.outputPath().get().getFileName().toString().endsWith(".webm"),
+                                        "Planned output path must use the merged section format, but was: "
+                                                        + result.outputPath().get());
+                } finally {
+                        deleteRecursively(outputDir);
+                }
+        }
+
+        /**
+         * Defect: a section that exists but has no output format (possible
+         * when settings are loaded from older JSON) made planOutputPaths
+         * generate a ".converted" extension while performConversion resolved
+         * null and failed in selectTool. Both sites must apply the same
+         * category default (MP4 for video).
+         */
+        @Test
+        void convertSingle_SectionWithoutOutputFormat_UsesCategoryDefaultForPlanningAndExecution()
+                        throws Exception {
+                Path outputDir = Files.createTempDirectory("omm-format-default-out");
+                try {
+                        // Build a video section with a null output format via JSON round-trip
+                        // (the builder cannot produce a null format; deserialization can)
+                        VideoSettings withoutFormat = new ObjectMapper()
+                                        .readValue("{\"codec\":\"h264\"}", VideoSettings.class);
+                        assertNull(withoutFormat.outputFormat(), "Test setup: format must be null");
+
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputDirectory(outputDir)
+                                        .videoSettings(withoutFormat)
+                                        .build();
+
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.MP4);
+
+                        // When
+                        ConversionResult result = conversionEngine.convertSingle(testFile, settings)
+                                        .get(5, TimeUnit.SECONDS);
+
+                        // Then - the default MP4 format must be planned and executed
+                        assertTrue(result.success(), () -> "Conversion should apply the default format: "
+                                        + result.errorMessage().orElse("unknown error"));
+                        verify(toolManager).selectTool(eq(FileFormat.MP4), eq(FileFormat.MP4));
+                        verify(toolManager).executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), eq(FileFormat.MP4), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class));
+                        assertTrue(result.outputPath().isPresent(), "Result must carry the final output path");
+                        assertTrue(result.outputPath().get().getFileName().toString().endsWith(".mp4"),
+                                        "Planned output path must use the default format extension, but was: "
+                                                        + result.outputPath().get());
+                } finally {
+                        deleteRecursively(outputDir);
+                }
+        }
+
+        // ==================== Category default format tests ====================
+
+        /**
+         * Pins the single source of truth for per-category default output
+         * formats ({@code ConversionEngine.defaultFormatForCategory}), which
+         * is shared by ConversionEngine (output planning and execution) and
+         * ValidationEngine (request validation) so both always resolve the
+         * same default.
+         */
+        @Test
+        void defaultFormatForCategory_MapsEachCategoryToItsDefault() {
+                assertEquals(FileFormat.MP4, ConversionEngine.defaultFormatForCategory(FormatCategory.VIDEO));
+                assertEquals(FileFormat.MP3, ConversionEngine.defaultFormatForCategory(FormatCategory.AUDIO));
+                assertEquals(FileFormat.PNG, ConversionEngine.defaultFormatForCategory(FormatCategory.IMAGE));
+                assertEquals(FileFormat.PDF, ConversionEngine.defaultFormatForCategory(FormatCategory.DOCUMENT));
+                assertNull(ConversionEngine.defaultFormatForCategory(FormatCategory.UNKNOWN));
+        }
+
+        // ==================== Disk-space auto-pause re-arm tests ====================
+
+        /**
+         * Defect: a user resume while the engine was auto-paused for low disk
+         * space left diskSpacePaused stuck at true, so the monitor's re-arm
+         * CAS(false, true) never succeeded again - low-disk protection was
+         * permanently off after the first user resume. A user resume must
+         * re-enable future auto-pauses.
+         */
+        @Test
+        void userResumeDuringLowDisk_ReArmsDiskSpaceAutoPause() throws Exception {
+                CountDownLatch toolStarted = new CountDownLatch(1);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                Path outputDir = Files.createTempDirectory("omm-disk-rearm-out");
+                try {
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> blockedToolExecution(toolStarted, releaseTool));
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .build();
+
+                        // A running conversion is required for the monitor to act
+                        conversionEngine.convertSingle(testFile, settings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS), "Conversion should reach the tool");
+
+                        // Given - disk space drops below the threshold: engine auto-pauses
+                        when(fileHandler.getAvailableSpace(any(Path.class))).thenReturn(10L * 1024 * 1024);
+                        invokeDiskSpaceCheck();
+                        assertTrue(conversionEngine.isPaused(), "Engine must auto-pause on low disk space");
+
+                        // And - the user pauses explicitly while disk space is low
+                        conversionEngine.pauseConversion();
+
+                        // When - the user resumes (disk is still low)
+                        conversionEngine.resumeConversion();
+                        assertFalse(conversionEngine.isPaused(), "User resume must clear the pause");
+
+                        // Then - the next low-disk detection must pause again
+                        invokeDiskSpaceCheck();
+                        assertTrue(conversionEngine.isPaused(),
+                                        "Disk-space auto-pause must re-arm after a user resume");
+                } finally {
+                        releaseTool.countDown();
+                        deleteRecursively(outputDir);
+                }
+        }
+
+        /**
+         * Regression guard for the disk-space auto-pause flow: a disk-space
+         * recovery must never lift a pause the user requested explicitly.
+         */
+        @Test
+        void autoResumeAfterDiskRecovery_DoesNotLiftUserPause() throws Exception {
+                CountDownLatch toolStarted = new CountDownLatch(1);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                Path outputDir = Files.createTempDirectory("omm-disk-userpause-out");
+                try {
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> blockedToolExecution(toolStarted, releaseTool));
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .build();
+
+                        conversionEngine.convertSingle(testFile, settings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS), "Conversion should reach the tool");
+
+                        // Given - auto-paused by low disk space, then the user pauses too
+                        when(fileHandler.getAvailableSpace(any(Path.class))).thenReturn(10L * 1024 * 1024);
+                        invokeDiskSpaceCheck();
+                        assertTrue(conversionEngine.isPaused());
+                        conversionEngine.pauseConversion();
+
+                        // When - disk space recovers
+                        when(fileHandler.getAvailableSpace(any(Path.class))).thenReturn(10L * 1024 * 1024 * 1024);
+                        invokeDiskSpaceCheck();
+
+                        // Then - the explicit user pause must survive the recovery
+                        assertTrue(conversionEngine.isPaused(),
+                                        "Disk recovery must not clear an explicit user pause");
+
+                        // And - the user can still resume manually
+                        conversionEngine.resumeConversion();
+                        assertFalse(conversionEngine.isPaused());
+                } finally {
+                        releaseTool.countDown();
+                        deleteRecursively(outputDir);
+                }
+        }
+
+        /**
+         * Defect: the monitor's low-disk handling and a concurrent user
+         * resume can interleave - the monitor CAS'd diskSpacePaused
+         * false->true, the user resume then fully ran (resetting
+         * diskSpacePaused to false and unpausing), and only afterwards the
+         * monitor's autoPauseForDiskSpace() landed and re-paused the
+         * engine. The resulting state (paused=true, diskSpacePaused=false,
+         * userPaused=false) made the recovery branch's CAS(true, false)
+         * gate fail, so disk recovery never auto-resumed the engine. Disk
+         * recovery must attempt the auto-resume whenever the engine is
+         * paused without an explicit user pause.
+         */
+        @Test
+        void diskRecovery_AfterUserResumeRacingMonitorAutoPause_ResumesEngine() throws Exception {
+                CountDownLatch toolStarted = new CountDownLatch(1);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                Path outputDir = Files.createTempDirectory("omm-disk-race-out");
+                try {
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> blockedToolExecution(toolStarted, releaseTool));
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .build();
+
+                        // A running conversion is required for the monitor to act
+                        conversionEngine.convertSingle(testFile, settings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS), "Conversion should reach the tool");
+
+                        // Given - low disk space: the monitor auto-paused the engine
+                        when(fileHandler.getAvailableSpace(any(Path.class))).thenReturn(10L * 1024 * 1024);
+                        invokeDiskSpaceCheck();
+                        assertTrue(conversionEngine.isPaused(), "Engine must auto-pause on low disk space");
+
+                        // And - a user resume fully runs (resetting diskSpacePaused and
+                        // unpausing) before the monitor's in-flight auto-pause lands
+                        conversionEngine.resumeConversion();
+                        assertFalse(conversionEngine.isPaused(), "User resume must clear the pause");
+                        invokeAutoPauseForDiskSpace();
+                        assertTrue(conversionEngine.isPaused(),
+                                        "Interleaving setup: the delayed monitor auto-pause must re-pause");
+
+                        // When - disk space recovers
+                        when(fileHandler.getAvailableSpace(any(Path.class))).thenReturn(10L * 1024 * 1024 * 1024);
+                        invokeDiskSpaceCheck();
+
+                        // Then - the engine must auto-resume even though the
+                        // diskSpacePaused flag CAS cannot succeed
+                        assertFalse(conversionEngine.isPaused(),
+                                        "Disk recovery must resume an engine paused without a user pause");
+                } finally {
+                        releaseTool.countDown();
+                        deleteRecursively(outputDir);
+                }
+        }
+
+        // ==================== Shutdown process-destroy test ====================
+
+        /**
+         * Defect: shutdown() never destroyed registered processes. A worker
+         * blocked in Process.waitFor survives executorService.shutdownNow(),
+         * so after the termination timeout the registered processes must be
+         * destroyed exactly like cancelConversion() does.
+         *
+         * The first awaitTermination uses the full 30s timeout because active
+         * processes exist, so this test intentionally takes ~30 seconds.
+         */
+        @Test
+        @Timeout(90)
+        void shutdown_OnExecutorTimeout_DestroysRegisteredProcesses() throws Exception {
+                CountDownLatch toolStarted = new CountDownLatch(1);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                Process process = mock(Process.class);
+                when(process.isAlive()).thenReturn(true);
+                Path outputDir = Files.createTempDirectory("omm-shutdown-destroy-out");
+                ExecutorService shutdownExecutor = Executors.newSingleThreadExecutor();
+                try {
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        // The tool registers a process and then blocks in a way that
+                        // survives interruption (like Process.waitFor on a stuck child)
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> {
+                                                ProcessRegistry registry = invocation.getArgument(7);
+                                                registry.registerProcess(testFile.id(), process);
+                                                toolStarted.countDown();
+                                                while (!releaseTool.await(100, TimeUnit.MILLISECONDS)) {
+                                                        Thread.interrupted(); // swallow interrupts, keep waiting
+                                                }
+                                                Path tempPath = invocation.getArgument(2);
+                                                Files.write(tempPath, "content".getBytes());
+                                                return ConversionResult.success(testFile.id(), tempPath, null,
+                                                                Duration.ofSeconds(1), 1000L, 800L,
+                                                                ConversionTool.FFMPEG);
+                                        });
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .build();
+
+                        conversionEngine.convertSingle(testFile, settings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS), "Conversion should reach the tool");
+
+                        // When - shutdown runs while the worker is stuck in the tool
+                        Future<?> shutdownFuture = shutdownExecutor.submit(() -> conversionEngine.shutdown());
+
+                        // Then - the registered process must be destroyed once the timeout path hits
+                        verify(process, timeout(40_000)).destroyForcibly();
+
+                        releaseTool.countDown();
+                        shutdownFuture.get(15, TimeUnit.SECONDS);
+                } finally {
+                        releaseTool.countDown();
+                        shutdownExecutor.shutdownNow();
+                        deleteRecursively(outputDir);
+                }
+        }
+
+        // ==================== Cancel retains completed results test ====================
+
+        /**
+         * Defect: cancelConversion() wiped conversionResults including results
+         * of files that had already completed successfully. Cancelling must
+         * retain completed results and only drop entries for conversions that
+         * were still active at cancel time (they are stale for the cancelled
+         * run; the cancelRequested guard prevents repopulating them).
+         */
+        @Test
+        void cancelConversion_RetainsCompletedResults_AndDropsStaleEntriesForActiveFiles() throws Exception {
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                Path outputDir = Files.createTempDirectory("omm-cancel-results-out");
+                Path completedOriginal = Files.createTempFile("omm-cancel-a", ".mp4");
+                Path activeOriginal = Files.createTempFile("omm-cancel-b", ".mp4");
+                try {
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        ConversionFile completedFile = ConversionFile.create(completedOriginal, FileFormat.MP4,
+                                        100L);
+                        ConversionFile activeFile = ConversionFile.create(activeOriginal, FileFormat.MP4, 200L);
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .overwriteExisting(true) // second run overwrites the first run's output
+                                        .build();
+
+                        // Both files convert successfully once; both results are stored
+                        conversionEngine.convertSingle(completedFile, settings).get(5, TimeUnit.SECONDS);
+                        conversionEngine.convertSingle(activeFile, settings).get(5, TimeUnit.SECONDS);
+                        ConversionResult storedCompleted = waitForStoredResult(completedFile.id());
+                        ConversionResult storedActive = waitForStoredResult(activeFile.id());
+                        assertTrue(storedCompleted.success());
+                        assertTrue(storedActive.success());
+
+                        // activeFile is converted again, this time blocked inside the tool
+                        CountDownLatch toolStarted = new CountDownLatch(1);
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> blockedToolExecution(toolStarted, releaseTool));
+                        conversionEngine.convertSingle(activeFile, settings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS), "Second run should reach the tool");
+                        waitForActiveConversions(1);
+
+                        // When - the user cancels the running conversion
+                        conversionEngine.cancelConversion();
+
+                        // Then - the completed result survives, the active file's stale entry is dropped
+                        ConversionResult retained = conversionEngine.getConversionResult(completedFile.id());
+                        assertNotNull(retained, "Result of an already-completed conversion must survive a cancel");
+                        assertTrue(retained.success(), "Retained result must be the successful one");
+                        assertNull(conversionEngine.getConversionResult(activeFile.id()),
+                                        "Stale entry for a conversion active at cancel time must be dropped");
+                } finally {
+                        releaseTool.countDown();
+                        deleteRecursively(outputDir);
+                        Files.deleteIfExists(completedOriginal);
+                        Files.deleteIfExists(activeOriginal);
+                }
+        }
+
+        /**
+         * Invokes the private disk-space check synchronously so the re-arm
+         * logic can be tested deterministically instead of waiting for the
+         * 5-second monitor tick.
+         */
+        private void invokeDiskSpaceCheck() throws Exception {
+                Method check = ConversionEngine.class.getDeclaredMethod("checkDiskSpace");
+                check.setAccessible(true);
+                check.invoke(conversionEngine);
+        }
+
+        /**
+         * Invokes the private monitor auto-pause directly, simulating the
+         * delayed second half of the monitor's low-disk check racing a
+         * user resume (the CAS on diskSpacePaused already happened before
+         * the resume, so the auto-pause lands afterwards).
+         */
+        private void invokeAutoPauseForDiskSpace() throws Exception {
+                Method autoPause = ConversionEngine.class.getDeclaredMethod("autoPauseForDiskSpace");
+                autoPause.setAccessible(true);
+                autoPause.invoke(conversionEngine);
+        }
+
+        /**
+         * Polls {@code getConversionResult} for up to 1 second (the result is
+         * stored asynchronously in whenComplete).
+         */
+        private ConversionResult waitForStoredResult(String fileId) throws InterruptedException {
+                ConversionResult stored = null;
+                for (int i = 0; i < 100 && stored == null; i++) {
+                        stored = conversionEngine.getConversionResult(fileId);
+                        if (stored == null) {
+                                Thread.sleep(10);
+                        }
+                }
+                assertNotNull(stored, "Result should have been stored for file: " + fileId);
+                return stored;
         }
 
         /**

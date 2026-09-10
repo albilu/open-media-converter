@@ -763,4 +763,34 @@ class ImageSettingsTest {
         assertEquals(ImageFlip.VERTICAL, settings.flip());
         assertTrue(settings.isValid());
     }
+
+    @Test
+    void jsonDeserialization_WithoutMaintainAspectRatio_DefaultsToTrue() throws Exception {
+        // Given: JSON written before maintainAspectRatio existed (key missing)
+        String json = """
+                {"outputFormat": "PNG"}
+                """;
+
+        // When: Deserialize
+        ImageSettings deserialized = objectMapper.readValue(json, ImageSettings.class);
+
+        // Then: Builder default (true) applies, not primitive boolean false
+        assertTrue(deserialized.maintainAspectRatio(),
+                "missing maintainAspectRatio key must default to true");
+    }
+
+    @Test
+    void jsonDeserialization_WithNullMaintainAspectRatio_DefaultsToTrue() throws Exception {
+        // Given: JSON with an explicit null for maintainAspectRatio
+        String json = """
+                {"outputFormat": "PNG", "maintainAspectRatio": null}
+                """;
+
+        // When: Deserialize
+        ImageSettings deserialized = objectMapper.readValue(json, ImageSettings.class);
+
+        // Then: null must map to the builder default (true)
+        assertTrue(deserialized.maintainAspectRatio(),
+                "null maintainAspectRatio must default to true");
+    }
 }

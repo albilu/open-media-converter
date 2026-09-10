@@ -33,7 +33,8 @@ public final class BatchConversionResult {
             @JsonProperty("failureCount") int failureCount,
             @JsonProperty("totalInputSize") long totalInputSize,
             @JsonProperty("totalOutputSize") long totalOutputSize) {
-        this.results = new ArrayList<>(results);
+        // Missing/null results (old or hand-written files) resolve to empty
+        this.results = results == null ? new ArrayList<>() : new ArrayList<>(results);
         this.totalTime = totalTime;
         this.successCount = successCount;
         this.failureCount = failureCount;

@@ -2,6 +2,7 @@ package org.omc.util;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
@@ -125,5 +126,43 @@ class PathUtilsTest {
     void isWithinDirectory_withDegeneratePath_returnsFalse() {
         assertFalse(PathUtils.isWithinDirectory("/tmp", "a\u0000b"));
         assertFalse(PathUtils.isWithinDirectory("a\u0000b", "/tmp"));
+    }
+
+    // ========== expandHome ==========
+
+    @Test
+    void expandHome_withRegexMetacharactersInHomeDir_replacesTildeLiterally() {
+        // "$" and "\" in the replacement string of replaceFirst have regex
+        // replacement semantics; expansion must be a literal concatenation.
+        assertEquals("/home/we$ird/user/media", PathUtils.expandHome("~/media", "/home/we$ird/user"));
+    }
+
+    @Test
+    void expandHome_withBackslashInHomeDir_replacesTildeLiterally() {
+        assertEquals("/home/we\\ird/user/media", PathUtils.expandHome("~/media", "/home/we\\ird/user"));
+    }
+
+    @Test
+    void expandHome_bareTilde_expandsToHomeDirectory() {
+        assertEquals("/home/we$ird/user", PathUtils.expandHome("~", "/home/we$ird/user"));
+    }
+
+    @Test
+    void expandHome_publicApi_delegatesToUserHomeProperty() {
+        String home = System.getProperty("user.home");
+        assertEquals(home + "/media", PathUtils.expandHome("~/media"));
+    }
+
+    @Test
+    void expandHome_withoutTildePrefix_returnsPathUnchanged() {
+        assertEquals("/opt/data", PathUtils.expandHome("/opt/data"));
+        assertEquals("~other/file", PathUtils.expandHome("~other/file"));
+    }
+
+    @Test
+    void expandHome_nullOrBlank_returnsInputUnchanged() {
+        assertNull(PathUtils.expandHome(null));
+        assertEquals("", PathUtils.expandHome(""));
+        assertEquals("   ", PathUtils.expandHome("   "));
     }
 }

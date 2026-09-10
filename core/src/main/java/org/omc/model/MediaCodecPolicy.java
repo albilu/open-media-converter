@@ -32,7 +32,10 @@ public final class MediaCodecPolicy {
      */
     public static String audioCodec(FileFormat format, String codec) {
         if (format == null || codec == null || codec.equals("copy")) return codec;
-        if (!java.util.Set.of("aac", "libmp3lame", "pcm_s16le", "flac", "libopus", "libvorbis", "alac").contains(codec)) {
+        // "opus" is the user-facing alias of the libopus encoder (accepted by
+        // AudioSettings and persisted in settings); it must pass the gate so
+        // the per-container switch can map it like any other known codec.
+        if (!java.util.Set.of("aac", "libmp3lame", "pcm_s16le", "flac", "libopus", "libvorbis", "alac", "opus").contains(codec)) {
             return codec;
         }
         return switch (format) {

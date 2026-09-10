@@ -803,12 +803,34 @@ class ValidationEngineTest {
     }
 
     @Test
+    void validateFormatPair_videoToImage_returnsFailure() {
+        // Video-to-image ("thumbnail") conversions pass validation but always
+        // fail later in ToolManager (FFmpeg only supports video/audio output),
+        // so validation must reject them up front with a clear error.
+        ValidationResult result = validationEngine.validateFormatPair(FileFormat.MP4, FileFormat.PNG);
+
+        assertTrue(result.isFailure(), "Video to image conversion must be rejected by validation");
+        assertTrue(result.getErrors().stream().anyMatch(e -> e.contains("Incompatible format conversion")));
+    }
+
+    @Test
     void validateFormatPair_documentToDocument_returnsSuccessWithWarning() {
         ValidationResult result = validationEngine.validateFormatPair(FileFormat.DOCX, FileFormat.PDF);
 
         // Document to document is compatible but shows cross-category warning
         assertTrue(result.isSuccess()
                 || result.getWarnings().stream().anyMatch(w -> w.contains("Cross-category") || w.isEmpty()));
+    }
+
+    @Test
+    void validateFormatPair_documentToJpeg_returnsFailure() {
+        // JPEG is IMAGE-only (no document tool can write it), so a DOCUMENT input
+        // paired with JPEG output must be rejected up front instead of failing
+        // later in ToolManager with "Unsupported document conversion"
+        ValidationResult result = validationEngine.validateFormatPair(FileFormat.DOCX, FileFormat.JPEG);
+
+        assertFalse(result.isSuccess(), "DOCX to JPEG must not validate: no document tool supports JPEG output");
+        assertTrue(result.isFailure());
     }
 
     @Test

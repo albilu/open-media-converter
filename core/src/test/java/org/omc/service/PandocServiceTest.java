@@ -11,10 +11,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.omc.core.ProgressCallback;
 import org.omc.exception.ToolExecutionException;
@@ -675,6 +677,47 @@ class PandocServiceTest {
 
         // Verify the partial file was cleaned up
         assertFalse(Files.exists(partialOutput));
+    }
+
+    // ========================================
+    // Execution timeout tests
+    // ========================================
+
+    /**
+     * A wedged pandoc process (e.g. interactive stdin) must not hang the
+     * worker forever: the service must destroy the process and fail after
+     * the configured timeout, mirroring FFmpegService.
+     */
+    @Test
+    @Timeout(value = 30)
+    void testConvertDocument_HangingProcess_TimesOutAndFails() throws Exception {
+        assumeUnixLike();
+        Path hangingPandoc = tempDir.resolve("pandoc-hanging");
+        Files.writeString(hangingPandoc, "#!/bin/sh\nexec sleep 60\n");
+        Files.setPosixFilePermissions(hangingPandoc, PosixFilePermissions.fromString("rwxr-xr-x"));
+        PandocService hangingService = new PandocService(hangingPandoc);
+
+        Path input = tempDir.resolve("input.md");
+        Files.writeString(input, "# Test Document\n");
+        Path output = tempDir.resolve("output.html");
+
+        long originalTimeout = PandocService.PROCESS_TIMEOUT_MILLIS;
+        PandocService.PROCESS_TIMEOUT_MILLIS = 1200;
+        try {
+            ToolExecutionException exception = assertThrows(ToolExecutionException.class,
+                    () -> hangingService.convertDocument(input, output, defaultSettings, noOpCallback));
+            assertTrue(exception.getMessage().contains("timed out"),
+                    "Timeout failure expected but got: " + exception.getMessage());
+        } finally {
+            PandocService.PROCESS_TIMEOUT_MILLIS = originalTimeout;
+        }
+    }
+
+    private void assumeUnixLike() {
+        String os = System.getProperty("os.name").toLowerCase();
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                os.contains("nix") || os.contains("nux") || os.contains("mac"),
+                "Requires POSIX executable scripts");
     }
 
     // ========================================

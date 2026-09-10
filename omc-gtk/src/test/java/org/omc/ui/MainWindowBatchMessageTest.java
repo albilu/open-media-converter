@@ -48,4 +48,30 @@ class MainWindowBatchMessageTest {
         assertEquals("All 2 files failed to convert.",
                 MainWindowJavaGi.composeBatchCompletionMessage(2, 0, 1, 1));
     }
+
+    @Test
+    void successPlusRemovedFile_doesNotClaimAllSuccessful() {
+        // 1 success + 1 file removed mid-conversion: the batch completed but
+        // not every file converted, so the all-successful wording would lie.
+        assertEquals("2 files processed: 1 succeeded, 1 removed during conversion",
+                MainWindowJavaGi.composeBatchCompletionMessage(2, 1, 0, 0));
+    }
+
+    @Test
+    void twoOfTwoSuccessful_stillAnnouncesAllSuccessful() {
+        assertEquals("All 2 files converted successfully!",
+                MainWindowJavaGi.composeBatchCompletionMessage(2, 2, 0, 0));
+    }
+
+    @Test
+    void allRemoved_reportsRemovedFilesAccurately() {
+        assertEquals("1 files processed: 0 succeeded, 1 removed during conversion",
+                MainWindowJavaGi.composeBatchCompletionMessage(1, 0, 0, 0));
+    }
+
+    @Test
+    void removedMixedWithFailure_listsAllOutcomes() {
+        assertEquals("3 files processed: 1 succeeded, 1 failed, 1 removed during conversion",
+                MainWindowJavaGi.composeBatchCompletionMessage(3, 1, 1, 0));
+    }
 }

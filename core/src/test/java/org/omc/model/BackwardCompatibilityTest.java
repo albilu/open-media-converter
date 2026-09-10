@@ -285,7 +285,10 @@ class BackwardCompatibilityTest {
         assertEquals(ConversionStatus.COMPLETED, file.status());
         assertEquals(100, file.progress());
         assertNull(file.errorMessage());
-        assertNotNull(file.metadata());
+        // Legacy metadata objects lack the "type" discriminator, so the
+        // subtype cannot be reconstructed: metadata degrades to null rather
+        // than failing the whole ConversionFile
+        assertNull(file.metadata());
 
         // Verify outputPath() returns Optional.empty() when field is missing
         assertNotNull(file.outputPath());

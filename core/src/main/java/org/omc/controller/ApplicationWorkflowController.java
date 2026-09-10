@@ -74,7 +74,10 @@ public class ApplicationWorkflowController {
     private volatile List<Path> recentFilePaths;
 
     // Current settings cached for quick access
-    private ConversionSettings currentSettings;
+    // Written on the GTK thread, read on engine threads (completion handler
+    // saves session state with currentSettings) - volatile guarantees
+    // publication across threads
+    private volatile ConversionSettings currentSettings;
 
     // UI callback handlers for progress and completion events
     // Requirement REQ-004.2: Forward conversion events to UI
@@ -758,12 +761,17 @@ public class ApplicationWorkflowController {
 
         try {
             conversionEngine.cancelConversion();
-            conversionInProgress.set(false);
-            logger.info("Conversion cancelled successfully");
+            logger.info("Conversion cancellation requested");
+
+            // NOTE: conversionInProgress flag is cleared by the completion handler
+            // when all active conversions actually finish (same as
+            // handleCancelConversion), so the flag keeps reflecting the actual
+            // state of running conversions instead of being cleared eagerly.
 
         } catch (Exception e) {
             logger.error("Failed to cancel conversion", e);
             // Don't throw, as cancellation should be best effort
+            // Flag will still be cleared by completion handler when conversions finish
         }
     }
 
@@ -1119,6 +1127,11 @@ public class ApplicationWorkflowController {
 
         logger.info("handleStartConversion workflow started");
 
+        // Tracks whether this invocation won the race to claim the conversion
+        // flag; only the winner may clear it on failure so a losing concurrent
+        // start cannot disturb the winner's running batch
+        boolean startedByThisCall = false;
+
         try {
             // Requirement REQ-004.2: Validate file list not empty
             List<ConversionFile> files = fileManager.getFiles();
@@ -1148,9 +1161,15 @@ public class ApplicationWorkflowController {
             logger.info("Starting conversion for {} files in {} order",
                     files.size(), sortState.isSorted() ? sortState.toString() : "insertion");
 
-            // Set flag BEFORE calling convertBatch to avoid race condition
-            // where user cancels while async tasks are starting
-            conversionInProgress.set(true);
+            // Atomically claim the conversion flag BEFORE calling convertBatch
+            // (avoids the race where a concurrent start passes the check above
+            // and then touches engine state while a winner's batch runs).
+            // A starter that loses this race must fail here without clearing
+            // the winner's flag.
+            if (!conversionInProgress.compareAndSet(false, true)) {
+                throw new IllegalStateException("Conversion already in progress");
+            }
+            startedByThisCall = true;
 
             try {
                 // Call ConversionEngine to start batch conversion
@@ -1164,8 +1183,11 @@ public class ApplicationWorkflowController {
                 // uiCompletionCallback)
 
             } catch (Exception conversionException) {
-                // Reset flag if conversion failed to start
-                conversionInProgress.set(false);
+                // Reset flag if conversion failed to start, but only when this
+                // invocation actually claimed it (the CAS winner owns the flag)
+                if (startedByThisCall) {
+                    conversionInProgress.set(false);
+                }
                 logger.error("Failed to start conversion", conversionException);
                 throw new RuntimeException("Failed to start conversion: " + conversionException.getMessage(),
                         conversionException);
@@ -1175,9 +1197,9 @@ public class ApplicationWorkflowController {
             logger.warn("Conversion start validation failed: {}", e.getMessage());
             // NOTE: Validation error dialogs are shown by
             // MainWindowJavaGi.showErrorDialog() (line 1051)
-            // Don't re-throw - this is a validation error that should be handled gracefully
-            // The UI shows a user-friendly message instead of a stack trace
-            // For now, we just log the warning and return gracefully
+            // Re-throw so the UI can roll back its locked state; the UI is
+            // responsible for showing a user-friendly message
+            throw e;
         } catch (RuntimeException e) {
             // Re-throw RuntimeException from conversion start failure
             throw e;

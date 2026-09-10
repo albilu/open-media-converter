@@ -612,9 +612,7 @@ public class SettingsManager {
                         existingRoot = (ObjectNode) tree;
                     }
                     if (presetsNode != null && presetsNode.isArray()) {
-                        customPresets.addAll(JsonUtils.getObjectMapper().convertValue(
-                                presetsNode, new TypeReference<List<SettingsPreset>>() {
-                                }));
+                        customPresets.addAll(readLegacyPresetList(presetsNode));
                     }
                 } catch (IOException | IllegalArgumentException e) {
                     logger.warn("Failed to load existing presets, backing up before overwrite", e);
@@ -670,31 +668,48 @@ public class SettingsManager {
             throw new IllegalArgumentException("Cannot delete built-in preset: " + name);
         }
 
-        // Load existing custom presets
-        Path presetsPath = configurationManager.getConfigDirectory().resolve("presets.json");
-        if (!Files.exists(presetsPath)) {
-            throw new IllegalArgumentException("Preset not found: " + name);
-        }
-
-        List<SettingsPreset> customPresets = new ArrayList<>();
-        try {
-            PresetContainer container = JsonUtils.readJsonFile(presetsPath.toFile(), PresetContainer.class);
-            if (container != null && container.presets != null) {
-                customPresets.addAll(container.presets);
+        // Read-merge-write cycle is guarded so concurrent preset modifications
+        // cannot interleave (consistent with savePreset)
+        synchronized (this) {
+            // Load existing custom presets
+            Path presetsPath = configurationManager.getConfigDirectory().resolve("presets.json");
+            if (!Files.exists(presetsPath)) {
+                throw new IllegalArgumentException("Preset not found: " + name);
             }
-        } catch (IOException e) {
-            throw new IOException("Failed to load presets file", e);
-        }
 
-        // Remove the preset
-        boolean removed = customPresets.removeIf(p -> p.name().equals(name));
-        if (!removed) {
-            throw new IllegalArgumentException("Preset not found: " + name);
-        }
+            // Load existing custom presets from the raw JSON tree so
+            // coexisting unknown keys (e.g. section presets) survive the
+            // rewrite (same pattern as savePreset)
+            List<SettingsPreset> customPresets = new ArrayList<>();
+            ObjectNode existingRoot = null;
+            try {
+                JsonNode tree = JsonUtils.getObjectMapper().readTree(presetsPath.toFile());
+                JsonNode presetsNode = tree != null && tree.isObject() ? tree.get("presets") : tree;
+                if (tree != null && tree.isObject()) {
+                    existingRoot = (ObjectNode) tree;
+                }
+                if (presetsNode != null && presetsNode.isArray()) {
+                    customPresets.addAll(readLegacyPresetList(presetsNode));
+                }
+            } catch (IOException | IllegalArgumentException e) {
+                throw new IOException("Failed to load presets file", e);
+            }
 
-        // Save updated list
-        PresetContainer container = new PresetContainer(customPresets);
-        savePresetsAtomic(container, presetsPath);
+            // Remove the preset
+            boolean removed = customPresets.removeIf(p -> p.name().equals(name));
+            if (!removed) {
+                throw new IllegalArgumentException("Preset not found: " + name);
+            }
+
+            // Save updated list, preserving coexisting section-based presets
+            if (existingRoot != null) {
+                existingRoot.set("presets", JsonUtils.getObjectMapper().valueToTree(customPresets));
+                savePresetsAtomic(existingRoot, presetsPath);
+            } else {
+                PresetContainer container = new PresetContainer(customPresets);
+                savePresetsAtomic(container, presetsPath);
+            }
+        }
 
         logger.info("Preset deleted successfully: {}", name);
     }
@@ -1028,9 +1043,7 @@ public class SettingsManager {
             List<SettingsPreset> oldPresets = List.of();
             if (legacyNode != null && legacyNode.isArray()) {
                 mapLegacyGlobalOutputFormats(legacyNode);
-                oldPresets = JsonUtils.getObjectMapper().convertValue(
-                        legacyNode, new TypeReference<List<SettingsPreset>>() {
-                        });
+                oldPresets = readLegacyPresetList(legacyNode);
             }
 
             // Preserve section presets coexisting with legacy data (mixed files)
@@ -1130,10 +1143,10 @@ public class SettingsManager {
 
                     if (sectionPreset != null) {
                         switch (category) {
-                            case VIDEO -> videoPresets.add(sectionPreset);
-                            case AUDIO -> audioPresets.add(sectionPreset);
-                            case IMAGE -> imagePresets.add(sectionPreset);
-                            case DOCUMENT -> documentPresets.add(sectionPreset);
+                            case VIDEO -> addMigratedPresetIfAbsent(videoPresets, sectionPreset, oldPreset.name());
+                            case AUDIO -> addMigratedPresetIfAbsent(audioPresets, sectionPreset, oldPreset.name());
+                            case IMAGE -> addMigratedPresetIfAbsent(imagePresets, sectionPreset, oldPreset.name());
+                            case DOCUMENT -> addMigratedPresetIfAbsent(documentPresets, sectionPreset, oldPreset.name());
                             default -> {
                             }
                         }
@@ -1150,8 +1163,11 @@ public class SettingsManager {
                     imagePresets,
                     documentPresets);
 
-            // Save in new format
-            savePresetsBySection(newPresets);
+            // Save in new format, consuming the legacy "presets" key so the
+            // rewritten file is no longer legacy-shaped and subsequent loads
+            // take the normal path instead of re-migrating (and re-appending)
+            // the same legacy presets on every load
+            savePresetsBySection(newPresets, true);
 
             logger.info("Successfully migrated {} presets: {} video, {} audio, {} image, {} document",
                     oldPresets.size(), videoPresets.size(), audioPresets.size(),
@@ -1301,11 +1317,59 @@ public class SettingsManager {
     }
 
     /**
+     * Converts a legacy presets array node into a list of
+     * {@link SettingsPreset}, defensively dropping null elements so later
+     * name-based processing (duplicate removal, migration) can never fail
+     * with a {@link NullPointerException}.
+     *
+     * @param presetsNode array node of legacy presets
+     * @return converted list without null elements
+     */
+    private List<SettingsPreset> readLegacyPresetList(JsonNode presetsNode) {
+        List<SettingsPreset> presets = JsonUtils.getObjectMapper().convertValue(
+                presetsNode, new TypeReference<List<SettingsPreset>>() {
+                });
+        return presets.stream()
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    /**
+     * Appends a migrated legacy preset to its section list unless a preset
+     * with the same name (case-insensitive, consistent with
+     * {@link #addSectionPreset(SectionPreset)}) already exists there.
+     *
+     * <p>
+     * Protects mixed files that already carry duplicates from accumulating
+     * more copies if their legacy data is ever migrated.
+     * </p>
+     *
+     * @param sectionPresets target section list, modified in place
+     * @param preset         the migrated preset to append
+     * @param name           the legacy preset name used for duplicate matching
+     */
+    private void addMigratedPresetIfAbsent(List<SectionPreset> sectionPresets, SectionPreset preset, String name) {
+        boolean duplicateExists = sectionPresets.stream()
+                .anyMatch(existing -> existing.name().equalsIgnoreCase(name));
+        if (duplicateExists) {
+            logger.info("Skipping legacy preset '{}': name already exists in the section", name);
+            return;
+        }
+        sectionPresets.add(preset);
+    }
+
+    /**
      * Saves presets by section to disk.
      * 
      * <p>
      * Uses atomic write operation with temp file and rename to prevent corruption.
      * Pretty-prints JSON for human readability.
+     * </p>
+     * 
+     * <p>
+     * When an existing presets file is readable, the section fields are merged
+     * into its JSON root so coexisting keys (e.g. a legacy {@code presets}
+     * array) are preserved instead of being dropped by the rewrite.
      * </p>
      * 
      * <p>
@@ -1319,15 +1383,60 @@ public class SettingsManager {
      * @throws IOException if write operation fails
      */
     private synchronized void savePresetsBySection(PresetsBySection presets) throws IOException {
+        savePresetsBySection(presets, false);
+    }
+
+    /**
+     * Saves presets by section to disk, optionally consuming the legacy
+     * {@code presets} key from the existing file root.
+     *
+     * <p>
+     * <b>Legacy key consumption:</b> the migration path passes
+     * {@code true} so the rewritten file no longer carries the legacy
+     * {@code presets} array. Without this, every load would re-classify the
+     * file as legacy-shaped, re-run migration and append another duplicate
+     * copy of each legacy preset (plus one timestamped backup per load).
+     * Normal saves (add/delete section preset) pass {@code false} and keep
+     * the preservation semantics for coexisting keys.
+     * </p>
+     *
+     * @param presets                The presets to save
+     * @param consumeLegacyPresetsKey whether to remove the legacy
+     *                               {@code presets} key from the merged root
+     * @throws IOException if write operation fails
+     */
+    private synchronized void savePresetsBySection(PresetsBySection presets, boolean consumeLegacyPresetsKey)
+            throws IOException {
         Path configDir = configurationManager.getConfigDirectory();
         Path presetsPath = configDir.resolve("presets.json");
         Path tempPath = configDir.resolve("presets.json.tmp");
 
         logger.debug("Saving presets to: {}", presetsPath);
 
+        // Merge the section fields into the existing file root when possible
+        // so coexisting keys (e.g. a legacy "presets" array) survive the save
+        Object valueToWrite = presets;
+        if (Files.exists(presetsPath)) {
+            try {
+                JsonNode existingRoot = JsonUtils.getObjectMapper().readTree(presetsPath.toFile());
+                if (existingRoot instanceof ObjectNode existingObject) {
+                    JsonNode sectionFields = JsonUtils.getObjectMapper().valueToTree(presets);
+                    for (String sectionKey : CURRENT_SECTION_KEYS) {
+                        existingObject.set(sectionKey, sectionFields.get(sectionKey));
+                    }
+                    if (consumeLegacyPresetsKey) {
+                        existingObject.remove(LEGACY_PRESETS_KEY);
+                    }
+                    valueToWrite = existingObject;
+                }
+            } catch (IOException e) {
+                logger.warn("Failed to read existing presets file, writing fresh sections only", e);
+            }
+        }
+
         try {
             // Write to temporary file first
-            JsonUtils.writeJsonFile(presets, tempPath.toFile());
+            JsonUtils.writeJsonFile(valueToWrite, tempPath.toFile());
 
             // Atomic move to final location (falls back to a plain move on
             // filesystems without atomic move support)
@@ -1354,10 +1463,11 @@ public class SettingsManager {
      * </p>
      * 
      * <p>
-     * <b>Thread Safety:</b> This method is not thread-safe. If concurrent access is
-     * needed, external synchronization should be applied by the caller.
+     * <b>Thread Safety:</b> The read-merge-write cycle is synchronized on the
+     * SettingsManager instance (consistent with {@link #savePreset}), so
+     * concurrent preset modifications cannot interleave.
      * </p>
-     * 
+     *
      * <p>
      * Requirement 2.6: Preset creation and management
      * </p>
@@ -1380,34 +1490,38 @@ public class SettingsManager {
 
         logger.debug("Adding section preset: {} (category: {})", preset.name(), preset.category());
 
-        // Load current presets
-        PresetsBySection currentPresets = loadPresetsBySection();
+        // Read-merge-write cycle is guarded so concurrent preset modifications
+        // cannot interleave (consistent with savePreset)
+        synchronized (this) {
+            // Load current presets
+            PresetsBySection currentPresets = loadPresetsBySection();
 
-        // Get list for the preset's category
-        List<SectionPreset> categoryPresets = new ArrayList<>(
-                currentPresets.getPresetsForCategory(preset.category()));
+            // Get list for the preset's category
+            List<SectionPreset> categoryPresets = new ArrayList<>(
+                    currentPresets.getPresetsForCategory(preset.category()));
 
-        // Check for duplicate name (case-insensitive)
-        boolean duplicateExists = categoryPresets.stream()
-                .anyMatch(existing -> existing.name().equalsIgnoreCase(preset.name()));
+            // Check for duplicate name (case-insensitive)
+            boolean duplicateExists = categoryPresets.stream()
+                    .anyMatch(existing -> existing.name().equalsIgnoreCase(preset.name()));
 
-        if (duplicateExists) {
-            logger.warn("Preset with name '{}' already exists in category {}",
-                    preset.name(), preset.category());
-            throw new IllegalArgumentException(
-                    String.format("A preset named '%s' already exists in the %s category",
-                            preset.name(), preset.category().name().toLowerCase()));
+            if (duplicateExists) {
+                logger.warn("Preset with name '{}' already exists in category {}",
+                        preset.name(), preset.category());
+                throw new IllegalArgumentException(
+                        String.format("A preset named '%s' already exists in the %s category",
+                                preset.name(), preset.category().name().toLowerCase()));
+            }
+
+            // Add preset to list
+            categoryPresets.add(preset);
+
+            // Create updated PresetsBySection
+            PresetsBySection updatedPresets = replacePresetsForCategory(
+                    currentPresets, preset.category(), categoryPresets);
+
+            // Save to disk
+            savePresetsBySection(updatedPresets);
         }
-
-        // Add preset to list
-        categoryPresets.add(preset);
-
-        // Create updated PresetsBySection
-        PresetsBySection updatedPresets = replacePresetsForCategory(
-                currentPresets, preset.category(), categoryPresets);
-
-        // Save to disk
-        savePresetsBySection(updatedPresets);
 
         logger.info("Successfully added preset '{}' to {} category",
                 preset.name(), preset.category());
@@ -1426,10 +1540,11 @@ public class SettingsManager {
      * </p>
      * 
      * <p>
-     * <b>Thread Safety:</b> This method is not thread-safe. If concurrent access is
-     * needed, external synchronization should be applied by the caller.
+     * <b>Thread Safety:</b> The read-merge-write cycle is synchronized on the
+     * SettingsManager instance (consistent with {@link #savePreset}), so
+     * concurrent preset modifications cannot interleave.
      * </p>
-     * 
+     *
      * <p>
      * Requirement 2.6: Preset deletion
      * </p>
@@ -1452,31 +1567,35 @@ public class SettingsManager {
 
         logger.debug("Deleting section preset: {} from category: {}", name, category);
 
-        // Load current presets
-        PresetsBySection currentPresets = loadPresetsBySection();
+        // Read-merge-write cycle is guarded so concurrent preset modifications
+        // cannot interleave (consistent with savePreset)
+        synchronized (this) {
+            // Load current presets
+            PresetsBySection currentPresets = loadPresetsBySection();
 
-        // Get list for the category
-        List<SectionPreset> categoryPresets = new ArrayList<>(
-                currentPresets.getPresetsForCategory(category));
+            // Get list for the category
+            List<SectionPreset> categoryPresets = new ArrayList<>(
+                    currentPresets.getPresetsForCategory(category));
 
-        // Filter out the preset to delete (case-insensitive)
-        List<SectionPreset> filteredPresets = categoryPresets.stream()
-                .filter(preset -> !preset.name().equalsIgnoreCase(name))
-                .toList();
+            // Filter out the preset to delete (case-insensitive)
+            List<SectionPreset> filteredPresets = categoryPresets.stream()
+                    .filter(preset -> !preset.name().equalsIgnoreCase(name))
+                    .toList();
 
-        // Check if any preset was actually removed
-        if (filteredPresets.size() == categoryPresets.size()) {
-            logger.warn("Preset '{}' not found in category {}", name, category);
-            // Don't throw exception, just log warning and return
-            return;
+            // Check if any preset was actually removed
+            if (filteredPresets.size() == categoryPresets.size()) {
+                logger.warn("Preset '{}' not found in category {}", name, category);
+                // Don't throw exception, just log warning and return
+                return;
+            }
+
+            // Create updated PresetsBySection
+            PresetsBySection updatedPresets = replacePresetsForCategory(
+                    currentPresets, category, filteredPresets);
+
+            // Save to disk
+            savePresetsBySection(updatedPresets);
         }
-
-        // Create updated PresetsBySection
-        PresetsBySection updatedPresets = replacePresetsForCategory(
-                currentPresets, category, filteredPresets);
-
-        // Save to disk
-        savePresetsBySection(updatedPresets);
 
         logger.info("Successfully deleted preset '{}' from {} category", name, category);
     }

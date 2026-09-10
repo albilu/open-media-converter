@@ -40,16 +40,18 @@ public final class AudioSettings {
     @JsonCreator
     private AudioSettings(
             @JsonProperty("codec") String codec,
-            @JsonProperty("bitrate") int bitrate,
-            @JsonProperty("sampleRate") int sampleRate,
-            @JsonProperty("channels") int channels,
-            @JsonProperty("quality") int quality,
+            @JsonProperty("bitrate") Integer bitrate,
+            @JsonProperty("sampleRate") Integer sampleRate,
+            @JsonProperty("channels") Integer channels,
+            @JsonProperty("quality") Integer quality,
             @JsonProperty("outputFormat") FileFormat outputFormat) {
-        this.codec = codec;
-        this.bitrate = bitrate;
-        this.sampleRate = sampleRate;
-        this.channels = channels;
-        this.quality = quality;
+        // Missing/null keys must fall back to the Builder defaults (safe
+        // defaults for missing fields), not to primitive zero/null values
+        this.codec = codec != null ? codec : "libmp3lame";
+        this.bitrate = bitrate != null ? bitrate : 192;
+        this.sampleRate = sampleRate != null ? sampleRate : -1;
+        this.channels = channels != null ? channels : -1;
+        this.quality = quality != null ? quality : 5;
         this.outputFormat = outputFormat;
     }
 
@@ -111,6 +113,26 @@ public final class AudioSettings {
     @JsonProperty("outputFormat")
     public FileFormat outputFormat() {
         return outputFormat;
+    }
+
+    /**
+     * Copies settings with a different output format, preserving all other
+     * audio options (bitrate, sample rate, channels, quality).
+     *
+     * <p>
+     * The codec is rewritten for container compatibility via
+     * {@link MediaCodecPolicy#audioCodec(FileFormat, String)}, matching
+     * {@link Builder#outputFormat(FileFormat)} semantics exactly; a "copy"
+     * codec is always retained because compatibility depends on the source
+     * stream.
+     * </p>
+     *
+     * @param format the new output format
+     * @return settings retaining all audio options with the new format
+     */
+    public AudioSettings withOutputFormat(FileFormat format) {
+        return new AudioSettings(MediaCodecPolicy.audioCodec(format, codec),
+                bitrate, sampleRate, channels, quality, format);
     }
 
     /**

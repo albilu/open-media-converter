@@ -506,4 +506,113 @@ class VideoSettingsTest {
         assertEquals("h264_nvenc", deserialized.codec());
         assertEquals(AspectRatio.RATIO_16_9, deserialized.aspectRatio());
     }
+
+    // ========== Missing-Field Safe Defaults (JSON deserialization) ==========
+
+    @Test
+    void jsonDeserialization_WithMinimalJson_ShouldUseBuilderDefaultsForAllMissingFields() throws Exception {
+        // Given: settings/preset JSON carrying only the output format
+        String json = "{\"outputFormat\":\"MP4\"}";
+
+        // When
+        VideoSettings deserialized = objectMapper.readValue(json, VideoSettings.class);
+
+        // Then: every missing field must deserialize to its Builder default
+        assertEquals("libx264", deserialized.codec());
+        assertEquals(5000, deserialized.bitrate());
+        assertNull(deserialized.resolution());
+        assertEquals(-1, deserialized.frameRate());
+        assertEquals("medium", deserialized.preset());
+        assertEquals(23, deserialized.crf());
+        assertEquals(AspectRatio.KEEP_ORIGINAL, deserialized.aspectRatio());
+        assertEquals(FileFormat.MP4, deserialized.outputFormat());
+        assertTrue(deserialized.isValid(), "minimal JSON must deserialize to a valid settings object");
+    }
+
+    @Test
+    void jsonDeserialization_WithEmptyObject_ShouldUseBuilderDefaultsAndKeepNullFormat() throws Exception {
+        // Given: JSON with no keys at all (the builder cannot build a null
+        // format; deserialization must not invent one either)
+        String json = "{}";
+
+        // When
+        VideoSettings deserialized = objectMapper.readValue(json, VideoSettings.class);
+
+        // Then: all other fields still fall back to Builder defaults
+        assertEquals("libx264", deserialized.codec());
+        assertEquals(5000, deserialized.bitrate());
+        assertNull(deserialized.resolution());
+        assertEquals(-1, deserialized.frameRate());
+        assertEquals("medium", deserialized.preset());
+        assertEquals(23, deserialized.crf());
+        assertEquals(AspectRatio.KEEP_ORIGINAL, deserialized.aspectRatio());
+        assertNull(deserialized.outputFormat());
+        assertFalse(deserialized.isValid(), "null outputFormat must stay invalid");
+    }
+
+    @Test
+    void jsonDeserialization_WithExplicitValues_ShouldNotAlterThem() throws Exception {
+        // Given: complete JSON with explicit values
+        String json = "{\"codec\":\"hevc_nvenc\",\"bitrate\":2500,"
+                + "\"resolution\":{\"width\":1280,\"height\":720},"
+                + "\"frameRate\":24,\"preset\":\"fast\",\"crf\":28,"
+                + "\"aspectRatio\":\"RATIO_16_9\",\"outputFormat\":\"MKV\"}";
+
+        // When
+        VideoSettings deserialized = objectMapper.readValue(json, VideoSettings.class);
+
+        // Then: explicit values are preserved exactly
+        assertEquals("hevc_nvenc", deserialized.codec());
+        assertEquals(2500, deserialized.bitrate());
+        assertEquals(new Resolution(1280, 720), deserialized.resolution());
+        assertEquals(24, deserialized.frameRate());
+        assertEquals("fast", deserialized.preset());
+        assertEquals(28, deserialized.crf());
+        assertEquals(AspectRatio.RATIO_16_9, deserialized.aspectRatio());
+        assertEquals(FileFormat.MKV, deserialized.outputFormat());
+    }
+
+    @Test
+    void jsonDeserialization_WithExplicitInvalidBitrate_ShouldNotBeFixed() throws Exception {
+        // Given: an explicit out-of-range bitrate (missing-key defaulting must
+        // not "fix" explicit values)
+        String json = "{\"bitrate\":0,\"outputFormat\":\"MP4\"}";
+
+        // When
+        VideoSettings deserialized = objectMapper.readValue(json, VideoSettings.class);
+
+        // Then: the explicit 0 stays and remains invalid
+        assertEquals(0, deserialized.bitrate());
+        assertFalse(deserialized.isValid());
+    }
+
+    // ========== withOutputFormat Tests ==========
+
+    @Test
+    void withOutputFormat_ShouldPreserveAllFields() {
+        // Given: VideoSettings with every field set to a non-default value
+        VideoSettings original = VideoSettings.builder()
+                .codec("libx265")
+                .bitrate(8000)
+                .resolution(new Resolution(1280, 720))
+                .frameRate(60)
+                .preset("slow")
+                .crf(20)
+                .aspectRatio(AspectRatio.RATIO_16_9)
+                .outputFormat(FileFormat.MP4)
+                .build();
+
+        // When: Changing only the output format
+        VideoSettings updated = original.withOutputFormat(FileFormat.MKV);
+
+        // Then: All 8 fields except the format must be preserved (codec kept as-is)
+        assertEquals(FileFormat.MKV, updated.outputFormat());
+        assertEquals("libx265", updated.codec());
+        assertEquals(8000, updated.bitrate());
+        assertEquals(new Resolution(1280, 720), updated.resolution());
+        assertEquals(60, updated.frameRate());
+        assertEquals("slow", updated.preset());
+        assertEquals(20, updated.crf());
+        assertEquals(AspectRatio.RATIO_16_9, updated.aspectRatio());
+    }
 }

@@ -28,7 +28,28 @@ public final class ConversionResult {
     private final long inputSize;
     private final long outputSize;
     private final ConversionTool toolUsed;
+    // Explicit cancellation flag: cancellation is a state, not a property of
+    // the error message text (a failing file named "cancelled_*.mp4" must not
+    // be misclassified, and reworded messages must not break detection).
+    private final boolean cancelled;
 
+    /**
+     * Jackson creator for {@link ConversionResult}.
+     *
+     * @param fileId         identifier of the converted file
+     * @param success        whether the conversion succeeded
+     * @param outputPath     path of the produced output (null on failure)
+     * @param errorMessage   error description (null on success)
+     * @param toolOutput     bounded captured tool output (may be empty)
+     * @param conversionTime wall-clock conversion duration
+     * @param inputSize      input file size in bytes
+     * @param outputSize     output file size in bytes
+     * @param toolUsed       tool that executed the conversion
+     * @param cancelled      explicit cancellation state; absent in JSON written
+     *                       by older versions, where the primitive default
+     *                       {@code false} applies (cancellation is a state, not
+     *                       a property of the error message text)
+     */
     @JsonCreator
     public ConversionResult(
             @JsonProperty("fileId") String fileId,
@@ -39,7 +60,8 @@ public final class ConversionResult {
             @JsonProperty("conversionTime") Duration conversionTime,
             @JsonProperty("inputSize") long inputSize,
             @JsonProperty("outputSize") long outputSize,
-            @JsonProperty("toolUsed") ConversionTool toolUsed) {
+            @JsonProperty("toolUsed") ConversionTool toolUsed,
+            @JsonProperty("cancelled") boolean cancelled) {
         this.fileId = fileId;
         this.success = success;
         this.outputPath = outputPath;
@@ -49,11 +71,12 @@ public final class ConversionResult {
         this.inputSize = inputSize;
         this.outputSize = outputSize;
         this.toolUsed = toolUsed;
+        this.cancelled = cancelled;
     }
 
     /**
      * Creates a successful conversion result.
-     * 
+     *
      * @param fileId         The unique identifier of the converted file
      * @param outputPath     The path to the output file
      * @param toolOutput     The combined stdout and stderr from the tool execution
@@ -68,12 +91,12 @@ public final class ConversionResult {
             Duration conversionTime, long inputSize, long outputSize,
             ConversionTool toolUsed) {
         return new ConversionResult(fileId, true, outputPath, null, toolOutput, conversionTime,
-                inputSize, outputSize, toolUsed);
+                inputSize, outputSize, toolUsed, false);
     }
 
     /**
      * Creates a failed conversion result.
-     * 
+     *
      * @param fileId         The unique identifier of the file
      * @param errorMessage   The error message describing the failure
      * @param toolOutput     The combined stdout and stderr from the tool execution
@@ -86,12 +109,12 @@ public final class ConversionResult {
     public static ConversionResult failure(String fileId, String errorMessage, String toolOutput,
             Duration conversionTime, long inputSize, ConversionTool toolUsed) {
         return new ConversionResult(fileId, false, null, errorMessage, toolOutput, conversionTime,
-                inputSize, 0, toolUsed);
+                inputSize, 0, toolUsed, false);
     }
 
     /**
      * Creates a cancelled conversion result.
-     * 
+     *
      * @param fileId         The unique identifier of the file
      * @param toolOutput     The partial tool output captured before cancellation
      *                       (nullable)
@@ -103,15 +126,32 @@ public final class ConversionResult {
     public static ConversionResult cancelled(String fileId, String toolOutput, Duration conversionTime,
             long inputSize, ConversionTool toolUsed) {
         return new ConversionResult(fileId, false, null, "Conversion cancelled by user", toolOutput,
-                conversionTime, inputSize, 0, toolUsed);
+                conversionTime, inputSize, 0, toolUsed, true);
     }
 
     /**
      * Checks if this result represents a cancelled conversion.
+     *
+     * <p>
+     * This is an explicit flag set by the {@link #cancelled} factory; it is
+     * deliberately NOT inferred from the error message text.
+     * </p>
      */
     @JsonIgnore
     public boolean isCancelled() {
-        return !success && errorMessage != null && errorMessage.contains("cancelled");
+        return cancelled;
+    }
+
+    /**
+     * Returns the explicit cancellation flag (JSON counterpart of the creator
+     * parameter, so the state round-trips through JSON; absent in JSON written
+     * by older versions, where it defaults to {@code false}).
+     *
+     * @return true if the conversion was cancelled
+     */
+    @JsonProperty("cancelled")
+    public boolean cancelled() {
+        return cancelled;
     }
 
     @JsonProperty("fileId")
@@ -200,8 +240,13 @@ public final class ConversionResult {
 
     /**
      * Formats the conversion time as a human-readable string.
+     *
+     * @return the formatted duration, or "unknown" when no time was recorded
      */
     public String formatConversionTime() {
+        if (conversionTime == null) {
+            return "unknown";
+        }
         long seconds = conversionTime.getSeconds();
         long minutes = seconds / 60;
         long secs = seconds % 60;
@@ -221,6 +266,7 @@ public final class ConversionResult {
             return false;
         ConversionResult that = (ConversionResult) o;
         return success == that.success &&
+                cancelled == that.cancelled &&
                 inputSize == that.inputSize &&
                 outputSize == that.outputSize &&
                 Objects.equals(fileId, that.fileId) &&
@@ -233,7 +279,7 @@ public final class ConversionResult {
 
     @Override
     public int hashCode() {
-        return Objects.hash(fileId, success, outputPath, errorMessage, toolOutput,
+        return Objects.hash(fileId, success, cancelled, outputPath, errorMessage, toolOutput,
                 conversionTime, inputSize, outputSize, toolUsed);
     }
 

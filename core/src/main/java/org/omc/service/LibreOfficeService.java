@@ -25,6 +25,7 @@ import org.omc.model.DocumentSettings;
 import org.omc.model.FileFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 /**
  * Service for executing LibreOffice document conversions.
@@ -120,10 +121,29 @@ public class LibreOfficeService {
             String fileId,
             ProcessRegistry processRegistry) throws ToolExecutionException {
 
+        // MDC correlation: every log line emitted during this conversion
+        // carries the file and tool context
+        try (MDC.MDCCloseable omcFileCtx = MDC.putCloseable("omcFile", String.valueOf(fileId));
+                MDC.MDCCloseable omcToolCtx = MDC.putCloseable("omcTool", "libreoffice")) {
+            return convertDocumentInternal(inputPath, outputPath, settings, progressCallback, fileId, processRegistry);
+        }
+    }
+
+    private ConversionResult convertDocumentInternal(
+            Path inputPath,
+            Path outputPath,
+            DocumentSettings settings,
+            ProgressCallback progressCallback,
+            String fileId,
+            ProcessRegistry processRegistry) throws ToolExecutionException {
+
         Objects.requireNonNull(inputPath, "inputPath must not be null");
         Objects.requireNonNull(outputPath, "outputPath must not be null");
         Objects.requireNonNull(settings, "settings must not be null");
         Objects.requireNonNull(progressCallback, "progressCallback must not be null");
+        if (!settings.isValid()) {
+            throw new IllegalArgumentException("Invalid document settings: " + settings);
+        }
 
         Instant startTime = Instant.now();
         long inputSize = 0;
@@ -167,23 +187,28 @@ public class LibreOfficeService {
                 processRegistry.registerProcess(fileId, process);
             }
 
-            // Read output in a separate thread (Requirement REQ-FL-2.2: Capture tool
-            // output)
+            // Read output in a separate daemon thread (Requirement REQ-FL-2.2:
+            // Capture tool output)
             StringBuilder outputLog = new StringBuilder(4096);
+            // errorOutput capped independently so warning spam cannot bypass
+            // the 1MB cap via this side buffer.
             StringBuilder errorOutput = new StringBuilder();
+            final int MAX_ERROR_OUTPUT_SIZE = 64 * 1024;
             final boolean[] outputTruncated = { false };
 
-            Thread outputReader = new Thread(() -> {
+            Thread outputReader = org.omc.util.ThreadUtils.createThreadFactory("LibreOffice-Reader")
+                    .newThread(() -> {
                 try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(process.getInputStream()))) {
+                        new InputStreamReader(process.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
                     String line;
                     int lineCount = 0;
                     while ((line = reader.readLine()) != null) {
                         lineCount++;
 
-                        // Capture output with 1MB size limit (check every 100 lines for performance)
+                        // Capture output with 1MB size limit (checked on every
+                        // line so oversized single lines also truncate)
                         if (!outputTruncated[0]) {
-                            if (lineCount % 100 == 0 && outputLog.length() > MAX_OUTPUT_SIZE) {
+                            if (outputLog.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
                                 outputLog.append(TRUNCATION_MESSAGE);
                                 outputTruncated[0] = true;
                                 logger.warn("LibreOffice output exceeded 1MB limit, truncating");
@@ -192,9 +217,12 @@ public class LibreOfficeService {
                             }
                         }
 
-                        // Track error/warning lines separately
-                        if (line.toLowerCase().contains("error") || line.toLowerCase().contains("warning")) {
-                            errorOutput.append(line).append("\n");
+                        // Track error/warning lines separately (capped)
+                        if (line.toLowerCase(java.util.Locale.ROOT).contains("error")
+                                || line.toLowerCase(java.util.Locale.ROOT).contains("warning")) {
+                            if (errorOutput.length() + line.length() + 1 <= MAX_ERROR_OUTPUT_SIZE) {
+                                errorOutput.append(line).append("\n");
+                            }
                         }
 
                         logger.trace("LibreOffice output: {}", line);
@@ -263,9 +291,11 @@ public class LibreOfficeService {
 
             // LibreOffice creates output file using input filename with new extension
             // Example: input "document.docx" -> output "document.pdf" (not custom name)
-            // We need to find the generated file and move it to the desired output path
+            // We need to find the generated file and move it to the desired output path.
+            // Extensionless inputs have no '.'; fall back to the full name.
             String inputFileName = inputPath.getFileName().toString();
-            String inputBaseName = inputFileName.substring(0, inputFileName.lastIndexOf('.'));
+            int dotIndex = inputFileName.lastIndexOf('.');
+            String inputBaseName = dotIndex > 0 ? inputFileName.substring(0, dotIndex) : inputFileName;
             FileFormat outputFormat = detectFormat(outputPath);
             String expectedExtension = mapFormatToLibreOffice(outputFormat);
             Path generatedFile = tempOutputDir.resolve(inputBaseName + "." + expectedExtension);
@@ -410,8 +440,9 @@ public class LibreOfficeService {
         command.add("--outdir");
         command.add(outputDir.toString());
 
-        // Input file (must be last)
-        command.add(input.toString());
+        // Input file (must be last; absolutized when dash-prefixed so it is
+        // never parsed as a flag)
+        command.add(FFmpegService.safePathArg(input));
 
         return command;
     }
@@ -545,15 +576,19 @@ public class LibreOfficeService {
      * @return the progress thread (caller must join before checking exit code)
      */
     private Thread simulateProgress(Process process, ProgressCallback callback, long inputSize) {
-        Thread progressThread = new Thread(() -> {
+        Thread progressThread = org.omc.util.ThreadUtils.createThreadFactory("LibreOffice-Progress")
+                .newThread(() -> {
             try {
                 double progress = 0.0;
+                long startNanos = System.nanoTime();
                 while (process.isAlive() && progress < 100.0) {
                     // Simulate progress: increment by 10% every 500ms
                     progress = Math.min(progress + 10.0, 95.0); // Cap at 95% until done
 
                     long bytesProcessed = (long) (inputSize * progress / 100.0);
-                    double speed = bytesProcessed / (progress / 100.0 + 0.1); // Rough estimate
+                    // Real bytes/second from elapsed wall time.
+                    double elapsedSeconds = Math.max((System.nanoTime() - startNanos) / 1_000_000_000.0, 0.001);
+                    double speed = bytesProcessed / elapsedSeconds;
 
                     callback.onProgress(progress, bytesProcessed, speed);
 

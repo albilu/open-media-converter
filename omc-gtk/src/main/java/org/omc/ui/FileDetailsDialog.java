@@ -3,10 +3,10 @@ package org.omc.ui;
 import org.omc.model.ConversionFile;
 import org.omc.model.ConversionProgress;
 import org.omc.model.ConversionResult;
+import org.omc.model.ConversionSettings;
 import org.omc.model.ConversionStatus;
 import org.omc.model.ConversionTool;
 import org.omc.model.FileFormat;
-import org.omc.model.FormatCategory;
 import org.omc.util.FileUtils;
 
 import org.gnome.gdk.Clipboard;
@@ -61,13 +61,34 @@ public class FileDetailsDialog {
     private Window dialog;
     private Button copyButton;
 
+    // Global conversion settings used for output-format resolution (may be
+    // null when constructed without settings; resolution then uses the same
+    // core helper on an empty settings instance, which is equivalent for the
+    // override-only branch).
+    private final ConversionSettings globalSettings;
+
+    // Receiver fallback for override-only resolution without global settings.
+    private static final ConversionSettings EMPTY_SETTINGS = ConversionSettings.builder().build();
+
     /**
      * Creates a new FileDetailsDialog.
-     * 
+     *
      * @param parentWindow The parent window for modal behavior
      */
     public FileDetailsDialog(Window parentWindow) {
+        this(parentWindow, null);
+    }
+
+    /**
+     * Creates a new FileDetailsDialog with the current global settings.
+     *
+     * @param parentWindow   The parent window for modal behavior
+     * @param globalSettings Current conversion settings used for output-format
+     *                       resolution (nullable)
+     */
+    public FileDetailsDialog(Window parentWindow, ConversionSettings globalSettings) {
         this.parentWindow = Objects.requireNonNull(parentWindow, "Parent window cannot be null");
+        this.globalSettings = globalSettings;
     }
 
     /**
@@ -612,26 +633,27 @@ public class FileDetailsDialog {
 
     /**
      * Determines the output format for a file (for pending status).
-     * 
+     *
+     * <p>
+     * Format resolution is delegated to the canonical core helper
+     * {@link ConversionSettings#resolveOutputFormat(ConversionFile)}; this
+     * method keeps the dialog's display precedence (override format name,
+     * preset name, "Custom settings", then "Global settings" for files without
+     * an override).
+     * </p>
+     *
      * @param file The conversion file
      * @return Output format string or "Not Set"
      */
     private String determineOutputFormat(ConversionFile file) {
         if (file.hasCustomSettings()) {
-            var override = file.settingsOverride();
-            FormatCategory category = file.format().getCategory();
-            FileFormat outputFormat = switch (category) {
-                case VIDEO -> override.videoSettings() != null ? override.videoSettings().outputFormat() : null;
-                case AUDIO -> override.audioSettings() != null ? override.audioSettings().outputFormat() : null;
-                case IMAGE -> override.imageSettings() != null ? override.imageSettings().outputFormat() : null;
-                case DOCUMENT ->
-                    override.documentSettings() != null ? override.documentSettings().outputFormat() : null;
-                default -> null;
-            };
+            ConversionSettings resolver = globalSettings != null ? globalSettings : EMPTY_SETTINGS;
+            FileFormat outputFormat = resolver.resolveOutputFormat(file);
             if (outputFormat != null) {
                 return outputFormat.name();
             } else {
-                return override.presetName() != null ? override.presetName() : "Custom settings";
+                return file.settingsOverride().presetName() != null ? file.settingsOverride().presetName()
+                        : "Custom settings";
             }
         }
         return "Global settings";

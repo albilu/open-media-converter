@@ -1626,16 +1626,21 @@ class FFmpegServiceTest {
                 assertTrue(command.contains("-hwaccel"), "GPU command should contain -hwaccel");
                 assertTrue(command.contains("cuda"), "GPU command should contain cuda");
 
-                // Verify order: -progress, -hwaccel, -hwaccel_output_format, -i
+                // Decode-only acceleration: -hwaccel_output_format cuda is
+                // deliberately absent so CPU -vf filters keep working (full-HW
+                // frames + CPU filters abort with "Impossible to convert
+                // between CUDA and CPU frames").
+                assertFalse(command.contains("-hwaccel_output_format"),
+                                "GPU command must not pin full-HW frames alongside CPU filters");
+
+                // Verify order: -progress, -hwaccel, -i
                 int progressIndex = command.indexOf("-progress");
                 int hwaccelIndex = command.indexOf("-hwaccel");
-                int hwaccelOutputIndex = command.indexOf("-hwaccel_output_format");
                 int inputIndex = command.indexOf("-i");
 
                 assertTrue(progressIndex >= 0, "Should contain -progress");
                 assertTrue(hwaccelIndex > progressIndex, "-hwaccel should come after -progress");
-                assertTrue(hwaccelOutputIndex > hwaccelIndex, "-hwaccel_output_format should come after -hwaccel");
-                assertTrue(inputIndex > hwaccelOutputIndex, "-i should come after -hwaccel_output_format");
+                assertTrue(inputIndex > hwaccelIndex, "-i should come after -hwaccel");
 
                 // Verify GPU codec is used
                 int codecIndex = command.indexOf("-c:v");
@@ -1655,17 +1660,17 @@ class FFmpegServiceTest {
 
                 assertTrue(command.contains("-hwaccel"), "GPU command should contain -hwaccel");
                 assertTrue(command.contains("cuda"), "GPU command should contain cuda");
+                assertFalse(command.contains("-hwaccel_output_format"),
+                                "GPU command must not pin full-HW frames alongside CPU filters");
 
                 // Verify order
                 int progressIndex = command.indexOf("-progress");
                 int hwaccelIndex = command.indexOf("-hwaccel");
-                int hwaccelOutputIndex = command.indexOf("-hwaccel_output_format");
                 int inputIndex = command.indexOf("-i");
 
                 assertTrue(progressIndex >= 0);
                 assertTrue(hwaccelIndex > progressIndex);
-                assertTrue(hwaccelOutputIndex > hwaccelIndex);
-                assertTrue(inputIndex > hwaccelOutputIndex);
+                assertTrue(inputIndex > hwaccelIndex);
 
                 // Verify GPU codec is used
                 int codecIndex = command.indexOf("-c:v");
@@ -1761,22 +1766,20 @@ class FFmpegServiceTest {
                 int ffmpegIndex = command.indexOf(ffmpegPath.toString());
                 int progressIndex = command.indexOf("-progress");
                 int hwaccelIndex = command.indexOf("-hwaccel");
-                int hwaccelOutputIndex = command.indexOf("-hwaccel_output_format");
                 int inputIndex = command.indexOf("-i");
 
                 // Verify overall command structure: ffmpeg -progress pipe:1 -hwaccel cuda
-                // -hwaccel_output_format cuda -i input ...
+                // -threads 0 -i input ... (decode-only acceleration, no
+                // -hwaccel_output_format so CPU filters keep working)
                 assertEquals(0, ffmpegIndex, "ffmpeg should be first");
                 assertEquals(1, progressIndex, "-progress should be second");
                 assertEquals(3, hwaccelIndex, "-hwaccel should be fourth");
-                assertEquals(5, hwaccelOutputIndex, "-hwaccel_output_format should be sixth");
-                assertEquals(9, inputIndex, "-i should be after GPU flags");
+                assertEquals(7, inputIndex, "-i should be after GPU flags");
+                assertFalse(command.contains("-hwaccel_output_format"));
 
                 // Verify the arguments following the flags
                 assertEquals("pipe:1", command.get(progressIndex + 1), "-progress should be followed by pipe:1");
                 assertEquals("cuda", command.get(hwaccelIndex + 1), "-hwaccel should be followed by cuda");
-                assertEquals("cuda", command.get(hwaccelOutputIndex + 1),
-                                "-hwaccel_output_format should be followed by cuda");
                 assertEquals(inputPath.toString(), command.get(inputIndex + 1), "-i should be followed by input path");
         }
 
@@ -1792,20 +1795,20 @@ class FFmpegServiceTest {
 
                 List<String> command = service.buildVideoCommand(inputPath, outputPath, settings);
 
-                // Should include GPU acceleration
+                // Should include decode-only GPU acceleration (no full-HW pin)
                 assertTrue(command.contains("-hwaccel"));
-                assertTrue(command.contains("-hwaccel_output_format"));
+                assertFalse(command.contains("-hwaccel_output_format"));
 
                 // Should include video filter for resolution
                 assertTrue(command.contains("-vf"));
                 assertTrue(command.contains("scale=1920:1080"));
 
                 // Verify order: GPU flags before -i, -vf after -i
-                int hwaccelOutputIndex = command.indexOf("-hwaccel_output_format");
+                int hwaccelIndex = command.indexOf("-hwaccel");
                 int inputIndex = command.indexOf("-i");
                 int vfIndex = command.indexOf("-vf");
 
-                assertTrue(inputIndex > hwaccelOutputIndex, "-i should come after GPU flags");
+                assertTrue(inputIndex > hwaccelIndex, "-i should come after GPU flags");
                 assertTrue(vfIndex > inputIndex, "-vf should come after -i");
         }
 
@@ -1820,19 +1823,19 @@ class FFmpegServiceTest {
 
                 List<String> command = service.buildVideoCommand(inputPath, outputPath, settings);
 
-                // Should include GPU acceleration
+                // Should include decode-only GPU acceleration
                 assertTrue(command.contains("-hwaccel"));
-                assertTrue(command.contains("-hwaccel_output_format"));
+                assertFalse(command.contains("-hwaccel_output_format"));
 
                 // Should include frame rate
                 assertTrue(command.contains("-r"));
                 assertTrue(command.contains("60"));
 
                 // Verify GPU flags before -i
-                int hwaccelOutputIndex = command.indexOf("-hwaccel_output_format");
+                int hwaccelIndex = command.indexOf("-hwaccel");
                 int inputIndex = command.indexOf("-i");
 
-                assertTrue(inputIndex > hwaccelOutputIndex);
+                assertTrue(inputIndex > hwaccelIndex);
         }
 
         // ========== Aspect Ratio Filter Chain Tests ==========

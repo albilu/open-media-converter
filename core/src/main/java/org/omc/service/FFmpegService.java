@@ -5,6 +5,7 @@ package org.omc.service;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -28,6 +29,7 @@ import org.omc.model.Resolution;
 import org.omc.model.VideoSettings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -97,21 +99,30 @@ public class FFmpegService {
         Objects.requireNonNull(inputPath, "inputPath must not be null");
         Objects.requireNonNull(outputPath, "outputPath must not be null");
         Objects.requireNonNull(settings, "settings must not be null");
+        if (!settings.isValid()) {
+            throw new IllegalArgumentException("Invalid video settings: " + settings);
+        }
 
         List<String> command = new ArrayList<>();
         command.add(ffmpegPath.toString());
         FileFormat targetFormat = outputFormat(outputPath, settings.outputFormat());
         String ffmpegCodec = org.omc.model.MediaCodecPolicy.videoCodec(targetFormat, mapVideoCodec(settings.codec()));
+        boolean gpuCodec = isGPUCodec(ffmpegCodec);
 
         // Enable progress output to stdout (pipe:1)
         command.add("-progress");
         command.add("pipe:1");
 
         // GPU acceleration BEFORE input (REQ-PERF-1.3, REQ-VID-1.2, REQ-VID-1.3)
-        if (isGPUCodec(ffmpegCodec)) {
+        // NOTE: decode-only "-hwaccel cuda" is used deliberately WITHOUT
+        // "-hwaccel_output_format cuda". Keeping decoded frames downloadable to
+        // system memory lets the CPU "-vf" filter chain (scale/pad/setdar) run
+        // unchanged. Requesting full-HW frames ("cuda") together with CPU
+        // filters makes FFmpeg abort with "Impossible to convert between CUDA
+        // and CPU frames". The NVENC encoder still encodes on the GPU; modern
+        // FFmpeg auto-uploads frames for the encoder as needed.
+        if (gpuCodec) {
             command.add("-hwaccel");
-            command.add("cuda");
-            command.add("-hwaccel_output_format");
             command.add("cuda");
         }
 
@@ -119,9 +130,10 @@ public class FFmpegService {
         command.add("-threads");
         command.add("0");
 
-        // Input file
+        // Input file (dash-prefixed names are absolutized so getopt never
+        // parses them as flags)
         command.add("-i");
-        command.add(inputPath.toString());
+        command.add(safePathArg(inputPath));
 
         // Video codec mapping
         command.add("-c:v");
@@ -157,6 +169,8 @@ public class FFmpegService {
         }
 
         // Video filter chain (REQ-VID-2.2, REQ-VID-2.3)
+        // Dimensions are rounded up to even values: H.264/HEVC with yuv420p
+        // reject odd widths/heights ("width not divisible by 2").
         String videoFilter = buildVideoFilterChain(settings);
         if (!videoFilter.isEmpty()) {
             command.add("-vf");
@@ -180,10 +194,28 @@ public class FFmpegService {
         command.add("-y");
 
         // Output file
-        command.add(outputPath.toString());
+        command.add(safePathArg(outputPath));
 
         logger.debug("Built video command: {}", command);
         return command;
+    }
+
+    /**
+     * Returns a process argument for a file path that can never be parsed as a
+     * command-line option. A basename starting with '-' (e.g. "-help") would
+     * otherwise be interpreted as a flag by getopt-style parsers even though
+     * ProcessBuilder performs no shell splitting. Absolutizing such paths
+     * guarantees the argument starts with '/'.
+     *
+     * @param path file path to render as a CLI argument
+     * @return CLI-safe path string
+     */
+    static String safePathArg(Path path) {
+        Path fileName = path.getFileName();
+        if (fileName != null && fileName.toString().startsWith("-")) {
+            return path.toAbsolutePath().normalize().toString();
+        }
+        return path.toString();
     }
 
     /**
@@ -201,6 +233,9 @@ public class FFmpegService {
         Objects.requireNonNull(inputPath, "inputPath must not be null");
         Objects.requireNonNull(outputPath, "outputPath must not be null");
         Objects.requireNonNull(settings, "settings must not be null");
+        if (!settings.isValid()) {
+            throw new IllegalArgumentException("Invalid audio settings: " + settings);
+        }
 
         List<String> command = new ArrayList<>();
         command.add(ffmpegPath.toString());
@@ -215,7 +250,7 @@ public class FFmpegService {
 
         // Input file
         command.add("-i");
-        command.add(inputPath.toString());
+        command.add(safePathArg(inputPath));
 
         // Audio codec mapping
         String ffmpegCodec = org.omc.model.MediaCodecPolicy.audioCodec(outputFormat(outputPath, settings.outputFormat()), mapAudioCodec(settings.codec()));
@@ -269,7 +304,7 @@ public class FFmpegService {
         command.add("-y");
 
         // Output file
-        command.add(outputPath.toString());
+        command.add(safePathArg(outputPath));
 
         logger.debug("Built audio command: {}", command);
         return command;
@@ -290,6 +325,9 @@ public class FFmpegService {
         Objects.requireNonNull(inputPath, "inputPath must not be null");
         Objects.requireNonNull(outputPath, "outputPath must not be null");
         Objects.requireNonNull(settings, "settings must not be null");
+        if (!settings.isValid()) {
+            throw new IllegalArgumentException("Invalid image settings: " + settings);
+        }
 
         List<String> command = new ArrayList<>();
         command.add(ffmpegPath.toString());
@@ -300,7 +338,7 @@ public class FFmpegService {
 
         // Input file
         command.add("-i");
-        command.add(inputPath.toString());
+        command.add(safePathArg(inputPath));
 
         // Resolution and scaling
         if (settings.resolution() != null) {
@@ -347,7 +385,7 @@ public class FFmpegService {
         command.add("-y");
 
         // Output file
-        command.add(outputPath.toString());
+        command.add(safePathArg(outputPath));
 
         logger.debug("Built image command: {}", command);
         return command;
@@ -382,9 +420,12 @@ public class FFmpegService {
      * @return FFmpeg codec identifier
      */
     private static FileFormat outputFormat(Path output, FileFormat fallback) {
-        String name = output.getFileName().toString();
+        Path fileName = output.getFileName();
+        String name = fileName != null ? fileName.toString() : "";
         if (name.toLowerCase(java.util.Locale.ROOT).endsWith(".opus")) return FileFormat.OGG;
-        FileFormat format = FileFormat.fromExtension(name.substring(name.lastIndexOf('.') + 1));
+        int dot = name.lastIndexOf('.');
+        if (dot < 0 || dot == name.length() - 1) return fallback;
+        FileFormat format = FileFormat.fromExtension(name.substring(dot + 1));
         return format == FileFormat.UNKNOWN ? fallback : format;
     }
 
@@ -393,7 +434,7 @@ public class FFmpegService {
             return "libx264"; // Default
         }
 
-        return switch (codec.toLowerCase()) {
+        return switch (codec.toLowerCase(java.util.Locale.ROOT)) {
             case "h264", "x264", "avc" -> "libx264";
             case "h265", "x265", "hevc" -> "libx265";
             case "vp9", "webm" -> "libvpx-vp9";
@@ -402,7 +443,13 @@ public class FFmpegService {
             case "h264_nvenc" -> "h264_nvenc"; // REQ-VID-1.2
             case "hevc_nvenc" -> "hevc_nvenc"; // REQ-VID-1.3
             case "mpeg2" -> "mpeg2video";
-            default -> codec; // Pass through unknown codecs
+            default -> {
+                // Unknown codec: pass through (validated upstream by
+                // isValid()) but log so typos surface as warnings, not
+                // cryptic ffmpeg failures.
+                logger.warn("Unknown video codec '{}', passing through to FFmpeg", codec);
+                yield codec;
+            }
         };
     }
 
@@ -425,9 +472,10 @@ public class FFmpegService {
         List<String> filters = new ArrayList<>();
 
         // 1. Scale filter (if resolution specified)
+        // Rounded up to even dimensions: yuv420p encoders fail on odd sizes.
         if (settings.resolution() != null) {
             Resolution res = settings.resolution();
-            filters.add(String.format("scale=%d:%d", res.getWidth(), res.getHeight()));
+            filters.add(String.format("scale=%d:%d", toEven(res.getWidth()), toEven(res.getHeight())));
         }
 
         // 2. Aspect ratio filters (if not KEEP_ORIGINAL)
@@ -508,26 +556,27 @@ public class FFmpegService {
      * @return pad filter string, or empty if no padding needed
      * @throws IllegalArgumentException if resolution has invalid dimensions
      */
+    /**
+     * Rounds a dimension up to the nearest even value, as required by
+     * yuv420p chroma subsampling.
+     */
+    static int toEven(int value) {
+        return (value + 1) & ~1;
+    }
+
     private String buildPaddingFilter(double targetRatio, Resolution resolution) {
         if (resolution == null) {
-            // No resolution specified - use input dimensions with dynamic padding
-            // Format: pad=width:height:x:y:color
-            // If input ratio < target, pillarbox (add width): width = ih * targetRatio,
-            // height = ih
-            // If input ratio > target, letterbox (add height): width = iw, height = iw /
-            // targetRatio
-            // FFmpeg expression: if(lt(iw/ih, targetRatio), ih*targetRatio, iw) :
-            // if(lt(iw/ih, targetRatio), ih, iw/targetRatio)
-            // Use Locale.ROOT to ensure period as decimal separator (not comma) for FFmpeg
-            // compatibility
+            // No resolution specified - use input dimensions with dynamic padding.
+            // ceil(.. /2)*2 keeps the computed pad dimensions even so yuv420p
+            // never sees an odd width/height regardless of input size.
             return String.format(java.util.Locale.ROOT,
-                    "pad=if(lt(iw/ih\\,%f)\\,ih*%f\\,iw):if(lt(iw/ih\\,%f)\\,ih\\,iw/%f):(ow-iw)/2:(oh-ih)/2:black",
+                    "pad=ceil(if(lt(iw/ih\\,%f)\\,ih*%f\\,iw)/2)*2:ceil(if(lt(iw/ih\\,%f)\\,ih\\,iw/%f)/2)*2:(ow-iw)/2:(oh-ih)/2:black",
                     targetRatio, targetRatio, targetRatio, targetRatio);
         }
 
         // Resolution specified - padding calculated from target dimensions
-        int targetWidth = resolution.getWidth();
-        int targetHeight = resolution.getHeight();
+        int targetWidth = toEven(resolution.getWidth());
+        int targetHeight = toEven(resolution.getHeight());
 
         // Validate resolution dimensions
         if (targetWidth <= 0 || targetHeight <= 0) {
@@ -544,12 +593,12 @@ public class FFmpegService {
 
         if (currentRatio < targetRatio) {
             // Add pillarboxing (vertical black bars on left/right)
-            int newWidth = (int) (targetHeight * targetRatio);
+            int newWidth = toEven((int) (targetHeight * targetRatio));
             int xOffset = (newWidth - targetWidth) / 2;
             return String.format("pad=%d:%d:%d:0:black", newWidth, targetHeight, xOffset);
         } else {
             // Add letterboxing (horizontal black bars on top/bottom)
-            int newHeight = (int) (targetWidth / targetRatio);
+            int newHeight = toEven((int) (targetWidth / targetRatio));
             int yOffset = (newHeight - targetHeight) / 2;
             return String.format("pad=%d:%d:0:%d:black", targetWidth, newHeight, yOffset);
         }
@@ -568,7 +617,7 @@ public class FFmpegService {
                 "-v", "quiet",
                 "-print_format", "json",
                 "-show_format",
-                inputPath.toString());
+                safePathArg(inputPath));
 
         ProcessBuilder processBuilder = new ProcessBuilder(command);
         processBuilder.redirectErrorStream(true);
@@ -578,10 +627,12 @@ public class FFmpegService {
         try {
             Process process = processBuilder.start();
 
-            // Apply size limit similar to extractMetadata for consistency
+            // Apply size limit similar to extractMetadata for consistency.
+            // Checked on EVERY line: a single oversized JSON line must also
+            // trigger truncation (a modulo-100 check would miss it entirely).
             StringBuilder outputCapture = new StringBuilder(4096);
             try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 int lineCount = 0;
                 boolean truncated = false;
@@ -589,9 +640,8 @@ public class FFmpegService {
                 while ((line = reader.readLine()) != null) {
                     lineCount++;
 
-                    // Check every 100 lines for size limit (performance optimization)
                     if (!truncated) {
-                        if (lineCount % 100 == 0 && outputCapture.length() > MAX_OUTPUT_SIZE) {
+                        if (outputCapture.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
                             logger.warn("ffprobe output exceeded 1MB limit during duration extraction for {}",
                                     inputPath);
                             truncated = true;
@@ -642,7 +692,7 @@ public class FFmpegService {
                 "-show_streams",
                 "-show_format", // Also get format section for duration
                 "-select_streams", "v:0", // Select first video stream only
-                inputPath.toString());
+                safePathArg(inputPath));
 
         ProcessBuilder processBuilder = new ProcessBuilder(command);
         processBuilder.redirectErrorStream(true);
@@ -653,9 +703,10 @@ public class FFmpegService {
             Process process = processBuilder.start();
 
             // Apply size limit similar to extractMetadata for consistency
+            // (checked on every line so oversized single lines also truncate).
             StringBuilder outputCapture = new StringBuilder(4096);
             try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 int lineCount = 0;
                 boolean truncated = false;
@@ -663,9 +714,8 @@ public class FFmpegService {
                 while ((line = reader.readLine()) != null) {
                     lineCount++;
 
-                    // Check every 100 lines for size limit (performance optimization)
                     if (!truncated) {
-                        if (lineCount % 100 == 0 && outputCapture.length() > MAX_OUTPUT_SIZE) {
+                        if (outputCapture.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
                             logger.warn("ffprobe output exceeded 1MB limit during frame count extraction for {}",
                                     inputPath);
                             truncated = true;
@@ -768,7 +818,7 @@ public class FFmpegService {
                 "-print_format", "json",
                 "-show_format",
                 "-show_streams",
-                filePath.toString());
+                safePathArg(filePath));
 
         ProcessBuilder processBuilder = new ProcessBuilder(command);
         processBuilder.redirectErrorStream(true);
@@ -779,10 +829,10 @@ public class FFmpegService {
             Process process = processBuilder.start();
 
             // Requirement: Task 5.19 - Capture output with size limit for metadata
-            // extraction
+            // extraction (checked on every line so oversized lines truncate).
             StringBuilder outputCapture = new StringBuilder(4096);
             try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 int lineCount = 0;
                 boolean truncated = false;
@@ -790,9 +840,8 @@ public class FFmpegService {
                 while ((line = reader.readLine()) != null) {
                     lineCount++;
 
-                    // Check every 100 lines for size limit (performance optimization)
                     if (!truncated) {
-                        if (lineCount % 100 == 0 && outputCapture.length() > MAX_OUTPUT_SIZE) {
+                        if (outputCapture.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
                             logger.warn("ffprobe output exceeded 1MB limit during metadata extraction for {}",
                                     filePath);
                             truncated = true;
@@ -1113,7 +1162,7 @@ public class FFmpegService {
             return "aac"; // Default
         }
 
-        return switch (codec.toLowerCase()) {
+        return switch (codec.toLowerCase(java.util.Locale.ROOT)) {
             case "aac" -> "aac";
             case "mp3", "lame" -> "libmp3lame";
             case "opus" -> "libopus";
@@ -1123,7 +1172,10 @@ public class FFmpegService {
             case "alac" -> "alac";
             case "ac3" -> "ac3";
             case "copy" -> "copy"; // Requirement REQ-AUD-1.1: Stream copy without re-encoding
-            default -> codec; // Pass through unknown codecs
+            default -> {
+                logger.warn("Unknown audio codec '{}', passing through to FFmpeg", codec);
+                yield codec;
+            }
         };
     }
 
@@ -1184,12 +1236,62 @@ public class FFmpegService {
     public ConversionResult convertVideo(Path inputPath, Path outputPath, VideoSettings settings,
             ProgressCallback progressCallback, String fileId, ProcessRegistry processRegistry)
             throws ToolExecutionException {
+        // MDC correlation: every log line emitted during this conversion
+        // carries the file and tool context
+        try (MDC.MDCCloseable omcFileCtx = MDC.putCloseable("omcFile", String.valueOf(fileId));
+                MDC.MDCCloseable omcToolCtx = MDC.putCloseable("omcTool", "ffmpeg")) {
+            return convertVideoInternal(inputPath, outputPath, settings, progressCallback, fileId, processRegistry);
+        }
+    }
+
+    private ConversionResult convertVideoInternal(Path inputPath, Path outputPath, VideoSettings settings,
+            ProgressCallback progressCallback, String fileId, ProcessRegistry processRegistry)
+            throws ToolExecutionException {
         Objects.requireNonNull(inputPath, "inputPath must not be null");
         Objects.requireNonNull(outputPath, "outputPath must not be null");
         Objects.requireNonNull(settings, "settings must not be null");
 
         List<String> command = buildVideoCommand(inputPath, outputPath, settings);
-        return executeConversion(command, inputPath, outputPath, progressCallback, fileId, processRegistry);
+        ConversionResult result = executeConversion(command, inputPath, outputPath, progressCallback, fileId,
+                processRegistry);
+
+        // GPU fallback: on CPU-only hosts (or broken CUDA setups) the NVENC
+        // run fails with CUDA/NVENC errors. Retry once with the software
+        // counterpart codec instead of hard-failing the job.
+        if (!result.success() && isGPUCodec(mapVideoCodec(settings.codec())) && isGpuFailure(result)) {
+            String softwareCodec = settings.codec().toLowerCase(java.util.Locale.ROOT).startsWith("hevc")
+                    ? "libx265"
+                    : "libx264";
+            logger.warn("GPU encoding failed ({}), retrying once with software codec {}",
+                    result.errorMessage().orElse("unknown error"), softwareCodec);
+            VideoSettings fallback = VideoSettings.builder()
+                    .codec(softwareCodec)
+                    .bitrate(settings.bitrate())
+                    .resolution(settings.resolution())
+                    .frameRate(settings.frameRate())
+                    .preset("medium")
+                    .crf(settings.crf())
+                    .aspectRatio(settings.aspectRatio())
+                    .outputFormat(settings.outputFormat())
+                    .build();
+            List<String> fallbackCommand = buildVideoCommand(inputPath, outputPath, fallback);
+            return executeConversion(fallbackCommand, inputPath, outputPath, progressCallback, fileId,
+                    processRegistry);
+        }
+        return result;
+    }
+
+    /**
+     * Detects GPU-environment failures in a conversion result by matching
+     * CUDA/NVENC/hwaccel markers in the error message and captured tool
+     * output.
+     */
+    private static boolean isGpuFailure(ConversionResult result) {
+        String haystack = (result.errorMessage().orElse("") + "\n" + result.toolOutput().orElse(""))
+                .toLowerCase(java.util.Locale.ROOT);
+        return haystack.contains("cuda") || haystack.contains("nvenc")
+                || haystack.contains("hwaccel") || haystack.contains("no nvenc")
+                || haystack.contains("cannot load libcuda");
     }
 
     /**
@@ -1210,6 +1312,17 @@ public class FFmpegService {
     }
 
     public ConversionResult convertAudio(Path inputPath, Path outputPath, AudioSettings settings,
+            ProgressCallback progressCallback, String fileId, ProcessRegistry processRegistry)
+            throws ToolExecutionException {
+        // MDC correlation: every log line emitted during this conversion
+        // carries the file and tool context
+        try (MDC.MDCCloseable omcFileCtx = MDC.putCloseable("omcFile", String.valueOf(fileId));
+                MDC.MDCCloseable omcToolCtx = MDC.putCloseable("omcTool", "ffmpeg")) {
+            return convertAudioInternal(inputPath, outputPath, settings, progressCallback, fileId, processRegistry);
+        }
+    }
+
+    private ConversionResult convertAudioInternal(Path inputPath, Path outputPath, AudioSettings settings,
             ProgressCallback progressCallback, String fileId, ProcessRegistry processRegistry)
             throws ToolExecutionException {
         Objects.requireNonNull(inputPath, "inputPath must not be null");
@@ -1269,6 +1382,17 @@ public class FFmpegService {
      */
     @Deprecated(since = "2.0", forRemoval = true)
     public ConversionResult convertImage(Path inputPath, Path outputPath, ImageSettings settings,
+            ProgressCallback progressCallback, String fileId, ProcessRegistry processRegistry)
+            throws ToolExecutionException {
+        // MDC correlation: every log line emitted during this conversion
+        // carries the file and tool context
+        try (MDC.MDCCloseable omcFileCtx = MDC.putCloseable("omcFile", String.valueOf(fileId));
+                MDC.MDCCloseable omcToolCtx = MDC.putCloseable("omcTool", "ffmpeg")) {
+            return convertImageInternal(inputPath, outputPath, settings, progressCallback, fileId, processRegistry);
+        }
+    }
+
+    private ConversionResult convertImageInternal(Path inputPath, Path outputPath, ImageSettings settings,
             ProgressCallback progressCallback, String fileId, ProcessRegistry processRegistry)
             throws ToolExecutionException {
         logger.warn(
@@ -1357,16 +1481,17 @@ public class FFmpegService {
 
             // Read output stream with progress tracking
             try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 int lineCount = 0;
                 while ((line = reader.readLine()) != null) {
                     lineCount++;
 
-                    // Requirement: Task 5.18 - Enforce 1MB output size limit
-                    // Check every 100 lines for performance (avoid constant size checks)
+                    // Requirement: Task 5.18 - Enforce 1MB output size limit.
+                    // Checked on every line: length comparison is O(1) and a
+                    // single oversized line must also trigger truncation.
                     if (!outputTruncated) {
-                        if (lineCount % 100 == 0 && outputLog.length() > MAX_OUTPUT_SIZE) {
+                        if (outputLog.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
                             outputLog.append(TRUNCATION_MESSAGE);
                             outputTruncated = true;
                             logger.warn("Tool output exceeded 1MB limit, truncating further output");
@@ -1413,14 +1538,14 @@ public class FFmpegService {
                                     percentage = Math.min(100.0, Math.max(0.0, percentage));
 
                                     if (progress.currentTime != null && totalDuration != null) {
-                                        logger.info("Progress update: {}% (time={}/{}, {} of {} seconds)",
+                                        logger.debug("Progress update: {}% (time={}/{}, {} of {} seconds)",
                                                 String.format("%.1f", percentage),
                                                 progress.currentTime.getSeconds(),
                                                 totalDuration.getSeconds(),
                                                 progress.currentTime.toMillis(),
                                                 totalDuration.toMillis());
                                     } else if (progress.currentFrame >= 0 && totalFrames > 0) {
-                                        logger.info("Progress update: {}% (frame={}/{})",
+                                        logger.debug("Progress update: {}% (frame={}/{})",
                                                 String.format("%.1f", percentage),
                                                 progress.currentFrame,
                                                 totalFrames);
@@ -1614,9 +1739,9 @@ public class FFmpegService {
                     Duration currentTimeVal = Duration.ofNanos(microseconds * 1000);
                     return new ProgressInfo(currentTimeVal, 0, 0);
                 } else if (line.startsWith("out_time_ms=")) {
-                    // Milliseconds format (actually microseconds according to FFmpeg docs)
-                    long milliseconds = Long.parseLong(value) / 1000;
-                    long microseconds = milliseconds * 1000;
+                    // Microseconds despite the name (per FFmpeg docs); keep full
+                    // precision instead of truncating via millis round-trips.
+                    long microseconds = Long.parseLong(value);
                     Duration currentTimeVal = Duration.ofNanos(microseconds * 1000);
                     return new ProgressInfo(currentTimeVal, 0, 0);
                 } else {

@@ -48,7 +48,9 @@ public class ValidationEngine {
     // Validation thresholds
     private static final long MIN_DISK_SPACE_BUFFER = 500 * 1024 * 1024; // 500 MB safety buffer
     private static final int MIN_PARALLEL_CONVERSIONS = 1;
-    private static final int MAX_PARALLEL_CONVERSIONS = 64;
+    // Must match ConversionEngine (1-16): allowing 17+ here would pass
+    // validation only for the engine to reject it.
+    private static final int MAX_PARALLEL_CONVERSIONS = 16;
 
     // Video validation ranges
     private static final int MIN_VIDEO_BITRATE = 100; // kbps
@@ -76,11 +78,70 @@ public class ValidationEngine {
     private volatile org.omc.model.ToolConfiguration toolConfiguration;
 
     /**
+     * Cached tool-availability probes. Spawning {@code -version} per file on a
+     * worker thread was O(files) process spawns with 10s waits; results are
+     * cached per tool with a TTL and invalidated on reconfiguration.
+     */
+    private final java.util.concurrent.ConcurrentHashMap<ConversionTool, CachedAvailability> availabilityCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long AVAILABILITY_CACHE_TTL_MS = 60_000;
+
+    private record CachedAvailability(ValidationResult result, long checkedAt) {
+    }
+
+    /**
      * Uses the same discovered binaries for validation and conversion.
      * @param configuration installed and extracted tool paths
      */
     public void setToolConfiguration(org.omc.model.ToolConfiguration configuration) {
         toolConfiguration = Objects.requireNonNull(configuration, "configuration");
+        availabilityCache.clear();
+    }
+
+    /**
+     * Saturating doubling for disk estimates: a huge input must not wrap
+     * {@code value * 2} negative and silently pass validation.
+     *
+     * @param value bytes to double
+     * @return {@code value * 2}, saturating at {@link Long#MAX_VALUE}
+     */
+    public static long saturatedDouble(long value) {
+        return value > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : value * 2;
+    }
+
+    /**
+     * Saturating addition for disk estimates.
+     *
+     * @param a first addend in bytes
+     * @param b second addend in bytes
+     * @return {@code a + b}, saturating at {@link Long#MAX_VALUE}
+     */
+    public static long saturatedAdd(long a, long b) {
+        return a > Long.MAX_VALUE - b ? Long.MAX_VALUE : a + b;
+    }
+
+    /**
+     * Estimates the disk space a pre-flight validation should require for an
+     * input file of the given size, using a deliberately conservative
+     * {@code 2x} policy via {@link #saturatedDouble(long)}.
+     *
+     * <p>
+     * This intentionally differs from ConversionEngine's runtime heuristic
+     * (~0.8x of the input, estimating the compressed output size once the
+     * actual tool and per-file settings are known). Pre-flight validation
+     * runs before those details exist and its failure only blocks a job that
+     * has not started yet, so erring high is cheap here: a false "tight
+     * space" warning is recoverable, while an under-estimate lets a
+     * conversion start and fail halfway after wasting time and disk.
+     * </p>
+     *
+     * @param fileSize input file size in bytes; a negative value yields a
+     *                 negative estimate which {@code validateDiskSpace}
+     *                 rejects as invalid input
+     * @return estimated required bytes, saturating at {@link Long#MAX_VALUE}
+     */
+    public static long estimateRequiredBytes(long fileSize) {
+        return saturatedDouble(fileSize);
     }
 
     /**
@@ -625,7 +686,7 @@ public class ValidationEngine {
 
         try {
             long availableSpace = fileHandler.getAvailableSpace(directory);
-            long totalRequired = requiredBytes + MIN_DISK_SPACE_BUFFER;
+            long totalRequired = saturatedAdd(requiredBytes, MIN_DISK_SPACE_BUFFER);
 
             if (availableSpace < totalRequired) {
                 String error = String.format(
@@ -636,7 +697,7 @@ public class ValidationEngine {
             }
 
             // Warn if space is tight (less than 2x required)
-            if (availableSpace < totalRequired * 2) {
+            if (availableSpace < saturatedDouble(totalRequired)) {
                 String warning = String.format(
                         "Disk space is tight: %.2f GB available, %.2f GB recommended",
                         availableSpace / (1024.0 * 1024.0 * 1024.0),
@@ -673,6 +734,27 @@ public class ValidationEngine {
             return ValidationResult.failure("Unknown tool: " + tool);
         }
 
+        // Fast path: a configured binary that is gone or non-executable fails
+        // immediately instead of paying a doomed process spawn + 10s wait.
+        Path commandPath = Path.of(command);
+        if (toolConfiguration != null && !Files.isExecutable(commandPath)) {
+            return ValidationResult.failure("Tool not available: " + tool + " (not executable: " + command + ")");
+        }
+
+        // Serve fresh-enough probes from the cache (worker threads validate
+        // per file; without this a batch pays one spawn per file).
+        CachedAvailability cached = availabilityCache.get(tool);
+        if (cached != null && System.currentTimeMillis() - cached.checkedAt() < AVAILABILITY_CACHE_TTL_MS) {
+            return cached.result();
+        }
+
+        ValidationResult result = probeToolAvailability(tool, command);
+        availabilityCache.put(tool, new CachedAvailability(result, System.currentTimeMillis()));
+        return result;
+    }
+
+    private ValidationResult probeToolAvailability(ConversionTool tool, String command) {
+        Process process = null;
         try {
             // FFmpeg uses single-dash flags, other tools use double-dash
             String versionFlag = (tool == ConversionTool.FFMPEG || tool == ConversionTool.IMAGEMAGICK)
@@ -681,13 +763,16 @@ public class ValidationEngine {
             ProcessBuilder pb = new ProcessBuilder(command, versionFlag);
             pb.redirectErrorStream(true);
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-            Process process = pb.start();
+            process = pb.start();
 
             // Wait for process to complete with timeout
             boolean finished = process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
 
             if (!finished) {
                 process.destroyForcibly();
+                // Brief follow-up wait so the destroyed process is reaped
+                // instead of lingering as a zombie.
+                process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
                 return ValidationResult.failure("Tool check timed out: " + tool);
             }
 
@@ -700,9 +785,18 @@ public class ValidationEngine {
                         .failure("Tool not available or not working: " + tool + " (exit code: " + exitCode + ")");
             }
 
-        } catch (IOException | InterruptedException e) {
+        } catch (IOException e) {
             logger.warn("Error checking tool availability for {}", tool, e);
             return ValidationResult.failure("Tool not available: " + tool + " (" + e.getMessage() + ")");
+        } catch (InterruptedException e) {
+            // Restore the interrupt flag: swallowing it breaks cancellation
+            // for every caller up the stack.
+            Thread.currentThread().interrupt();
+            if (process != null) {
+                process.destroyForcibly();
+            }
+            logger.warn("Tool availability check interrupted for {}", tool, e);
+            return ValidationResult.failure("Tool check interrupted: " + tool);
         }
     }
 
@@ -772,11 +866,11 @@ public class ValidationEngine {
         // Validate format pair
         ValidationResult formatPairResult = validateFormatPair(file.format(), outputFormat);
 
-        // Validate disk space (estimate 2x input file size as required space)
+        // Validate disk space: conservative 2x policy, see estimateRequiredBytes
         ValidationResult diskSpaceResult = ValidationResult.success();
         try {
             long fileSize = fileHandler.getFileSize(file.path());
-            long estimatedRequired = fileSize * 2; // Conservative estimate
+            long estimatedRequired = estimateRequiredBytes(fileSize);
             diskSpaceResult = validateDiskSpace(settings.outputDirectory(), estimatedRequired);
         } catch (FileOperationException e) {
             logger.warn("Could not estimate required disk space", e);

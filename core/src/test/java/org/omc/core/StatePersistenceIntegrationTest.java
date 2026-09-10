@@ -54,7 +54,7 @@ class StatePersistenceIntegrationTest {
         private Path cacheDir;
 
         @BeforeEach
-        void setUp() throws IOException {
+        void setUp() throws Exception {
                 // Create temporary directory structure
                 configDir = tempDir.resolve("config");
                 dataDir = tempDir.resolve("data");

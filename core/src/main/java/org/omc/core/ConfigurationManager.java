@@ -4,7 +4,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Comparator;
+import java.util.Objects;
+import java.util.stream.Stream;
 
+import org.omc.exception.ErrorCode;
+import org.omc.exception.StateIOException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,8 +48,10 @@ public class ConfigurationManager {
 
     /**
      * Creates a ConfigurationManager with default directories.
+     *
+     * @throws StateIOException if a required directory cannot be created
      */
-    public ConfigurationManager() {
+    public ConfigurationManager() throws StateIOException {
         this(getDefaultConfigDirectory(), getDefaultDataDirectory(), getDefaultCacheDirectory());
     }
 
@@ -54,11 +61,16 @@ public class ConfigurationManager {
      * @param configDirectory The configuration directory path
      * @param dataDirectory   The data directory path
      * @param cacheDirectory  The cache directory path
+     * @throws NullPointerException if any directory path is null
+     * @throws StateIOException     if a required directory cannot be created;
+     *                              callers otherwise assume the directories
+     *                              exist once the constructor returns
      */
-    public ConfigurationManager(Path configDirectory, Path dataDirectory, Path cacheDirectory) {
-        this.configDirectory = configDirectory;
-        this.dataDirectory = dataDirectory;
-        this.cacheDirectory = cacheDirectory;
+    public ConfigurationManager(Path configDirectory, Path dataDirectory, Path cacheDirectory)
+            throws StateIOException {
+        this.configDirectory = Objects.requireNonNull(configDirectory, "configDirectory cannot be null");
+        this.dataDirectory = Objects.requireNonNull(dataDirectory, "dataDirectory cannot be null");
+        this.cacheDirectory = Objects.requireNonNull(cacheDirectory, "cacheDirectory cannot be null");
         this.logDirectory = dataDirectory.resolve(LOGS_SUBDIR);
         this.tempDirectory = cacheDirectory.resolve(TEMP_SUBDIR);
         this.toolsDirectory = dataDirectory.resolve(TOOLS_SUBDIR);
@@ -98,8 +110,10 @@ public class ConfigurationManager {
 
     /**
      * Initializes all required directories, creating them if they don't exist.
+     *
+     * @throws StateIOException if any directory cannot be created
      */
-    private void initializeDirectories() {
+    private void initializeDirectories() throws StateIOException {
         createDirectoryIfNotExists(configDirectory);
         createDirectoryIfNotExists(dataDirectory);
         createDirectoryIfNotExists(cacheDirectory);
@@ -112,14 +126,23 @@ public class ConfigurationManager {
      * Creates a directory if it doesn't exist.
      *
      * @param directory The directory path
+     * @throws StateIOException if the directory cannot be created; failure is
+     *                          fatal because every consumer of this class
+     *                          assumes the directories exist after construction
      */
-    private void createDirectoryIfNotExists(Path directory) {
+    private void createDirectoryIfNotExists(Path directory) throws StateIOException {
         if (!Files.exists(directory)) {
             try {
                 Files.createDirectories(directory);
                 logger.info("Created directory: {}", directory);
             } catch (IOException e) {
                 logger.error("Failed to create directory: {}", directory, e);
+                throw new StateIOException(
+                        "Failed to create required directory: " + directory,
+                        ErrorCode.CONFIGURATION_ERROR,
+                        directory.toString(),
+                        false,
+                        e);
             }
         }
     }
@@ -256,22 +279,30 @@ public class ConfigurationManager {
 
     /**
      * Cleans up temporary files.
-     * Removes all files in the temp directory.
+     * Removes all files and subdirectories in the temp directory; the temp
+     * directory itself is kept.
      */
     public void cleanupTempFiles() {
-        try {
-            if (Files.exists(tempDirectory)) {
-                Files.walk(tempDirectory)
-                        .filter(Files::isRegularFile)
-                        .forEach(file -> {
-                            try {
-                                Files.delete(file);
-                                logger.debug("Deleted temp file: {}", file);
-                            } catch (IOException e) {
-                                logger.warn("Failed to delete temp file: {}", file, e);
-                            }
-                        });
-            }
+        if (!Files.exists(tempDirectory)) {
+            return;
+        }
+
+        // try-with-resources: Files.walk opens a directory handle per entry
+        // that must be closed even when the consumer throws.
+        try (Stream<Path> entries = Files.walk(tempDirectory)) {
+            // Depth-first (reverse) order deletes subdirectories after their
+            // contents, so empty subdirectories are removed too instead of
+            // making Files.delete fail with DirectoryNotEmptyException.
+            entries.sorted(Comparator.reverseOrder())
+                    .filter(entry -> !entry.equals(tempDirectory))
+                    .forEach(entry -> {
+                        try {
+                            Files.delete(entry);
+                            logger.debug("Deleted temp entry: {}", entry);
+                        } catch (IOException e) {
+                            logger.warn("Failed to delete temp entry: {}", entry, e);
+                        }
+                    });
         } catch (IOException e) {
             logger.error("Failed to clean up temp files", e);
         }

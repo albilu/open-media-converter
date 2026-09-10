@@ -110,7 +110,17 @@ public class SettingsDialogJavaGi {
         FileFormat[] formats = FileFormat.getFormatsByCategory(FormatCategory.DOCUMENT);
         if (index < 0 || index >= formats.length) return;
         FileFormat format = formats[index];
-        boolean text = org.omc.service.PandocService.canConvert(FileFormat.MARKDOWN, format);
+        // Availability-aware check routed through the controller instead of a
+        // static service call: when Pandoc is not installed the template
+        // options are disabled instead of merely "supported on paper".
+        boolean text;
+        try {
+            text = workflowController != null
+                    && workflowController.canConvertDocuments(FileFormat.MARKDOWN, format);
+        } catch (IllegalStateException e) {
+            logger.warn("Controller not initialized; document template controls disabled", e);
+            text = false;
+        }
         boolean margins = format == FileFormat.PDF || format == FileFormat.HTML || format == FileFormat.DOCX || format == FileFormat.ODT;
         boolean toc = java.util.Set.of(FileFormat.PDF, FileFormat.HTML, FileFormat.DOCX, FileFormat.EPUB,
                 FileFormat.TEX, FileFormat.LATEX).contains(format);
@@ -171,6 +181,11 @@ public class SettingsDialogJavaGi {
 
     // Settings manager for preset operations (REQ-2.6)
     private org.omc.controller.SettingsManager settingsManager;
+
+    // Workflow controller for availability-aware capability checks (document
+    // template support). Optional: legacy 3-arg construction leaves it null and
+    // capability-dependent controls stay disabled.
+    private org.omc.controller.ApplicationWorkflowController workflowController;
 
     // Cached presets for performance (REQ-5.2)
     private PresetsBySection cachedPresets;
@@ -275,18 +290,40 @@ public class SettingsDialogJavaGi {
 
     /**
      * Constructor. Initializes UI from GtkBuilder and sets up event handlers.
-     * 
+     *
      * @param parent          Parent window (main window)
      * @param settings        Current conversion settings to edit
      * @param settingsManager Settings manager for preset operations (REQ-2.6)
+     * @deprecated Use {@link #SettingsDialogJavaGi(Window, ConversionSettings,
+     *             org.omc.controller.SettingsManager, org.omc.controller.ApplicationWorkflowController)}
+     *             so document capability checks are availability-aware. Kept for
+     *             backward compatibility; capability-dependent controls remain
+     *             disabled without a controller.
      */
+    @Deprecated
     public SettingsDialogJavaGi(Window parent, ConversionSettings settings,
             org.omc.controller.SettingsManager settingsManager) {
+        this(parent, settings, settingsManager, null);
+    }
+
+    /**
+     * Constructor. Initializes UI from GtkBuilder and sets up event handlers.
+     *
+     * @param parent            Parent window (main window)
+     * @param settings          Current conversion settings to edit
+     * @param settingsManager   Settings manager for preset operations (REQ-2.6)
+     * @param workflowController Workflow controller for availability-aware
+     *                          capability checks (may be null)
+     */
+    public SettingsDialogJavaGi(Window parent, ConversionSettings settings,
+            org.omc.controller.SettingsManager settingsManager,
+            org.omc.controller.ApplicationWorkflowController workflowController) {
         long startTime = System.currentTimeMillis(); // REQ-5.2: Performance tracking
 
         settings = settings == null ? ConversionSettings.builder().build().withDefaults() : settings.withDefaults();
         this.currentSettings = settings;
         this.settingsManager = settingsManager;
+        this.workflowController = workflowController;
 
         logger.info("Initializing SettingsDialogJavaGi");
 

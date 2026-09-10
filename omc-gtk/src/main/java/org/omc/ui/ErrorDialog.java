@@ -41,6 +41,16 @@ public class ErrorDialog {
 
         private static final Logger logger = LoggerFactory.getLogger(ErrorDialog.class);
 
+        /**
+         * Cap for simultaneous error windows. A failing batch can emit one
+         * error per file within a few idle cycles; without a cap that floods
+         * the screen with modal windows. Excess dialogs queue FIFO and appear
+         * as earlier ones are dismissed.
+         */
+        private static final int MAX_CONCURRENT_ERROR_DIALOGS = 3;
+
+        private static final ErrorDialogQueue DIALOG_QUEUE = new ErrorDialogQueue(MAX_CONCURRENT_ERROR_DIALOGS);
+
         // Map of error codes to user-friendly messages
         private static final Map<ErrorCode, String> ERROR_MESSAGES = new HashMap<>();
 
@@ -126,7 +136,9 @@ public class ErrorDialog {
 
         /**
          * Shows an error dialog for a MediaConverterException on the GTK main thread.
-         * 
+         * Excess dialogs beyond the concurrency cap are queued and shown when
+         * earlier ones close.
+         *
          * @param parent    The parent window
          * @param exception The exception to display
          */
@@ -137,14 +149,16 @@ public class ErrorDialog {
                 String detailsMessage = buildDetailsMessage(exception);
 
                 GLib.idleAdd(0, () -> {
-                        showErrorDialog(parent, "Error", userMessage, detailsMessage);
+                        DIALOG_QUEUE.offer(() -> showErrorDialog(parent, "Error", userMessage, detailsMessage));
                         return false;
                 });
         }
 
         /**
          * Shows an error dialog for a generic exception on the GTK main thread.
-         * 
+         * Excess dialogs beyond the concurrency cap are queued and shown when
+         * earlier ones close.
+         *
          * @param parent    The parent window
          * @param title     The dialog title
          * @param exception The exception to display
@@ -157,14 +171,16 @@ public class ErrorDialog {
                 String detailsMessage = buildDetailsMessage(exception);
 
                 GLib.idleAdd(0, () -> {
-                        showErrorDialog(parent, title, userMessage, detailsMessage);
+                        DIALOG_QUEUE.offer(() -> showErrorDialog(parent, title, userMessage, detailsMessage));
                         return false;
                 });
         }
 
         /**
          * Shows an error dialog with a custom message on the GTK main thread.
-         * 
+         * Excess dialogs beyond the concurrency cap are queued and shown when
+         * earlier ones close.
+         *
          * @param parent  The parent window
          * @param title   The dialog title
          * @param message The error message
@@ -173,7 +189,7 @@ public class ErrorDialog {
                 logger.error("Showing error dialog: {} - {}", title, message);
 
                 GLib.idleAdd(0, () -> {
-                        showErrorDialog(parent, title, message, null);
+                        DIALOG_QUEUE.offer(() -> showErrorDialog(parent, title, message, null));
                         return false;
                 });
         }
@@ -271,6 +287,12 @@ public class ErrorDialog {
 
                         // Set content and show
                         dialog.setChild(contentBox);
+                        // Release the queue slot when the dialog is dismissed,
+                        // letting the next queued error (if any) be shown.
+                        dialog.onCloseRequest(() -> {
+                                DIALOG_QUEUE.onDialogClosed();
+                                return false;
+                        });
                         dialog.present();
 
                 } catch (Exception e) {
@@ -298,7 +320,11 @@ public class ErrorDialog {
                                         message);
                         dialog.setTitle(title);
                         dialog.show();
-                        dialog.onResponse(responseId -> dialog.destroy());
+                        dialog.onResponse(responseId -> {
+                                dialog.destroy();
+                                // Fallback dialog also occupies a queue slot.
+                                DIALOG_QUEUE.onDialogClosed();
+                        });
                 } catch (Exception e) {
                         logger.error("Error showing fallback error dialog", e);
                 }

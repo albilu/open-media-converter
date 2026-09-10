@@ -50,13 +50,24 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * }</pre>
  * 
  * <p>
- * <b>Immutability:</b>
+ * <b>Mutability contract:</b>
  * </p>
  * <p>
- * This class is immutable. All modification methods ({@code withStatus()},
- * {@code withProgress()}, {@code withSettingsOverride()}, etc.) return new
- * instances
- * rather than modifying the existing object.
+ * Identity fields ({@code id}, {@code path}, {@code format}, {@code size},
+ * {@code metadata}, {@code settingsOverride}, {@code outputPath}) are final
+ * and never change after construction. The runtime fields {@code status},
+ * {@code progress}, {@code errorMessage} and {@code progressInfo} are
+ * intentionally <b>mutable</b>: the conversion engine publishes updates
+ * while UI threads read them concurrently. They are therefore declared
+ * {@code volatile} so that readers always observe the most recent write
+ * across threads (this is not a fully immutable class; the
+ * {@code with*()} copy methods themselves write these fields on the freshly
+ * created copy before returning it).
+ * </p>
+ * <p>
+ * The {@code with*()} methods ({@code withStatus()}, {@code withProgress()},
+ * {@code withSettingsOverride()}, etc.) return new instances carrying the
+ * updated values; the original instance is left unchanged by these methods.
  * </p>
  * 
  * <p>
@@ -82,10 +93,14 @@ public final class ConversionFile {
     private final Object metadata; // VideoMetadata, AudioMetadata, ImageMetadata, or DocumentMetadata
     private final FileSettingsOverride settingsOverride; // Requirement REQ-3.1: Per-file settings override
     private final Path outputPath; // Requirement REQ-FL-3.3: Output file path after successful conversion
-    private ConversionStatus status;
-    private int progress; // 0-100
-    private String errorMessage;
-    private ConversionProgress progressInfo; // Full progress info including speed (not persisted)
+
+    // Mutable runtime state: written by the conversion engine while the UI
+    // reads it. volatile guarantees that UI threads see fresh values without
+    // external synchronization (see class-level "Mutability contract").
+    private volatile ConversionStatus status;
+    private volatile int progress; // 0-100
+    private volatile String errorMessage;
+    private volatile ConversionProgress progressInfo; // Full progress info including speed (not persisted)
 
     @JsonCreator
     private ConversionFile(

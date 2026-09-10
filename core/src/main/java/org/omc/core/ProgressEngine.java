@@ -46,10 +46,20 @@ public class ProgressEngine {
     // Throttling: track last notification time per file
     private final ConcurrentHashMap<String, Long> lastNotificationTimeMap;
 
-    // Batch tracking
-    private Instant batchStartTime;
-    private int totalFiles;
-    private long totalBytes;
+    // Batch tracking (volatile: written on the submitting thread, read on
+    // worker threads via getBatchProgress)
+    private volatile Instant batchStartTime;
+    private volatile int totalFiles;
+    private volatile long totalBytes;
+
+    /**
+     * Minimum interval between batch progress notifications. Per-file updates
+     * are throttled above; without this, every file update also fanned out to
+     * all batch listeners and flooded the UI thread.
+     */
+    private static final long BATCH_THROTTLE_INTERVAL_MS = 100;
+    /** Last batch notification time in millis; 0 forces the first one. */
+    private volatile long lastBatchNotificationTime;
 
     // Progress listeners
     private final CopyOnWriteArrayList<Consumer<ConversionProgress>> progressListeners;
@@ -103,8 +113,8 @@ public class ProgressEngine {
 
         logger.info("Started batch tracking: {} files, {} total bytes", totalFiles, totalBytes);
 
-        // Notify listeners of initial batch progress
-        notifyBatchProgress();
+        // Notify listeners of initial batch progress (forced: baseline state)
+        notifyBatchProgress(true);
     }
 
     /**
@@ -214,7 +224,11 @@ public class ProgressEngine {
             currentProgress = ConversionProgress.initial(fileId, fileSizeMap.getOrDefault(fileId, result.inputSize()));
         }
 
-        // Update to 100% complete
+        // Update to 100% complete. NOTE: this is deliberate for ALL terminal
+        // states including FAILED/CANCELLED (test contract:
+        // testCompleteTracking_Failure_UpdatesToComplete): the per-file bar is
+        // terminal, and batch speed/ETA derive from status counts, not from
+        // reinterpreting these bytes. Do not "fix" to partial progress.
         ConversionProgress completedProgress = currentProgress.update(currentProgress.totalBytes());
         progressMap.put(fileId, completedProgress);
 
@@ -227,23 +241,37 @@ public class ProgressEngine {
 
         // Notify listeners (force notification for completion event)
         notifyProgressListeners(completedProgress, true);
-        notifyBatchProgress();
+        notifyBatchProgress(true);
     }
 
     /**
      * Marks a file as cancelled.
-     * 
+     *
+     * <p>
+     * Also freezes a progress entry for the file: previously only the status
+     * map was updated, so a file cancelled before {@code startTracking} (e.g.
+     * pre-start cancel in the engine) left no progress record and per-file UI
+     * stayed {@code PENDING} forever. The frozen entry keeps the last known
+     * bytes (or zero) and is notified as a forced per-file event.
+     *
      * @param fileId the file identifier
      */
     public void cancelTracking(String fileId) {
         Objects.requireNonNull(fileId, "File ID cannot be null");
 
         statusMap.put(fileId, ConversionStatus.CANCELLED);
+        ConversionProgress frozen = progressMap.get(fileId);
+        if (frozen == null) {
+            frozen = ConversionProgress.initial(fileId, fileSizeMap.getOrDefault(fileId, 0L));
+            progressMap.put(fileId, frozen);
+        }
 
         logger.debug("Cancelled tracking for file: {}", fileId);
 
-        // Notify batch progress
-        notifyBatchProgress();
+        // Forced per-file event so the row leaves PENDING/IN_PROGRESS.
+        notifyProgressListeners(frozen, true);
+        // Batch completion sides of a cancel must always be delivered.
+        notifyBatchProgress(true);
     }
 
     /**
@@ -334,6 +362,7 @@ public class ProgressEngine {
         batchStartTime = null;
         totalFiles = 0;
         totalBytes = 0;
+        lastBatchNotificationTime = 0;
 
         logger.debug("ProgressEngine reset");
     }
@@ -421,10 +450,37 @@ public class ProgressEngine {
     }
 
     /**
-     * Notifies all batch progress listeners of an update.
+     * Notifies all batch progress listeners of an update, throttled to
+     * {@link #BATCH_THROTTLE_INTERVAL_MS}. Terminal batch states (nothing
+     * pending or in progress) always bypass the throttle so the final state
+     * is never swallowed when no further events follow.
      */
     private void notifyBatchProgress() {
+        notifyBatchProgress(false);
+    }
+
+    /**
+     * Notifies batch listeners, bypassing the throttle when forced (batch
+     * start, per-file completion, cancel).
+     *
+     * @param force if true, deliver regardless of the throttle window
+     */
+    private void notifyBatchProgress(boolean force) {
         BatchProgress batchProgress = getBatchProgress();
+        boolean terminal = batchProgress.pendingFiles() == 0 && batchProgress.inProgressFiles() == 0
+                && batchStartTime != null;
+        if (!force && !terminal) {
+            long now = System.currentTimeMillis();
+            long last = lastBatchNotificationTime;
+            if (now - last < BATCH_THROTTLE_INTERVAL_MS) {
+                logger.trace("Throttled batch progress notification ({}ms since last)",
+                        now - last);
+                return;
+            }
+            lastBatchNotificationTime = now;
+        } else {
+            lastBatchNotificationTime = System.currentTimeMillis();
+        }
         for (Consumer<BatchProgress> listener : batchProgressListeners) {
             try {
                 listener.accept(batchProgress);

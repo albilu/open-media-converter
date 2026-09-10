@@ -27,32 +27,88 @@ import org.xml.sax.SAXException;
 final class DocumentOutputOptions {
     private DocumentOutputOptions() { }
 
+    /** Max entries scanned per archive (zip-bomb guard). */
+    private static final int MAX_ZIP_ENTRIES = 10_000;
+    /** Max bytes read from a single zip entry (zip-bomb guard). */
+    private static final long MAX_ENTRY_BYTES = 50L * 1024 * 1024;
+    /** Max total bytes across all entries (zip-bomb guard). */
+    private static final long MAX_TOTAL_BYTES = 200L * 1024 * 1024;
+
     static void apply(Path output, FileFormat format, DocumentSettings settings) throws IOException {
         if (format != FileFormat.DOCX && format != FileFormat.ODT) return;
-        Path staged = Files.createTempFile(output.toAbsolutePath().getParent(), "omc-layout-", ".zip");
+        // System temp dir (never the user output parent).
+        Path staged = Files.createTempFile("omc-layout-", ".zip");
         try {
             try (var input = new ZipInputStream(Files.newInputStream(output));
                     var result = new ZipOutputStream(Files.newOutputStream(staged))) {
                 ZipEntry entry;
+                int entryCount = 0;
+                long totalBytes = 0;
+                byte[] buffer = new byte[8192];
                 while ((entry = input.getNextEntry()) != null) {
-                    boolean layout = format == FileFormat.DOCX && entry.getName().equals("word/document.xml")
-                            || format == FileFormat.ODT && entry.getName().equals("styles.xml");
-                    // ODT requires its mimetype entry to remain uncompressed.
-                    ZipEntry replacement = new ZipEntry(entry.getName());
+                    if (++entryCount > MAX_ZIP_ENTRIES) {
+                        throw new IOException("Document has too many archive entries");
+                    }
+                    String name = entry.getName();
+                    // Reject path traversal in entry names.
+                    if (name.contains("..") || name.startsWith("/") || name.startsWith("\\")) {
+                        throw new IOException("Document has unsafe archive entry: " + name);
+                    }
+                    boolean layout = format == FileFormat.DOCX && name.equals("word/document.xml")
+                            || format == FileFormat.ODT && name.equals("styles.xml");
+                    // Rewritten layout bytes differ from the original, so a
+                    // STORED entry's stale size/crc would corrupt the zip:
+                    // always DEFLATE rewritten entries. Preserve STORED only
+                    // for untouched entries (e.g. ODT mimetype).
+                    ZipEntry replacement = new ZipEntry(name);
                     if (!layout && entry.getMethod() == ZipEntry.STORED) {
                         replacement.setMethod(ZipEntry.STORED);
                         replacement.setSize(entry.getSize());
                         replacement.setCrc(entry.getCrc());
                     }
                     result.putNextEntry(replacement);
-                    if (layout) result.write(withMargins(input.readAllBytes(), format, settings));
-                    else input.transferTo(result);
+                    if (layout) {
+                        byte[] xml = readEntryCapped(input, MAX_ENTRY_BYTES);
+                        totalBytes += xml.length;
+                        if (totalBytes > MAX_TOTAL_BYTES) {
+                            throw new IOException("Document archive is too large");
+                        }
+                        result.write(withMargins(xml, format, settings));
+                    } else {
+                        long copied = 0;
+                        int read;
+                        while ((read = input.read(buffer)) != -1) {
+                            copied += read;
+                            totalBytes += read;
+                            if (copied > MAX_ENTRY_BYTES || totalBytes > MAX_TOTAL_BYTES) {
+                                throw new IOException("Document archive is too large");
+                            }
+                            result.write(buffer, 0, read);
+                        }
+                    }
                     result.closeEntry();
                 }
             }
             Files.move(staged, output, StandardCopyOption.REPLACE_EXISTING);
         } finally {
             Files.deleteIfExists(staged);
+        }
+    }
+
+    /** Reads one zip entry with a byte cap (zip-bomb guard). */
+    private static byte[] readEntryCapped(ZipInputStream input, long maxBytes) throws IOException {
+        try (var bytes = new java.io.ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            long total = 0;
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                total += read;
+                if (total > maxBytes) {
+                    throw new IOException("Document entry is too large");
+                }
+                bytes.write(buffer, 0, read);
+            }
+            return bytes.toByteArray();
         }
     }
 

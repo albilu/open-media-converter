@@ -92,14 +92,18 @@ public final class PathUtils {
      * Gets the file extension from a path (without the dot).
      *
      * @param pathString The path string
-     * @return The file extension, or empty string if no extension
+     * @return The file extension, or empty string if no extension or the
+     *         path is degenerate (e.g. contains NUL bytes or is the root)
      */
     public static String getExtension(String pathString) {
         if (pathString == null || pathString.isBlank()) {
             return "";
         }
 
-        String filename = Paths.get(pathString).getFileName().toString();
+        String filename = getFileNameSafely(pathString);
+        if (filename == null) {
+            return "";
+        }
         int lastDot = filename.lastIndexOf('.');
 
         if (lastDot == -1 || lastDot == 0 || lastDot == filename.length() - 1) {
@@ -113,14 +117,18 @@ public final class PathUtils {
      * Gets the filename without extension.
      *
      * @param pathString The path string
-     * @return The filename without extension
+     * @return The filename without extension, or empty string if the path is
+     *         degenerate (e.g. contains NUL bytes or is the root)
      */
     public static String getFilenameWithoutExtension(String pathString) {
         if (pathString == null || pathString.isBlank()) {
             return "";
         }
 
-        String filename = Paths.get(pathString).getFileName().toString();
+        String filename = getFileNameSafely(pathString);
+        if (filename == null) {
+            return "";
+        }
         int lastDot = filename.lastIndexOf('.');
 
         if (lastDot == -1 || lastDot == 0) {
@@ -128,6 +136,25 @@ public final class PathUtils {
         }
 
         return filename.substring(0, lastDot);
+    }
+
+    /**
+     * Extracts the file name of a path string, returning null instead of
+     * throwing for degenerate input.
+     *
+     * @param pathString The path string
+     * @return The file name, or null when the path is invalid or has no file
+     *         name component (root)
+     */
+    private static String getFileNameSafely(String pathString) {
+        try {
+            Path fileName = Paths.get(pathString).getFileName();
+            return fileName == null ? null : fileName.toString();
+        } catch (InvalidPathException e) {
+            // Degenerate input (e.g. embedded NUL bytes) has no usable
+            // filename to extract
+            return null;
+        }
     }
 
     /**
@@ -163,6 +190,8 @@ public final class PathUtils {
 
     /**
      * Checks if a path is within a given directory (prevents directory traversal).
+     * Symlinks are resolved, so a link inside the directory that points outside
+     * is correctly rejected.
      *
      * @param basePath   The base directory path
      * @param targetPath The target path to check
@@ -174,12 +203,29 @@ public final class PathUtils {
         }
 
         try {
-            Path base = Paths.get(basePath).toAbsolutePath().normalize();
-            Path target = Paths.get(targetPath).toAbsolutePath().normalize();
+            Path base = resolveRealPath(Paths.get(basePath));
+            Path target = resolveRealPath(Paths.get(targetPath));
 
             return target.startsWith(base);
-        } catch (Exception e) {
+        } catch (IOException e) {
+            // Path resolution failures mean containment cannot be established
             return false;
+        }
+    }
+
+    /**
+     * Resolves a path to its real (symlink-free, absolute) form, falling back
+     * to absolute+normalized when the path does not exist (toRealPath throws).
+     *
+     * @param path The path to resolve
+     * @return the real path when it exists, otherwise the normalized absolute path
+     */
+    private static Path resolveRealPath(Path path) throws IOException {
+        try {
+            return path.toRealPath();
+        } catch (IOException e) {
+            // Non-existent path: lexical comparison is the best available check
+            return path.toAbsolutePath().normalize();
         }
     }
 

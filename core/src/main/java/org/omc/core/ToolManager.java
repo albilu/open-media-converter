@@ -115,10 +115,17 @@ public class ToolManager {
         FormatCategory inputCategory = inputFormat.getCategory();
         FormatCategory outputCategory = outputFormat.getCategory();
 
-        // Video/Audio: use FFmpeg
+        // Video/Audio: use FFmpeg (only when the service is available;
+        // otherwise fail with TOOL_NOT_FOUND instead of an NPE downstream)
         // Requirement REQ-006.1, REQ-006.2
         if (inputCategory == FormatCategory.VIDEO ||
                 inputCategory == FormatCategory.AUDIO) {
+            if (ffmpegService == null) {
+                throw new ToolExecutionException(
+                        "FFmpeg is not available. Please install FFmpeg to convert video/audio files.",
+                        ErrorCode.TOOL_NOT_FOUND,
+                        "ffmpeg");
+            }
             logger.debug("Selected FFMPEG for {} → {} (media category: {})",
                     inputFormat, outputFormat, inputCategory);
             return ConversionTool.FFMPEG;
@@ -127,6 +134,12 @@ public class ToolManager {
         // Image: use ImageMagick
         // Requirement REQ-SEL-2, REQ-IMG-2
         if (inputCategory == FormatCategory.IMAGE) {
+            if (imageMagickService == null) {
+                throw new ToolExecutionException(
+                        "ImageMagick 'convert' is not available. Please install ImageMagick to convert image files.",
+                        ErrorCode.TOOL_NOT_FOUND,
+                        "imagemagick");
+            }
             logger.debug("Selected IMAGEMAGICK for {} → {} (IMAGE category)",
                     inputFormat, outputFormat);
             return ConversionTool.IMAGEMAGICK;
@@ -168,10 +181,35 @@ public class ToolManager {
         if (LibreOfficeService.canConvert(inputFormat, outputFormat) && libreOfficeService != null) {
             return ConversionTool.LIBREOFFICE;
         }
-        if (PandocService.canConvert(inputFormat, outputFormat)) return ConversionTool.PANDOC;
-        if (LibreOfficeService.canConvert(inputFormat, outputFormat)) return ConversionTool.LIBREOFFICE;
+        // Never fall back to an UNAVAILABLE service: returning a tool whose
+        // service is null only moves the failure downstream as an NPE.
+        // Distinguish "no tool supports this pair" from "tool missing".
+        if (PandocService.canConvert(inputFormat, outputFormat)
+                || LibreOfficeService.canConvert(inputFormat, outputFormat)) {
+            throw new ToolExecutionException(
+                    "No available tool supports " + inputFormat + " to " + outputFormat
+                            + ". Please install Pandoc or LibreOffice.",
+                    ErrorCode.TOOL_NOT_FOUND,
+                    "No available document converter");
+        }
         throw new ToolExecutionException("Unsupported document conversion: " + inputFormat + " to " + outputFormat,
-                ErrorCode.INVALID_FILE_FORMAT, "No tool supports this input/output pair");
+                ErrorCode.TOOL_NOT_FOUND, "No tool supports this input/output pair");
+    }
+
+    /**
+     * Checks whether an installed service supports a document conversion pair.
+     * Unlike the static canConvert helpers (which describe format support),
+     * this also requires the backing service to be available.
+     *
+     * @param input source document format
+     * @param output target document format
+     * @return true if Pandoc or LibreOffice is installed and supports the pair
+     */
+    public boolean canConvertDocuments(FileFormat input, FileFormat output) {
+        if (PandocService.canConvert(input, output) && pandocService != null) {
+            return true;
+        }
+        return LibreOfficeService.canConvert(input, output) && libreOfficeService != null;
     }
 
     /**
@@ -281,6 +319,13 @@ public class ToolManager {
             String fileId,
             ProcessRegistry processRegistry) throws ToolExecutionException {
 
+        if (ffmpegService == null) {
+            throw new ToolExecutionException(
+                    "FFmpeg binary not found. Please install FFmpeg to convert video/audio files.",
+                    ErrorCode.TOOL_NOT_FOUND,
+                    "ffmpeg");
+        }
+
         FormatCategory category = outputFormat.getCategory();
 
         return switch (category) {
@@ -324,6 +369,13 @@ public class ToolManager {
             String fileId,
             ProcessRegistry processRegistry) throws ToolExecutionException {
 
+        if (pandocService == null) {
+            throw new ToolExecutionException(
+                    "Pandoc binary not found. Please install Pandoc to convert text documents.",
+                    ErrorCode.TOOL_NOT_FOUND,
+                    "pandoc");
+        }
+
         if (!(sectionSettings instanceof DocumentSettings)) {
             throw new ToolExecutionException(
                     "Document settings are required for document format conversion.",
@@ -346,6 +398,13 @@ public class ToolManager {
             ProgressCallback progressCallback,
             String fileId,
             ProcessRegistry processRegistry) throws ToolExecutionException {
+
+        if (libreOfficeService == null) {
+            throw new ToolExecutionException(
+                    "LibreOffice binary not found. Please install LibreOffice to convert office documents.",
+                    ErrorCode.TOOL_NOT_FOUND,
+                    "libreoffice");
+        }
 
         if (!(sectionSettings instanceof DocumentSettings)) {
             throw new ToolExecutionException(

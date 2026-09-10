@@ -30,7 +30,7 @@ public class FileOperationException extends MediaConverterException {
      * @param cause     The underlying cause
      */
     public FileOperationException(String message, ErrorCode errorCode, String filePath, Throwable cause) {
-        super(message, errorCode, cause, filePath);
+        super(message, errorCode, cause);
         this.filePath = filePath;
     }
 

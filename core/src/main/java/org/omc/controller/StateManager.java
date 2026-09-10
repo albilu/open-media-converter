@@ -3,13 +3,17 @@
 package org.omc.controller;
 
 import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.UnaryOperator;
 
 import org.omc.core.ConfigurationManager;
 import org.omc.model.ApplicationState;
@@ -22,10 +26,16 @@ import org.slf4j.LoggerFactory;
 /**
  * Manages application state persistence and retrieval.
  * Handles window state, session state, and overall application state.
- * 
+ *
  * Implements atomic writes to prevent corruption and provides automatic
  * backup and recovery for corrupted state files.
- * 
+ *
+ * Also hosts small persistence helpers shared with the other controllers in
+ * this package: an {@link #moveWithAtomicFallback(Path, Path) atomic-move
+ * fallback} for filesystems without atomic move support, quiet temp-file
+ * cleanup, and the {@link #BACKUP_TIMESTAMP_FORMATTER shared backup filename
+ * timestamp pattern}.
+ *
  * Requirements: REQ-005.1, REQ-005.2, REQ-005.3
  */
 public class StateManager {
@@ -34,7 +44,21 @@ public class StateManager {
     private static final String STATE_FILE = "state.json";
     private static final String BACKUP_SUFFIX = ".backup";
     private static final String TEMP_SUFFIX = ".tmp";
-    private static final String CURRENT_VERSION = "1.0.0";
+
+    /**
+     * Backup filename timestamp pattern shared by all persistence managers in
+     * this package.
+     *
+     * <p>
+     * Sub-second precision (microseconds) prevents distinct backups taken
+     * within the same second from overwriting each other.
+     * </p>
+     */
+    static final String BACKUP_TIMESTAMP_PATTERN = "yyyyMMdd_HHmmss_SSSSSS";
+
+    /** Thread-safe formatter for {@link #BACKUP_TIMESTAMP_PATTERN}. */
+    static final DateTimeFormatter BACKUP_TIMESTAMP_FORMATTER =
+            DateTimeFormatter.ofPattern(BACKUP_TIMESTAMP_PATTERN);
 
     private final ConfigurationManager configurationManager;
     private final AtomicReference<ApplicationState> currentState;
@@ -54,7 +78,11 @@ public class StateManager {
      * Loads application state from disk.
      * If the state file doesn't exist or is corrupted, returns default state.
      * Corrupted files are backed up with timestamp.
-     * 
+     *
+     * States written by an older schema (major or minor) are migrated through
+     * {@link #migrateState(ApplicationState)}. States written by a newer
+     * schema are kept as-is (no destructive action on downgrade).
+     *
      * Requirement REQ-005.3: State persistence
      *
      * @return Loaded or default state
@@ -89,11 +117,14 @@ public class StateManager {
             // Validate and clean state
             ApplicationState validatedState = state.validated();
 
-            // Check if state needs migration
-            if (state.needsMigration(CURRENT_VERSION)) {
+            // Check if state needs migration (major and minor are compared; patch ignored)
+            if (state.needsMigration(ApplicationState.CURRENT_STATE_VERSION)) {
                 logger.info("State requires migration from version {} to {}",
-                        state.version(), CURRENT_VERSION);
+                        state.version(), ApplicationState.CURRENT_STATE_VERSION);
                 validatedState = migrateState(validatedState);
+            } else if (!ApplicationState.CURRENT_STATE_VERSION.equals(state.version())) {
+                logger.info("State schema {} is same-generation or newer than {}; keeping state as-is",
+                        state.version(), ApplicationState.CURRENT_STATE_VERSION);
             }
 
             currentState.set(validatedState);
@@ -113,7 +144,7 @@ public class StateManager {
      * Saves application state to persistent storage (state.json).
      * Writes to temporary file first, then renames to prevent corruption.
      * Method is synchronized to prevent concurrent writes.
-     * 
+     *
      * Requirement REQ-005.3: State persistence with atomic writes
      *
      * @param state Application state to save
@@ -131,13 +162,14 @@ public class StateManager {
             Files.createDirectories(statePath.getParent());
 
             // Update version
-            ApplicationState stateWithVersion = state.withVersion(CURRENT_VERSION);
+            ApplicationState stateWithVersion = state.withVersion(ApplicationState.CURRENT_STATE_VERSION);
 
             // Write to temporary file first
             JsonUtils.writeJsonFile(stateWithVersion, tempPath.toFile());
 
-            // Atomic rename to target file
-            Files.move(tempPath, statePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            // Atomic rename to target file (falls back to a plain move where
+            // the filesystem does not support atomic moves)
+            moveWithAtomicFallback(tempPath, statePath);
 
             // Update current state
             currentState.set(stateWithVersion);
@@ -149,17 +181,11 @@ public class StateManager {
 
         } catch (IOException e) {
             logger.error("Failed to save application state to: {}", statePath, e);
-
-            // Clean up temp file if it exists
-            if (Files.exists(tempPath)) {
-                try {
-                    Files.delete(tempPath);
-                } catch (IOException cleanupEx) {
-                    logger.warn("Failed to delete temp state file: {}", tempPath, cleanupEx);
-                }
-            }
-
             throw e;
+        } finally {
+            // Clean up the temp file whether the move failed or never happened;
+            // after a successful move this is a no-op because the file is gone.
+            deleteQuietly(tempPath);
         }
     }
 
@@ -277,25 +303,152 @@ public class StateManager {
         logger.info("State reset to defaults successfully");
     }
 
+    // ========== State schema migration framework ==========
+    // Requirement REQ-005.3: State version migration support
+
     /**
-     * Migrates state from old version to current version.
-     * 
-     * Requirement REQ-005.3: State version migration support
+     * One schema migration step, upgrading a state file from one schema
+     * version to the next.
+     *
+     * @param fromSchema source schema version as {@code "major.minor"}
+     * @param toSchema   target schema version as {@code "major.minor"}
+     * @param migrator   transform applied to the state; must preserve all
+     *                   fields it does not explicitly convert
+     */
+    record MigrationStep(String fromSchema, String toSchema, UnaryOperator<ApplicationState> migrator) {
+    }
+
+    /**
+     * Registered migration steps, forming a chain that ends at
+     * {@link ApplicationState#CURRENT_STATE_VERSION}.
+     *
+     * <p>
+     * <b>How to add a migration step when the schema changes:</b>
+     * </p>
+     * <ol>
+     * <li>Bump {@link ApplicationState#CURRENT_STATE_VERSION} to the new
+     * {@code "major.minor.patch"} value.</li>
+     * <li>Add a {@link MigrationStep} below mapping the previous
+     * {@code "major.minor"} to the new one, with a method that transforms the
+     * old state shape into the new one (rename/move fields, inject defaults,
+     * drop obsolete data).</li>
+     * <li>Steps must advance strictly toward the current schema and never
+     * overshoot it (enforced by tests).</li>
+     * </ol>
+     *
+     * <p>
+     * The {@code 0.9 -> 1.0} entry below is a no-op placeholder: no released
+     * build ever wrote a 0.9 schema, so the step documents the mechanism.
+     * States with unknown old versions are treated as structurally compatible
+     * and simply re-stamped (see {@link #migrateState(ApplicationState)}).
+     * </p>
+     */
+    private static final List<MigrationStep> MIGRATION_STEPS = List.of(
+            new MigrationStep("0.9", "1.0", StateManager::migrateNoOp));
+
+    /**
+     * Returns the registered step that starts at the given schema version.
+     *
+     * @param fromSchema source schema version as {@code "major.minor"}
+     * @return the outgoing step, or empty when no step is registered
+     */
+    static Optional<MigrationStep> migrationStep(String fromSchema) {
+        return MIGRATION_STEPS.stream()
+                .filter(step -> step.fromSchema().equals(fromSchema))
+                .findFirst();
+    }
+
+    /**
+     * Returns all registered migration steps (in registration order).
+     *
+     * @return immutable list of steps
+     */
+    static List<MigrationStep> migrationSteps() {
+        return MIGRATION_STEPS;
+    }
+
+    /**
+     * Placeholder transform for schema transitions that need no structural
+     * change (the state already deserializes into the new shape thanks to
+     * tolerant binding).
+     */
+    private static ApplicationState migrateNoOp(ApplicationState state) {
+        return state;
+    }
+
+    /**
+     * Migrates state from an older schema version to
+     * {@link ApplicationState#CURRENT_STATE_VERSION}.
+     *
+     * <p>
+     * The migration walks the registered step chain one hop at a time until
+     * the current schema is reached, then stamps the current version. States
+     * already at or newer than the current schema are returned untouched
+     * (downgrades must never destroy newer data).
+     * </p>
+     *
+     * <p>
+     * When a state carries an old version with no registered step, the chain
+     * cannot continue; because every released schema is structurally
+     * compatible, the state is kept as-is and only the version is stamped.
+     * </p>
      *
      * @param state State to migrate
      * @return Migrated state
      */
     private ApplicationState migrateState(ApplicationState state) {
-        // For now, just update version
-        // In future, add version-specific migration logic here
-        logger.info("Migrating state to version {}", CURRENT_VERSION);
-        return state.withVersion(CURRENT_VERSION);
+        ApplicationState.SchemaVersion target =
+                ApplicationState.SchemaVersion.parse(ApplicationState.CURRENT_STATE_VERSION);
+        ApplicationState.SchemaVersion current =
+                ApplicationState.SchemaVersion.parse(state.version());
+
+        // Defensive guard: never act on a state that is already current or
+        // newer (callers filter with needsMigration, but stay fail-safe).
+        if (target == null || current == null || current.compareTo(target) >= 0) {
+            logger.info("State schema {} requires no migration to {}; keeping state as-is",
+                    state.version(), ApplicationState.CURRENT_STATE_VERSION);
+            return state;
+        }
+
+        ApplicationState migrated = state;
+        int appliedSteps = 0;
+        while (true) {
+            ApplicationState.SchemaVersion version =
+                    ApplicationState.SchemaVersion.parse(migrated.version());
+            if (version == null || version.compareTo(target) >= 0) {
+                break;
+            }
+
+            String schema = version.major() + "." + version.minor();
+            Optional<MigrationStep> step = migrationStep(schema);
+            if (step.isEmpty()) {
+                logger.warn("No migration step registered from schema {}; assuming structural "
+                        + "compatibility and stamping version {}", schema,
+                        ApplicationState.CURRENT_STATE_VERSION);
+                break;
+            }
+
+            logger.info("Applying state migration step {} -> {}", schema, step.get().toSchema());
+            migrated = step.get().migrator().apply(migrated);
+            // Patch component resets to 0 when the schema version changes
+            migrated = migrated.withVersion(step.get().toSchema() + ".0");
+
+            if (++appliedSteps > MIGRATION_STEPS.size()) {
+                // Defensive: a broken step chain must never loop forever
+                logger.error("Migration chain from {} did not converge; stopping after {} steps",
+                        state.version(), appliedSteps);
+                break;
+            }
+        }
+
+        logger.info("Migrating state to version {}", ApplicationState.CURRENT_STATE_VERSION);
+        return migrated.withVersion(ApplicationState.CURRENT_STATE_VERSION);
     }
 
     /**
      * Backs up a corrupted state file.
      * Renames the file with .backup suffix and timestamp.
-     * 
+     *
      * Requirement REQ-005.3: Corrupted file handling
      *
      * @param statePath Path to corrupted state file
@@ -303,7 +456,7 @@ public class StateManager {
     private void backupCorruptedState(Path statePath) {
         try {
             if (Files.exists(statePath)) {
-                String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
+                String timestamp = LocalDateTime.now().format(BACKUP_TIMESTAMP_FORMATTER);
                 Path backupPath = Path.of(statePath.toString() + BACKUP_SUFFIX + "_" + timestamp);
 
                 Files.move(statePath, backupPath, StandardCopyOption.REPLACE_EXISTING);
@@ -339,5 +492,51 @@ public class StateManager {
      */
     public Path getStateFilePath() {
         return getStatePath();
+    }
+
+    // ========== Shared persistence helpers (package-visible) ==========
+
+    /**
+     * Moves {@code source} to {@code target}, preferring an atomic move.
+     *
+     * <p>
+     * Some filesystems (certain network mounts, FAT/exFAT) do not support
+     * atomic moves; {@link Files#move} then throws
+     * {@link AtomicMoveNotSupportedException}, which is unchecked and would
+     * escape {@code catch (IOException)} handlers. This helper catches it and
+     * retries with a plain {@link StandardCopyOption#REPLACE_EXISTING} move,
+     * logging a warning, so callers keep working on such filesystems.
+     * </p>
+     *
+     * @param source the file to move (typically the temp file)
+     * @param target the destination file
+     * @throws IOException if both the atomic and the fallback move fail
+     */
+    static void moveWithAtomicFallback(Path source, Path target) throws IOException {
+        try {
+            Files.move(source, target,
+                    StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            logger.warn("Atomic move not supported for {} ({}); falling back to a non-atomic move",
+                    target, e.getMessage());
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    /**
+     * Deletes a file if it exists, swallowing IOExceptions (best effort).
+     * Used for temp-file cleanup in {@code finally} blocks where the original
+     * outcome must not be masked.
+     *
+     * @param file the file to delete, may no longer exist
+     */
+    static void deleteQuietly(Path file) {
+        try {
+            if (Files.exists(file)) {
+                Files.delete(file);
+            }
+        } catch (IOException e) {
+            logger.warn("Failed to delete temp file: {}", file, e);
+        }
     }
 }

@@ -55,7 +55,7 @@ public class ToolSelectionIntegrationTest {
     private Path mp3File;
 
     @BeforeEach
-    public void setUp() throws IOException {
+    public void setUp() throws Exception {
         // Create mock tool services (all non-null for availability)
         FFmpegService ffmpegService = new FFmpegService(
                 Path.of("/usr/bin/ffmpeg"),

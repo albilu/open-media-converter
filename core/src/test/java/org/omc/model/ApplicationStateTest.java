@@ -108,6 +108,69 @@ class ApplicationStateTest {
     }
 
     @Test
+    void needsMigration_ShouldReturnTrueForOlderMinorVersion() {
+        // Given: State with same major but older minor version
+        ApplicationState state = ApplicationState.create(
+                WindowState.defaultState(), SessionState.empty(), null, "1.0.0");
+
+        // When/Then: Minor schema changes must not silently skip migration
+        assertTrue(state.needsMigration("1.1.0"));
+        assertTrue(state.needsMigration("2.1.0"));
+    }
+
+    @Test
+    void needsMigration_ShouldIgnorePatchVersionDifferences() {
+        // Given: States differing only in patch version
+        ApplicationState newerPatch = ApplicationState.create(
+                WindowState.defaultState(), SessionState.empty(), null, "1.0.9");
+        ApplicationState olderPatch = ApplicationState.create(
+                WindowState.defaultState(), SessionState.empty(), null, "1.0.1");
+
+        // When/Then: Patch-only differences never require migration
+        assertFalse(newerPatch.needsMigration("1.0.1"));
+        assertFalse(olderPatch.needsMigration("1.0.9"));
+    }
+
+    @Test
+    void needsMigration_ShouldCompareMinorVersionsNumerically() {
+        // Given: Minor versions whose lexicographic order differs from numeric order
+        ApplicationState state = ApplicationState.create(
+                WindowState.defaultState(), SessionState.empty(), null, "1.10.0");
+
+        // When/Then: 10 > 9 numerically, so no migration to 1.9 is needed
+        assertFalse(state.needsMigration("1.9.0"));
+        assertTrue(state.needsMigration("1.11.0"));
+    }
+
+    @Test
+    void needsMigration_ShouldTreatMissingMinorAsZero() {
+        // Given: Version without a minor component
+        ApplicationState state = ApplicationState.create(
+                WindowState.defaultState(), SessionState.empty(), null, "1");
+
+        // When/Then: Missing minor counts as 0
+        assertFalse(state.needsMigration("1.0.0"));
+        assertTrue(state.needsMigration("1.1.0"));
+    }
+
+    @Test
+    void currentStateVersion_ShouldBeSingleSourceOfTruth() {
+        // The model constant is the one place the schema version is defined
+        assertEquals("1.0.0", ApplicationState.CURRENT_STATE_VERSION);
+        assertEquals(ApplicationState.CURRENT_STATE_VERSION,
+                ApplicationState.defaultState().version());
+    }
+
+    @Test
+    void schemaVersion_ParseShouldHandleVersionShapes() {
+        assertEquals(new ApplicationState.SchemaVersion(1, 2), ApplicationState.SchemaVersion.parse("1.2.0"));
+        assertEquals(new ApplicationState.SchemaVersion(1, 0), ApplicationState.SchemaVersion.parse("1"));
+        assertNull(ApplicationState.SchemaVersion.parse(null));
+        assertNull(ApplicationState.SchemaVersion.parse("invalid"));
+        assertNull(ApplicationState.SchemaVersion.parse("1.x.0"));
+    }
+
+    @Test
     void needsMigration_ShouldReturnFalseForSameOrNewerVersion() {
         // Given: State with same or newer version
         ApplicationState state1 = ApplicationState.create(

@@ -31,7 +31,7 @@ class ToolDiscoveryTest {
     private ToolDiscovery toolDiscovery;
 
     @BeforeEach
-    void setUp() throws IOException {
+    void setUp() throws Exception {
         // Create temporary directories for testing
         Path configDir = tempDir.resolve("config");
         Path dataDir = tempDir.resolve("data");

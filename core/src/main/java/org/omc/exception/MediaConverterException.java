@@ -8,6 +8,13 @@ package org.omc.exception;
  */
 public class MediaConverterException extends Exception {
     private final ErrorCode errorCode;
+    /**
+     * Additional context for this exception. Deliberately untyped: subclasses
+     * carry structured context in dedicated fields (e.g.
+     * {@link FileOperationException#getFilePath()}) and expose type-safe
+     * accessors, so {@link #getContext()} is only a fallback for generic
+     * logging paths. The signature is kept for backward compatibility.
+     */
     private final Object context;
 
     /**
@@ -71,9 +78,13 @@ public class MediaConverterException extends Exception {
     /**
      * Gets a detailed error message including error code.
      *
-     * @return The detailed error message
+     * @return The detailed error message; the plain message when no error
+     *         code is set (the code is optional, so this must stay null-safe)
      */
     public String getDetailedMessage() {
+        if (errorCode == null) {
+            return getMessage();
+        }
         return String.format("[%s] %s", errorCode.getCode(), getMessage());
     }
 }

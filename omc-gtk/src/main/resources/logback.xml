@@ -6,6 +6,10 @@
     <!-- Property for log pattern -->
     <property name="LOG_PATTERN" value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n" />
     
+    <!-- Conversion pattern carries MDC correlation keys (omcFile, omcTool)
+         set by the tool services around each conversion -->
+    <property name="CONVERSION_PATTERN" value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [omcFile=%X{omcFile} omcTool=%X{omcTool}] - %msg%n" />
+    
     <!-- Console Appender - INFO level for general output -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
@@ -16,7 +20,8 @@
         </filter>
     </appender>
     
-    <!-- Main Application Log - DEBUG level with rotation -->
+    <!-- Main Application Log - INFO level by default with rotation.
+         Use the "debug" command-line flag to raise the root logger to DEBUG. -->
     <appender name="APP_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>${LOG_DIR}/app.log</file>
         <encoder>
@@ -34,16 +39,21 @@
             <totalSizeCap>1GB</totalSizeCap>
         </rollingPolicy>
         
+        <!-- DEBUG threshold so the file captures debug output once the
+             root logger is raised by the debug command-line flag; with the
+             default INFO root no DEBUG events reach this filter anyway -->
         <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
             <level>DEBUG</level>
         </filter>
     </appender>
     
-    <!-- Conversion Operations Log - tracks all conversion activities -->
+    <!-- Conversion Operations Log - tracks all conversion activities.
+         Emits on a background thread so chatty tool output never blocks
+         conversion worker threads. -->
     <appender name="CONVERSION_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>${LOG_DIR}/conversion.log</file>
         <encoder>
-            <pattern>${LOG_PATTERN}</pattern>
+            <pattern>${CONVERSION_PATTERN}</pattern>
         </encoder>
         
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
@@ -58,11 +68,21 @@
         </filter>
     </appender>
     
+    <!-- Async wrapper for the conversion file appender: queue large enough
+         for bursty multi-file batches, never block the converter threads -->
+    <appender name="ASYNC_CONVERSION_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>2048</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>true</neverBlock>
+        <includeCallerData>false</includeCallerData>
+        <appender-ref ref="CONVERSION_FILE" />
+    </appender>
+    
     <!-- Error Log - ERROR level only -->
     <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>${LOG_DIR}/error.log</file>
         <encoder>
-            <pattern>${LOG_PATTERN}</pattern>
+            <pattern>${CONVERSION_PATTERN}</pattern>
         </encoder>
         
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
@@ -77,28 +97,30 @@
         </filter>
     </appender>
     
-    <!-- Logger for conversion operations -->
+    <!-- Conversion-specific loggers: dedicated conversion log stays at DEBUG
+         for diagnostics; console is protected by its INFO threshold -->
     <logger name="org.omc.core.ConversionEngine" level="DEBUG" additivity="false">
-        <appender-ref ref="CONVERSION_FILE" />
+        <appender-ref ref="ASYNC_CONVERSION_FILE" />
         <appender-ref ref="CONSOLE" />
         <appender-ref ref="ERROR_FILE" />
     </logger>
     
     <logger name="org.omc.service" level="DEBUG" additivity="false">
-        <appender-ref ref="CONVERSION_FILE" />
+        <appender-ref ref="ASYNC_CONVERSION_FILE" />
         <appender-ref ref="CONSOLE" />
         <appender-ref ref="ERROR_FILE" />
     </logger>
     
     <!-- Logger for tool execution -->
     <logger name="org.omc.core.ToolManager" level="DEBUG" additivity="false">
-        <appender-ref ref="CONVERSION_FILE" />
+        <appender-ref ref="ASYNC_CONVERSION_FILE" />
         <appender-ref ref="CONSOLE" />
         <appender-ref ref="ERROR_FILE" />
     </logger>
     
-    <!-- Root logger - catches everything else -->
-    <root level="DEBUG">
+    <!-- Root logger - INFO by default; the debug flag switches it to
+         DEBUG at startup (see MainApplicationJavaGi.enableDebugLogging) -->
+    <root level="INFO">
         <appender-ref ref="CONSOLE" />
         <appender-ref ref="APP_FILE" />
         <appender-ref ref="ERROR_FILE" />

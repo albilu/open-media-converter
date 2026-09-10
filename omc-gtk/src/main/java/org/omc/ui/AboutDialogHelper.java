@@ -17,8 +17,10 @@ public class AboutDialogHelper {
 
     // Application metadata
     private static final String APPLICATION_NAME = "Open Media Converter";
-    private static final String VERSION = "1.0.0-SNAPSHOT";
-    private static final String WEBSITE = "https://github.org/omc/open-media-converter";
+    // Version from the jar manifest (set by Maven); falls back to the pom
+    // version when absent, e.g. when running from unpacked classes.
+    private static final String FALLBACK_VERSION = "0.1.0-SNAPSHOT";
+    private static final String WEBSITE = "https://github.com/omc/open-media-converter";
     private static final String WEBSITE_LABEL = "GitHub Repository";
     private static final String COPYRIGHT = "Copyright © 2025 Open Media Converter Contributors";
 
@@ -30,7 +32,7 @@ public class AboutDialogHelper {
     // Authors
     private static final String[] AUTHORS = {
             "Open Media Converter Contributors",
-            "https://github.org/omc/open-media-converter/graphs/contributors"
+            "https://github.com/omc/open-media-converter/graphs/contributors"
     };
 
     // License text (MIT License)
@@ -61,12 +63,29 @@ public class AboutDialogHelper {
     }
 
     /**
+     * Resolves the application version for the About dialog.
+     *
+     * <p>
+     * Reads {@code Implementation-Version} from the package (populated from
+     * the jar manifest during a Maven build). Falls back to the pom version
+     * when the manifest attribute is absent, e.g. when running from unpacked
+     * classes in tests or an IDE.
+     * </p>
+     *
+     * @return the implementation version, or {@code "0.1.0-SNAPSHOT"} when unset
+     */
+    static String resolveVersion() {
+        String version = AboutDialogHelper.class.getPackage().getImplementationVersion();
+        return version != null ? version : FALLBACK_VERSION;
+    }
+
+    /**
      * Shows the About dialog with application information.
      * Creates a GTK AboutDialog and displays it modally over the parent window.
-     * 
+     *
      * Requirement REQ-102.1: Display application name, version, copyright, license,
      * website, authors, and description
-     * 
+     *
      * @param parent the parent window for the dialog
      */
     public static void show(Window parent) {
@@ -85,7 +104,7 @@ public class AboutDialogHelper {
             // Set application metadata
             // Requirement REQ-102.1: Application name and version
             dialog.setProgramName(APPLICATION_NAME);
-            dialog.setVersion(VERSION);
+            dialog.setVersion(resolveVersion());
 
             // Requirement REQ-102.1: Copyright and license
             dialog.setCopyright(COPYRIGHT);

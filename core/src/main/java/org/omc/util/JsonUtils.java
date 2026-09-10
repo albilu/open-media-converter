@@ -41,11 +41,31 @@ public final class JsonUtils {
         // Don't write dates as timestamps
         mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
+        // NOTE: FAIL_ON_UNKNOWN_PROPERTIES deliberately stays ENABLED here.
+        // SettingsManager.loadPresetsBySection() detects legacy preset files
+        // by attempting a strict parse into the current model and falling
+        // back to backup+migration when it fails; making the shared mapper
+        // lenient would let legacy files parse as "empty current format"
+        // and silently skip migration (data loss). Forward compatibility is
+        // handled per-model with @JsonIgnoreProperties(ignoreUnknown = true)
+        // on the persisted models that opt in.
+
         return mapper;
     }
 
     /**
      * Gets the shared ObjectMapper instance.
+     *
+     * <p>
+     * <strong>Contract:</strong> the returned mapper is a shared singleton.
+     * Callers may use it for reads, serialization and conversion but must
+     * <em>not</em> reconfigure it (enable/disable features, register modules):
+     * configuration changes leak into every other JsonUtils consumer. All
+     * current call sites only read/serialize, which is the supported usage.
+     * In particular, do not disable FAIL_ON_UNKNOWN_PROPERTIES globally: it is
+     * load-bearing for legacy-format detection (see
+     * {@code SettingsManager.loadPresetsBySection}).
+     * </p>
      *
      * @return The ObjectMapper instance
      */

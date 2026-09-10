@@ -108,6 +108,25 @@ public class MainWindowJavaGi extends ApplicationWindow {
     private int failedFilesInBatch = 0;
     private int cancelledFilesInBatch = 0;
     private boolean batchCompleted = false;
+    // Snapshot of the file IDs that make up the running batch. The final
+    // completion notification derives its counts from the engine's per-file
+    // results instead of the independently incremented counters above.
+    private List<String> batchFileIds = List.of();
+
+    // Coalescer for engine -> UI updates: keeps only the latest progress
+    // runnable per file (and per "batch") and flushes them in one GLib idle
+    // callback. Terminal events (status changes, completions) are submitted
+    // forced and are never dropped.
+    private final IdleCoalescer uiUpdateCoalescer = new IdleCoalescer();
+
+    // Context menu state (GTK thread only)
+    // The selection a visible context menu acts on. Single-registration
+    // actions below read this instead of capturing per-popup lists, so
+    // right-clicks never accumulate actions or stale closures.
+    private List<String> contextMenuSelection = List.of();
+    // Preset action names registered for the current menu; stale entries
+    // (deleted/renamed presets) are removed before each popup.
+    private final java.util.Set<String> registeredPresetActionNames = new java.util.HashSet<>();
 
     // Shutdown tracking
     // Prevents multiple confirmation dialogs during shutdown
@@ -317,6 +336,26 @@ public class MainWindowJavaGi extends ApplicationWindow {
         });
         addAction(selectAllAction);
 
+        // Context menu actions are registered ONCE here and read
+        // contextMenuSelection at activation time. Previously every
+        // right-click re-registered them (plus one action per preset with a
+        // unique hex name), leaking actions and stale selection closures.
+        org.gnome.gio.SimpleAction clearAction = new org.gnome.gio.SimpleAction("clear-preset", null);
+        clearAction.onActivate(param -> {
+            logger.debug("Clearing custom settings from {} files", contextMenuSelection.size());
+            clearCustomSettingsFromFiles(contextMenuSelection);
+        });
+        addAction(clearAction);
+
+        org.gnome.gio.SimpleAction openLocationAction = new org.gnome.gio.SimpleAction("open-file-location", null);
+        openLocationAction.onActivate(param -> {
+            if (contextMenuSelection.size() == 1) {
+                logger.debug("Opening file location for file: {}", contextMenuSelection.get(0));
+                handleOpenFileLocation(contextMenuSelection.get(0));
+            }
+        });
+        addAction(openLocationAction);
+
         // Register accelerators with the application
         // Note: Window actions use "win." prefix
         Application app = getApplication();
@@ -428,6 +467,14 @@ public class MainWindowJavaGi extends ApplicationWindow {
 
         logger.debug("Showing context menu for {} selected file(s) at ({}, {})", selectedIds.size(), x, y);
 
+        // Publish the selection for the single-registration actions and gate
+        // "Open File Location" (single selection only) via the live action.
+        contextMenuSelection = List.copyOf(selectedIds);
+        var openLocation = lookupAction("open-file-location");
+        if (openLocation instanceof org.gnome.gio.SimpleAction openAction) {
+            openAction.setEnabled(selectedIds.size() == 1);
+        }
+
         // Create menu model
         Menu menu = new Menu();
 
@@ -481,20 +528,37 @@ public class MainWindowJavaGi extends ApplicationWindow {
                 noPresetsItem.setActionAndTarget(null, null);
                 presetSubmenu.appendItem(noPresetsItem);
             } else {
+                // Prune previously registered preset actions that are no
+                // longer offered (deleted/renamed presets), then (re)register
+                // the current set. GActionMap replaces same-named actions, so
+                // re-registration only refreshes the closure's selection.
+                java.util.Set<String> currentNames = new java.util.HashSet<>();
+                for (SectionPreset preset : availablePresets) {
+                    currentNames.add(presetActionName(preset));
+                }
+                registeredPresetActionNames.stream()
+                        .filter(name -> !currentNames.contains(name))
+                        .toList()
+                        .forEach(stale -> {
+                            removeAction(stale);
+                            registeredPresetActionNames.remove(stale);
+                        });
+
                 // Add menu item for each available preset
                 for (SectionPreset preset : availablePresets) {
-                    String actionName = "win.apply-preset-" + preset.category().name().toLowerCase(java.util.Locale.ROOT) + "-" + sanitizeActionName(preset.name());
+                    String actionName = presetActionName(preset);
 
                     // Create action for this preset
-                    SimpleAction action = new SimpleAction(actionName.substring(4), null); // Remove "win." prefix
+                    SimpleAction action = new SimpleAction(actionName, null);
                     action.onActivate(param -> {
                         logger.debug("Applying preset '{}' to {} files", preset.name(), selectedIds.size());
                         applyPresetToSelectedFiles(selectedIds, preset);
                     });
                     addAction(action);
+                    registeredPresetActionNames.add(actionName);
 
                     // Add menu item
-                    MenuItem presetItem = new MenuItem(preset.name(), actionName);
+                    MenuItem presetItem = new MenuItem(preset.name(), "win." + actionName);
                     presetSubmenu.appendItem(presetItem);
                 }
             }
@@ -527,15 +591,8 @@ public class MainWindowJavaGi extends ApplicationWindow {
      * @param selectedIds the list of selected file IDs
      */
     private void buildClearCustomSettingsMenuItem(Menu menu, List<String> selectedIds) {
-        // Create action for clearing custom settings
-        SimpleAction clearAction = new SimpleAction("clear-preset", null);
-        clearAction.onActivate(param -> {
-            logger.debug("Clearing custom settings from {} files", selectedIds.size());
-            clearCustomSettingsFromFiles(selectedIds);
-        });
-        addAction(clearAction);
-
-        // Add menu item
+        // Action is registered once in setupWindowActions and reads
+        // contextMenuSelection; here only the menu model entry is built.
         MenuItem clearItem = new MenuItem("Clear Custom Settings", "win.clear-preset");
         menu.appendItem(clearItem);
     }
@@ -553,23 +610,9 @@ public class MainWindowJavaGi extends ApplicationWindow {
      * @param selectedIds the list of selected file IDs
      */
     private void buildOpenFileLocationMenuItem(Menu menu, List<String> selectedIds) {
-        // Create action for opening file location
-        SimpleAction openLocationAction = new SimpleAction("open-file-location", null);
-
-        // Only enable if exactly one file is selected
-        if (selectedIds.size() == 1) {
-            openLocationAction.onActivate(param -> {
-                logger.debug("Opening file location for file: {}", selectedIds.get(0));
-                handleOpenFileLocation(selectedIds.get(0));
-            });
-        } else {
-            // Disable action for multiple selection
-            openLocationAction.setEnabled(false);
-        }
-
-        addAction(openLocationAction);
-
-        // Add menu item
+        // Action is registered once in setupWindowActions (enabled state is
+        // refreshed per popup in showContextMenu); here only the menu model
+        // entry is built.
         MenuItem openLocationItem = new MenuItem("Open File Location", "win.open-file-location");
         menu.appendItem(openLocationItem);
     }
@@ -643,12 +686,21 @@ public class MainWindowJavaGi extends ApplicationWindow {
     /**
      * Sanitizes a preset name to create a valid GTK action name.
      * Encodes UTF-8 bytes without losing distinctions between preset names.
-     * 
+     *
      * @param name the preset name
      * @return sanitized action name
      */
     private String sanitizeActionName(String name) {
         return java.util.HexFormat.of().formatHex(name.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Builds the unprefixed action name for a preset menu entry
+     * (menu items reference it as {@code "win." + name}).
+     */
+    private String presetActionName(SectionPreset preset) {
+        return "apply-preset-" + preset.category().name().toLowerCase(java.util.Locale.ROOT)
+                + "-" + sanitizeActionName(preset.name());
     }
 
     // ===== Event Handlers =====
@@ -730,7 +782,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
 
             // Create and show settings dialog
             SettingsDialogJavaGi settingsDialog = new SettingsDialogJavaGi(this, currentSettings,
-                    controller.getSettingsManager());
+                    controller.getSettingsManager(), controller);
             settingsDialog.setAvailableCategories(controller.getAvailableCategories());
 
             // Register callback to receive updated settings when user clicks Save
@@ -740,6 +792,10 @@ public class MainWindowJavaGi extends ApplicationWindow {
                 try {
                     controller.updateSettings(newSettings);
                     logger.info("Settings successfully updated in controller");
+
+                    // Refresh the file list's cached settings snapshot so the
+                    // Output Format column resolves against the new settings.
+                    fileListView.refreshSettingsCache();
 
                     // BUG FIX: Refresh file list to update Output Format column
                     // When section output format changes, the Output Format column needs to be
@@ -832,10 +888,13 @@ public class MainWindowJavaGi extends ApplicationWindow {
 
         // Initialize batch tracking counters
         // Requirement REQ-004.2: Track overall batch progress
-        totalFilesInBatch = controller.getFileList().size();
+        List<ConversionFile> batchFiles = controller.getFileList();
+        totalFilesInBatch = batchFiles.size();
+        batchFileIds = batchFiles.stream().map(ConversionFile::id).toList();
         completedFilesInBatch = 0;
         successfulFilesInBatch = 0;
         failedFilesInBatch = 0;
+        cancelledFilesInBatch = 0;
         batchCompleted = false;
 
         logger.info("Starting conversion batch with {} files", totalFilesInBatch);
@@ -910,6 +969,8 @@ public class MainWindowJavaGi extends ApplicationWindow {
         if (shutdownInProgress) return;
         controller.updateWindowState(saveState());
         shutdownInProgress = true;
+        // Drop pending coalesced UI updates; the window is going away.
+        uiUpdateCoalescer.clear();
         fileAdmission.shutdownNow();
         new Thread(() -> {
             try {
@@ -996,14 +1057,17 @@ public class MainWindowJavaGi extends ApplicationWindow {
     /**
      * Updates the status of a single file in the list.
      * Thread-safe: Can be called from background threads.
-     * 
+     *
+     * <p>Status changes are terminal events: they are submitted forced to the
+     * idle coalescer so they are never dropped or superseded by progress
+     * updates.</p>
+     *
      * @param fileId the file ID
      * @param file   the updated file information
      */
     public void updateFileStatus(String fileId, ConversionFile file) {
-        GLib.idleAdd(0, () -> {
+        uiUpdateCoalescer.submitForced("file-status:" + fileId, () -> {
             fileListView.updateFile(fileId, file);
-            return false;
         });
     }
 
@@ -1092,14 +1156,18 @@ public class MainWindowJavaGi extends ApplicationWindow {
     /**
      * Updates the progress for a specific file during conversion.
      * Thread-safe: Can be called from background threads.
-     * 
-     * Requirement REQ-004.2: Per-file progress updates
-     * 
+     *
+     * <p>Requirement REQ-004.2: Per-file progress updates</p>
+     *
+     * <p>Intermediate progress coalesces per file id: bursts of updates result
+     * in a single GLib idle callback carrying the latest progress, instead of
+     * one idle callback per engine event.</p>
+     *
      * @param fileId   the file ID
      * @param progress the conversion progress for this file
      */
     public void updateFileProgress(String fileId, ConversionProgress progress) {
-        GLib.idleAdd(0, () -> {
+        uiUpdateCoalescer.submit("file-progress:" + fileId, () -> {
             // Update progress view with per-file progress
             progressView.updateFileProgress(fileId, progress);
 
@@ -1114,22 +1182,25 @@ public class MainWindowJavaGi extends ApplicationWindow {
             }
 
             logger.debug("File progress updated: {} - {}%", fileId, progress.percentage());
-            return false;
         });
     }
 
     /**
      * Updates a file with the conversion result (success or failure).
      * Thread-safe: Can be called from background threads.
-     * 
-     * Requirement REQ-004.2: Per-file completion updates and batch completion
-     * notification
-     * 
+     *
+     * <p>Requirement REQ-004.2: Per-file completion updates and batch completion
+     * notification</p>
+     *
+     * <p>Completions are terminal events: they are submitted forced to the idle
+     * coalescer so every result reaches the UI exactly once, flushing any
+     * pending coalesced progress updates ahead of itself.</p>
+     *
      * @param fileId the file ID
      * @param result the conversion result
      */
     public void updateFileResult(String fileId, ConversionResult result) {
-        GLib.idleAdd(0, () -> {
+        uiUpdateCoalescer.submitForced("file-result:" + fileId, () -> {
             // Get the updated file from controller (status should be updated by controller)
             Optional<ConversionFile> fileOpt = controller.getFile(fileId);
             if (fileOpt.isPresent()) {
@@ -1169,57 +1240,49 @@ public class MainWindowJavaGi extends ApplicationWindow {
             } else {
                 logger.warn("File not found for result update: {}", fileId);
             }
-
-            return false;
         });
     }
 
     /**
      * Updates the batch progress display (speed and time remaining).
      * Called by ApplicationWorkflowController when batch progress is updated.
-     * 
-     * Requirement REQ-004.3: Batch progress tracking with speed and ETA
-     * 
+     *
+     * <p>Requirement REQ-004.3: Batch progress tracking with speed and ETA</p>
+     *
+     * <p>Batch progress updates coalesce under the single "batch" key: only the
+     * latest snapshot reaches the UI per idle cycle.</p>
+     *
      * @param batchProgress the current batch progress
      */
     public void updateBatchProgress(BatchProgress batchProgress) {
-        GLib.idleAdd(0, () -> {
+        uiUpdateCoalescer.submit("batch", () -> {
             progressView.updateOverallProgress(batchProgress);
-            return false;
         });
     }
 
     /**
      * Called when all files in the batch have completed conversion.
      * Shows notification, saves session state, and resets UI state.
-     * 
-     * Requirement REQ-004.2: Batch completion notification and state saving
+     *
+     * <p>Requirement REQ-004.2: Batch completion notification and state saving</p>
+     *
+     * <p>The notification prefers counts derived from the engine's per-file
+     * results (queried via the controller for the batch's file IDs) over the
+     * independently incremented UI counters, so the message reflects what the
+     * engine actually recorded. If any per-file result is missing, the local
+     * counters are used as a fallback.</p>
      */
     private void onBatchComplete() {
         logger.info("Batch conversion complete: {} successful, {} failed, {} cancelled out of {} total files",
                 successfulFilesInBatch, failedFilesInBatch, cancelledFilesInBatch, totalFilesInBatch);
 
-        // Show completion notification
-        String message;
-        if (cancelledFilesInBatch == totalFilesInBatch) {
-            // All files were cancelled
-            message = "All conversions cancelled";
-        } else if (failedFilesInBatch == 0 && cancelledFilesInBatch == 0) {
-            message = String.format("All %d files converted successfully!", totalFilesInBatch);
-        } else if (successfulFilesInBatch == 0) {
-            message = String.format("All %d files failed to convert.", totalFilesInBatch);
-        } else {
-            // Mixed results
-            StringBuilder sb = new StringBuilder("Conversion complete: ");
-            sb.append(String.format("%d successful", successfulFilesInBatch));
-            if (failedFilesInBatch > 0) {
-                sb.append(String.format(", %d failed", failedFilesInBatch));
-            }
-            if (cancelledFilesInBatch > 0) {
-                sb.append(String.format(", %d cancelled", cancelledFilesInBatch));
-            }
-            sb.append(String.format(" out of %d files.", totalFilesInBatch));
-            message = sb.toString();
+        // Show completion notification, preferring engine-derived counts
+        String message = composeBatchCompletionMessage(
+                totalFilesInBatch, successfulFilesInBatch, failedFilesInBatch, cancelledFilesInBatch);
+        int[] engineCounts = deriveBatchCountsFromEngineResults();
+        if (engineCounts != null) {
+            message = composeBatchCompletionMessage(engineCounts[0], engineCounts[1], engineCounts[2],
+                    engineCounts[3]);
         }
 
         showStatus(message);
@@ -1234,6 +1297,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
         successfulFilesInBatch = 0;
         failedFilesInBatch = 0;
         cancelledFilesInBatch = 0;
+        batchFileIds = List.of();
 
         // Update UI state - hide progress, enable convert button
         hideProgressView();
@@ -1242,6 +1306,69 @@ public class MainWindowJavaGi extends ApplicationWindow {
         // Let controller know conversion is complete (it will save session state)
         // The controller already handles this via its completion listener
         logger.debug("Batch completion notification sent to user");
+    }
+
+    /**
+     * Composes the user-facing batch completion message from result counts.
+     * Pure static method so the wording is unit-testable without GTK.
+     *
+     * @param totalFiles total files in the batch
+     * @param successful successfully converted files
+     * @param failed     failed files
+     * @param cancelled  cancelled files
+     * @return the notification message
+     */
+    static String composeBatchCompletionMessage(int totalFiles, int successful, int failed, int cancelled) {
+        if (cancelled == totalFiles) {
+            // All files were cancelled
+            return "All conversions cancelled";
+        } else if (failed == 0 && cancelled == 0) {
+            return String.format("All %d files converted successfully!", totalFiles);
+        } else if (successful == 0) {
+            return String.format("All %d files failed to convert.", totalFiles);
+        } else {
+            // Mixed results
+            StringBuilder sb = new StringBuilder("Conversion complete: ");
+            sb.append(String.format("%d successful", successful));
+            if (failed > 0) {
+                sb.append(String.format(", %d failed", failed));
+            }
+            if (cancelled > 0) {
+                sb.append(String.format(", %d cancelled", cancelled));
+            }
+            sb.append(String.format(" out of %d files.", totalFiles));
+            return sb.toString();
+        }
+    }
+
+    /**
+     * Derives batch result counts from the engine's stored per-file results.
+     *
+     * @return {@code {total, successful, failed, cancelled}}, or null when a
+     *         result is missing for any batch file (caller falls back to its
+     *         own counters)
+     */
+    private int[] deriveBatchCountsFromEngineResults() {
+        if (batchFileIds.isEmpty()) {
+            return null;
+        }
+        int successful = 0;
+        int failed = 0;
+        int cancelled = 0;
+        for (String fileId : batchFileIds) {
+            ConversionResult result = controller.getConversionResult(fileId);
+            if (result == null) {
+                // Result not stored (yet): engine counts incomplete.
+                return null;
+            } else if (result.success()) {
+                successful++;
+            } else if (result.isCancelled()) {
+                cancelled++;
+            } else {
+                failed++;
+            }
+        }
+        return new int[] { batchFileIds.size(), successful, failed, cancelled };
     }
 
     /**
@@ -1561,8 +1688,9 @@ public class MainWindowJavaGi extends ApplicationWindow {
         // Get the conversion result (may be null if not yet converted)
         ConversionResult result = controller.getConversionResult(fileId);
 
-        // Create and show the dialog
-        FileDetailsDialog dialog = new FileDetailsDialog(this);
+        // Create and show the dialog, passing the current settings so output
+        // format resolution uses the same core helper as the file list
+        FileDetailsDialog dialog = new FileDetailsDialog(this, controller.getCurrentSettings());
         dialog.show(file, result);
 
         logger.debug("File details dialog displayed for: {}", file.path().getFileName());

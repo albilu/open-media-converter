@@ -430,4 +430,62 @@ class FileListViewTest {
         assertEquals(FileListSortState.SortField.SIZE, result.sortField());
         assertEquals(FileListSortState.SortDirection.DESCENDING, result.sortDir());
     }
+
+    // ===== Settings Cache Tests (per-row lookup fix) =====
+
+    private String invokeResolveOutputFormat(ConversionFile file) throws Exception {
+        Method method = FileListView.class.getDeclaredMethod("resolveOutputFormat", ConversionFile.class);
+        method.setAccessible(true);
+        return (String) method.invoke(fileListView, file);
+    }
+
+    @Test
+    void setFiles_refreshesSettingsCacheOnce() throws Exception {
+        org.omc.model.ConversionSettings settings = org.omc.model.ConversionSettings.builder()
+                .videoSettings(org.omc.model.VideoSettings.builder()
+                        .outputFormat(org.omc.model.FileFormat.WEBM).build())
+                .build();
+        when(controller.getCurrentSettings()).thenReturn(settings);
+
+        fileListView.setFiles(java.util.List.of(file1, file2, file10));
+
+        // Resolving output formats for many files must not hit the controller
+        // again: the cache snapshot is taken once per setFiles().
+        invokeResolveOutputFormat(file1);
+        invokeResolveOutputFormat(file2);
+        invokeResolveOutputFormat(file10);
+
+        verify(controller, times(1)).getCurrentSettings();
+        assertEquals("WEBM", invokeResolveOutputFormat(file1));
+    }
+
+    @Test
+    void refreshSettingsCache_rereadsSnapshotFromController() throws Exception {
+        org.omc.model.ConversionSettings webm = org.omc.model.ConversionSettings.builder()
+                .videoSettings(org.omc.model.VideoSettings.builder()
+                        .outputFormat(org.omc.model.FileFormat.WEBM).build())
+                .build();
+        org.omc.model.ConversionSettings avi = org.omc.model.ConversionSettings.builder()
+                .videoSettings(org.omc.model.VideoSettings.builder()
+                        .outputFormat(org.omc.model.FileFormat.AVI).build())
+                .build();
+        when(controller.getCurrentSettings()).thenReturn(webm);
+        fileListView.setFiles(java.util.List.of(file1));
+        assertEquals("WEBM", invokeResolveOutputFormat(file1));
+
+        // Settings dialog saved new settings: cache must be refreshed and used.
+        when(controller.getCurrentSettings()).thenReturn(avi);
+        fileListView.refreshSettingsCache();
+
+        assertEquals("AVI", invokeResolveOutputFormat(file1));
+        verify(controller, times(2)).getCurrentSettings();
+    }
+
+    @Test
+    void controllerFailure_fallsBackToNotSet() throws Exception {
+        when(controller.getCurrentSettings()).thenThrow(new IllegalStateException("not initialized"));
+        fileListView.setFiles(java.util.List.of(file1));
+
+        assertEquals("Not Set", invokeResolveOutputFormat(file1));
+    }
 }

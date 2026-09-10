@@ -10,6 +10,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 /**
  * Unit tests for AboutDialogHelper.
  * 
@@ -112,5 +115,41 @@ class AboutDialogHelperTest {
         } catch (NoSuchMethodException e) {
             throw new AssertionError("show(Window) method should exist", e);
         }
+    }
+
+    /**
+     * The version must come from the package implementation version (set by the
+     * Maven build) and fall back to the pom version when absent, e.g. when
+     * running from target/classes in tests. Runs headless (no GTK).
+     */
+    @Test
+    void resolveVersion_fallsBackToPomVersionWhenManifestMissing() {
+        String fromManifest = AboutDialogHelper.class.getPackage().getImplementationVersion();
+        String expected = fromManifest != null ? fromManifest : "0.1.0-SNAPSHOT";
+        assertEquals(expected, AboutDialogHelper.resolveVersion());
+    }
+
+    /** URLs must point at github.com (not the previous github.org typo). */
+    @Test
+    void urls_useGithubCom() throws Exception {
+        java.lang.reflect.Field website = AboutDialogHelper.class.getDeclaredField("WEBSITE");
+        website.setAccessible(true);
+        java.lang.reflect.Field authors = AboutDialogHelper.class.getDeclaredField("AUTHORS");
+        authors.setAccessible(true);
+
+        String websiteUrl = (String) website.get(null);
+        assertTrue(websiteUrl.startsWith("https://github.com/"),
+                "Website URL must use github.com: " + websiteUrl);
+
+        String[] authorEntries = (String[]) authors.get(null);
+        boolean hasContributorUrl = false;
+        for (String entry : authorEntries) {
+            if (entry.startsWith("http")) {
+                assertTrue(entry.startsWith("https://github.com/"),
+                        "Author URL must use github.com: " + entry);
+                hasContributorUrl = true;
+            }
+        }
+        assertTrue(hasContributorUrl, "Authors list must include the contributors URL");
     }
 }

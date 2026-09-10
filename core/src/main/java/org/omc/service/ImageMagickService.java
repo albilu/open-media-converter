@@ -24,6 +24,7 @@ import org.omc.model.ImageSettings;
 import org.omc.model.Resolution;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 /**
  * Service for building and executing ImageMagick "convert" commands for image
@@ -137,6 +138,9 @@ public class ImageMagickService {
         Objects.requireNonNull(inputPath, "inputPath must not be null");
         Objects.requireNonNull(outputPath, "outputPath must not be null");
         Objects.requireNonNull(settings, "settings must not be null");
+        if (!settings.isValid()) {
+            throw new IllegalArgumentException("Invalid image settings: " + settings);
+        }
 
         List<String> command = new ArrayList<>();
         command.add(convertPath.toString());
@@ -144,8 +148,8 @@ public class ImageMagickService {
         // Add -monitor flag for real-time progress tracking
         command.add("-monitor");
 
-        // Add input file
-        command.add(inputPath.toString());
+        // Add input file (absolutized when dash-prefixed)
+        command.add(FFmpegService.safePathArg(inputPath));
 
         // 1. ROTATION (FIRST) - REQ-IMG-1.2
         // Apply rotation before flip and resize operations
@@ -168,9 +172,11 @@ public class ImageMagickService {
             }
         }
 
-        // 3. Quality parameter (BEFORE resize)
+        // 3. Quality parameter (BEFORE resize). NOTE: 0 means "unset" in
+        // this codebase (int default; -1 = lossless), so > 0 is the correct
+        // bound here despite 0 being a legal JPEG quality in theory.
         Integer quality = settings.quality();
-        if (quality != null && quality > 0) {
+        if (quality != null && quality > 0 && quality <= 100) {
             String outputExt = getFileExtension(outputPath);
             FileFormat outputFormat = FileFormat.fromExtension(outputExt);
 
@@ -212,9 +218,10 @@ public class ImageMagickService {
             logger.debug("Added resize parameter: {}", resizeSpec);
         }
 
-        // 5. Compression parameter for PNG
+        // 5. Compression parameter for PNG (0 = unset/default here; the
+        // int default is 0, so >= 0 would emit -define on every command).
         Integer compressionLevel = settings.compressionLevel();
-        if (compressionLevel != null && compressionLevel > 0) {
+        if (compressionLevel != null && compressionLevel > 0 && compressionLevel <= 9) {
             String outputExt = getFileExtension(outputPath);
             FileFormat outputFormat = FileFormat.fromExtension(outputExt);
 
@@ -225,7 +232,7 @@ public class ImageMagickService {
         }
 
         // Add output file
-        command.add(outputPath.toString());
+        command.add(FFmpegService.safePathArg(outputPath));
 
         logger.debug("Built ImageMagick command: {}", String.join(" ", command));
         return command;
@@ -269,6 +276,22 @@ public class ImageMagickService {
      *                                processRegistry is null
      */
     public ConversionResult convertImage(
+            Path inputPath,
+            Path outputPath,
+            ImageSettings settings,
+            ProgressCallback progressCallback,
+            String fileId,
+            ProcessRegistry processRegistry) throws ToolExecutionException {
+
+        // MDC correlation: every log line emitted during this conversion
+        // carries the file and tool context
+        try (MDC.MDCCloseable omcFileCtx = MDC.putCloseable("omcFile", String.valueOf(fileId));
+                MDC.MDCCloseable omcToolCtx = MDC.putCloseable("omcTool", "imagemagick")) {
+            return convertImageInternal(inputPath, outputPath, settings, progressCallback, fileId, processRegistry);
+        }
+    }
+
+    private ConversionResult convertImageInternal(
             Path inputPath,
             Path outputPath,
             ImageSettings settings,
@@ -329,11 +352,16 @@ public class ImageMagickService {
             // Task 3.5: Capture output with 1MB limit and parse progress
             // NOTE: ImageMagick -monitor uses \r (carriage return) instead of \n (newline)
             // to update progress on the same line, so we must read character-by-character
-            try (InputStreamReader reader = new InputStreamReader(process.getInputStream())) {
+            try (InputStreamReader reader = new InputStreamReader(process.getInputStream(),
+                    java.nio.charset.StandardCharsets.UTF_8)) {
                 StringBuilder currentLine = new StringBuilder(256);
                 int ch;
                 int segmentCount = 0;
                 long lastProgressUpdate = 0; // Initialize to 0 to allow first callback immediately
+                // -monitor restarts at 0% for every stage (Resize, then
+                // Extent...); enforce monotonic progress so the UI never jumps
+                // 100% -> 0%.
+                double maxSeenProgress = 0.0;
 
                 while ((ch = reader.read()) != -1) {
                     if (ch == '\r' || ch == '\n') {
@@ -360,6 +388,8 @@ public class ImageMagickService {
                             // 100% complete"
                             double parsedProgress = parseMonitorProgress(line);
                             if (parsedProgress >= 0 && progressCallback != null) {
+                                parsedProgress = Math.max(parsedProgress, maxSeenProgress);
+                                maxSeenProgress = parsedProgress;
                                 long currentTime = System.currentTimeMillis();
                                 // Throttle to max 2 updates/second (500ms intervals)
                                 if (currentTime - lastProgressUpdate >= 500) {
@@ -616,7 +646,9 @@ public class ImageMagickService {
         Path raster = null;
         Instant start = Instant.now();
         try {
-            raster = Files.createTempFile(output.toAbsolutePath().getParent(), "omc-svg-", ".png");
+            // System temp dir: the output parent may be missing (throws
+            // NoSuchFileException) or world-writable.
+            raster = Files.createTempFile("omc-svg-", ".png");
             ConversionResult result = convertImage(input, raster, settings, callback, fileId, registry);
             if (!result.success()) return result;
             if (Thread.currentThread().isInterrupted()) {

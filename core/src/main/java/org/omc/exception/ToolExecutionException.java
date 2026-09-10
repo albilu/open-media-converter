@@ -7,6 +7,16 @@ package org.omc.exception;
  * Requirements: REQ-007.1, REQ-004.1, REQ-004.2
  */
 public class ToolExecutionException extends MediaConverterException {
+    /**
+     * Hard cap on retained tool output, mirroring the services' capture limit
+     * so a runaway process cannot balloon this exception's memory footprint
+     * even when a service forgets to cap before throwing.
+     */
+    static final int MAX_TOOL_OUTPUT_LENGTH = 1024 * 1024; // 1MB
+
+    /** Marker appended when output is capped (same convention as the services). */
+    static final String TRUNCATION_MESSAGE = "\n[Output truncated - exceeded 1MB limit]\n";
+
     private final String toolName;
     private final String toolPath;
     private final Integer exitCode;
@@ -43,7 +53,7 @@ public class ToolExecutionException extends MediaConverterException {
         this.toolName = toolName;
         this.toolPath = toolPath;
         this.exitCode = exitCode;
-        this.toolOutput = toolOutput;
+        this.toolOutput = capToolOutput(toolOutput);
     }
 
     /**
@@ -64,7 +74,22 @@ public class ToolExecutionException extends MediaConverterException {
         this.toolName = toolName;
         this.toolPath = toolPath;
         this.exitCode = exitCode;
-        this.toolOutput = toolOutput;
+        this.toolOutput = capToolOutput(toolOutput);
+    }
+
+    /**
+     * Caps retained tool output at {@value #MAX_TOOL_OUTPUT_LENGTH} characters,
+     * keeping the head (where tool errors usually appear) and appending a
+     * marker so consumers know output was truncated.
+     *
+     * @param output raw tool output, may be null
+     * @return the capped output, or null/unchanged when already within the cap
+     */
+    private static String capToolOutput(String output) {
+        if (output == null || output.length() <= MAX_TOOL_OUTPUT_LENGTH) {
+            return output;
+        }
+        return output.substring(0, MAX_TOOL_OUTPUT_LENGTH) + TRUNCATION_MESSAGE;
     }
 
     /**

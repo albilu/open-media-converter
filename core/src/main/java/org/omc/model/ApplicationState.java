@@ -19,6 +19,18 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public final class ApplicationState {
 
+    /**
+     * Current application state schema version.
+     *
+     * <p>
+     * Single source of truth for the {@code version} stamped into saved state
+     * files and for migration decisions (see {@link #needsMigration(String)}).
+     * All other code must reference this constant instead of duplicating the
+     * literal.
+     * </p>
+     */
+    public static final String CURRENT_STATE_VERSION = "1.0.0";
+
     private final WindowState windowState;
     private final SessionState sessionState;
     private final ConversionSettings conversionSettings;
@@ -52,7 +64,7 @@ public final class ApplicationState {
                 SessionState.empty(),
                 null, // Settings managed separately
                 FileListSortState.unsorted(),
-                "1.0.0",
+                CURRENT_STATE_VERSION,
                 System.currentTimeMillis());
     }
 
@@ -168,27 +180,67 @@ public final class ApplicationState {
 
     /**
      * Checks if this state needs migration based on version.
+     *
+     * <p>
+     * Compares the saved version against {@code currentVersion} using the
+     * major and minor components only (patch differences never require
+     * migration, since patch releases must stay schema-compatible). Missing
+     * minor components are treated as {@code 0}. Unparseable versions never
+     * require migration.
+     * </p>
+     *
+     * @param currentVersion the schema version to compare against
+     * @return true only if the saved schema is strictly older
      */
     public boolean needsMigration(String currentVersion) {
-        if (version == null || currentVersion == null) {
-            return false;
+        SchemaVersion saved = SchemaVersion.parse(version);
+        SchemaVersion current = SchemaVersion.parse(currentVersion);
+
+        return saved != null && current != null && saved.compareTo(current) < 0;
+    }
+
+    /**
+     * Parsed {@code major.minor} schema version used for migration decisions.
+     *
+     * <p>
+     * Patch components are intentionally excluded: they never influence
+     * migration. Instances are comparable so callers can order versions
+     * numerically (e.g. {@code 1.10 > 1.9}).
+     * </p>
+     */
+    public record SchemaVersion(int major, int minor) implements Comparable<SchemaVersion> {
+
+        /**
+         * Parses a version string of the form {@code major[.minor[.patch]]}.
+         * Missing minor or patch components default to {@code 0}; extra
+         * components beyond the patch are ignored.
+         *
+         * @param version the version string, may be null
+         * @return the parsed schema version, or null if unparseable
+         */
+        public static SchemaVersion parse(String version) {
+            if (version == null) {
+                return null;
+            }
+
+            String[] parts = version.split("\\.");
+            if (parts.length < 1 || parts[0].isBlank()) {
+                return null;
+            }
+
+            try {
+                int major = Integer.parseInt(parts[0]);
+                int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
+                return new SchemaVersion(major, minor);
+            } catch (NumberFormatException e) {
+                return null;
+            }
         }
 
-        // Simple version comparison (major.minor.patch)
-        String[] savedParts = version.split("\\.");
-        String[] currentParts = currentVersion.split("\\.");
-
-        if (savedParts.length < 1 || currentParts.length < 1) {
-            return false;
-        }
-
-        try {
-            int savedMajor = Integer.parseInt(savedParts[0]);
-            int currentMajor = Integer.parseInt(currentParts[0]);
-
-            return savedMajor < currentMajor;
-        } catch (NumberFormatException e) {
-            return false;
+        @Override
+        public int compareTo(SchemaVersion other) {
+            int majorComparison = Integer.compare(major, other.major);
+            return majorComparison != 0 ? majorComparison : Integer.compare(minor, other.minor);
         }
     }
 

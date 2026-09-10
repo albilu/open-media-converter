@@ -83,6 +83,18 @@ public class ConversionEngine implements ProcessRegistry {
         }
         return Set.copyOf(categories);
     }
+
+    /**
+     * Availability-aware document conversion capability query, delegated to
+     * the tool manager. Used by the UI to gray out unsupported options.
+     *
+     * @param input source document format
+     * @param output target document format
+     * @return true if an installed document service supports the pair
+     */
+    public boolean canConvertDocuments(FileFormat input, FileFormat output) {
+        return toolManager.canConvertDocuments(input, output);
+    }
     private final ValidationEngine validationEngine;
     private final ProgressEngine progressEngine;
     private final FileHandler fileHandler;
@@ -101,9 +113,14 @@ public class ConversionEngine implements ProcessRegistry {
     private final AtomicInteger inFlightTasks;
     private volatile Path currentOutputDirectory;
 
-    // Event handlers
-    private BiConsumer<String, ConversionProgress> progressHandler;
-    private BiConsumer<String, ConversionResult> completionHandler;
+    // Event handlers (volatile: written on the calling thread, read on workers)
+    private volatile BiConsumer<String, ConversionProgress> progressHandler;
+    private volatile BiConsumer<String, ConversionResult> completionHandler;
+    /**
+     * Tracks an explicit user pause separately from disk-space auto-pause so
+     * that disk recovery never clears a pause the user asked for.
+     */
+    private final AtomicBoolean userPaused = new AtomicBoolean(false);
 
     /**
      * Creates a new ConversionEngine with specified dependencies and parallelism.
@@ -139,13 +156,17 @@ public class ConversionEngine implements ProcessRegistry {
         this.fileHandler = fileHandler;
         this.parallelConversions = parallelConversions;
 
-        // Create bounded thread pool for conversions
+        // Bounded thread pool with real backpressure: the queue holds at most
+        // 4x parallelism pending tasks; once full, CallerRunsPolicy runs the
+        // submission on the caller thread, throttling producers instead of
+        // queueing unbounded work (OOM on huge batches). With an unbounded
+        // LinkedBlockingQueue the rejection policy could never trigger.
         this.executorService = new ThreadPoolExecutor(
                 parallelConversions,
                 parallelConversions,
                 60L,
                 TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(),
+                new LinkedBlockingQueue<>(Math.max(16, parallelConversions * 4)),
                 new ConversionThreadFactory(),
                 new ThreadPoolExecutor.CallerRunsPolicy());
 
@@ -193,7 +214,13 @@ public class ConversionEngine implements ProcessRegistry {
             throw new IllegalStateException("ConversionEngine is shutting down");
         }
 
-        if (!activeConversions.isEmpty() || !waitForCancelDrain()) {
+        // NOTE: must not be called on the UI thread when a previous cancel
+        // is still draining (bounded ~2s wait below); prefer dispatching
+        // conversions from a background thread.
+        // Only wait for cancel drain when a cancel is actually pending;
+        // otherwise inFlightTasks is scratch state and waiting just stalls
+        // the caller for no reason.
+        if (!activeConversions.isEmpty() || (cancelRequested.get() && !waitForCancelDrain())) {
             throw new IllegalStateException("A previous conversion is still running");
         }
         // New batch: clear a cancellation only after its workers have stopped.
@@ -491,11 +518,15 @@ public class ConversionEngine implements ProcessRegistry {
                         file.fileName(), result.success());
             }
 
-            // Requirement REQ-FL-2.2: Store conversion result for later retrieval
+            // Requirement REQ-FL-2.2: Store conversion result for later retrieval.
+            // Late completions from a cancelled run still update progress
+            // tracking, but must not repopulate the drained results map.
             if (finalResult != null) {
                 progressEngine.completeTracking(fileId, finalResult);
-                conversionResults.put(fileId, finalResult);
-                logger.debug("Stored conversion result for file: {}", fileId);
+                if (!cancelRequested.get()) {
+                    conversionResults.put(fileId, finalResult);
+                    logger.debug("Stored conversion result for file: {}", fileId);
+                }
             }
 
             // Notify completion handler if registered
@@ -529,6 +560,7 @@ public class ConversionEngine implements ProcessRegistry {
      * but no new conversions will start until resumed.
      */
     public void pauseConversion() {
+        userPaused.set(true);
         if (paused.compareAndSet(false, true)) {
             logger.info("Conversion engine paused - {} active conversions",
                     activeConversions.size());
@@ -540,11 +572,36 @@ public class ConversionEngine implements ProcessRegistry {
      * Requirement REQ-004.2: Pause/Resume/Cancel controls.
      */
     public void resumeConversion() {
+        userPaused.set(false);
         if (paused.compareAndSet(true, false)) {
             synchronized (paused) {
                 paused.notifyAll();
             }
             logger.info("Conversion engine resumed");
+        }
+    }
+
+    /**
+     * Auto-pause triggered by low disk space. Unlike {@link #pauseConversion},
+     * this does NOT mark a user pause, so disk recovery resumes only when the
+     * user has not explicitly paused.
+     */
+    private void autoPauseForDiskSpace() {
+        if (paused.compareAndSet(false, true)) {
+            logger.warn("Conversion engine auto-paused - low disk space");
+        }
+    }
+
+    /**
+     * Auto-resume after disk space recovers. Never clears an explicit user
+     * pause: if the user paused, the engine stays paused.
+     */
+    private void autoResumeAfterDiskSpace() {
+        if (!userPaused.get() && paused.compareAndSet(true, false)) {
+            synchronized (paused) {
+                paused.notifyAll();
+            }
+            logger.info("Conversion engine auto-resumed - disk space recovered");
         }
     }
 
@@ -750,18 +807,19 @@ public class ConversionEngine implements ProcessRegistry {
             long availableSpace = fileHandler.getAvailableSpace(currentOutputDirectory);
 
             if (availableSpace < DISK_SPACE_THRESHOLD_BYTES) {
-                // Disk space low - pause if not already paused
+                // Disk space low - auto-pause if not already paused
                 if (diskSpacePaused.compareAndSet(false, true)) {
                     logger.warn("Disk space below threshold ({} MB available). Pausing conversions.",
                             availableSpace / (1024 * 1024));
-                    pauseConversion();
+                    autoPauseForDiskSpace();
                 }
             } else {
-                // Disk space OK - resume if paused due to disk space
+                // Disk space OK - auto-resume only if the pause came from disk
+                // space (never clears an explicit user pause)
                 if (diskSpacePaused.compareAndSet(true, false)) {
                     logger.info("Disk space above threshold ({} MB available). Resuming conversions.",
                             availableSpace / (1024 * 1024));
-                    resumeConversion();
+                    autoResumeAfterDiskSpace();
                 }
             }
         } catch (Exception e) {

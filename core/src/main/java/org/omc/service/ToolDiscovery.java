@@ -111,8 +111,14 @@ public class ToolDiscovery {
     public ToolConfiguration loadOrDiscoverTools() {
         Optional<ToolConfiguration> loaded = loadConfiguration();
         if (loaded.isPresent()) {
-            logger.info("Loaded tool configuration from disk");
-            return loaded.get();
+            // Revalidate cached paths: a deleted/upgraded binary must not
+            // leave a dead path in tools.json until manual rediscovery.
+            List<String> missing = validateConfiguration(loaded.get());
+            if (missing.isEmpty()) {
+                logger.info("Loaded tool configuration from disk");
+                return loaded.get();
+            }
+            logger.warn("Cached tool configuration stale (unavailable: {}), rediscovering", missing);
         }
 
         logger.info("No tool configuration found, performing discovery");
@@ -266,18 +272,29 @@ public class ToolDiscovery {
 
             Process process = pb.start();
 
-            // Read output
-            StringBuilder output = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    output.append(line).append("\n");
-                    // ImageMagick version is in the first line, no need to read all output
-                    if (output.length() > 500) {
-                        break;
-                    }
-                }
+            // Read output on a daemon thread with a byte cap so a
+            // malicious/hung binary emitting infinite output without EOF can
+            // never block version detection forever: waitFor(timeout) below
+            // always gets a chance to fire.
+            java.util.concurrent.Future<String> outputFuture = readStreamAsync(process);
+            String captured;
+            try {
+                captured = outputFuture.get(VERSION_CHECK_TIMEOUT, TimeUnit.MILLISECONDS);
+            } catch (java.util.concurrent.TimeoutException e) {
+                outputFuture.cancel(true);
+                process.destroyForcibly();
+                logger.warn("ImageMagick version detection timed out for: {}", convertPath);
+                return Optional.empty();
+            } catch (java.util.concurrent.ExecutionException e) {
+                logger.warn("ImageMagick version detection failed for {}: {}", convertPath,
+                        e.getCause() != null ? e.getCause().getMessage() : e.getMessage());
+                process.destroyForcibly();
+                return Optional.empty();
+            }
+            StringBuilder output = new StringBuilder(captured);
+            // ImageMagick version is in the first line; keep only a prefix
+            if (output.length() > 500) {
+                output.setLength(500);
             }
 
             // Wait for process to complete with timeout
@@ -333,7 +350,10 @@ public class ToolDiscovery {
         Path temporary = null;
         try (var checksumResource = loader.getResourceAsStream(resourcePath + ".sha256")) {
             if (checksumResource == null) return Optional.empty();
-            String checksum = new String(checksumResource.readNBytes(128), java.nio.charset.StandardCharsets.UTF_8).trim();
+            // Accept coreutils "<hash>  <file>" format (hash is the first
+            // token) and uppercase hex digests.
+            String raw = new String(checksumResource.readNBytes(256), java.nio.charset.StandardCharsets.UTF_8).trim();
+            String checksum = raw.split("\\s+")[0].toLowerCase(java.util.Locale.ROOT);
             if (!checksum.matches("[a-f0-9]{64}")) throw new IOException("Invalid embedded tool checksum");
             Path directory = extractedToolsDirectory.resolve(checksum);
             Files.createDirectories(directory);
@@ -394,27 +414,74 @@ public class ToolDiscovery {
      * @return the path to the binary, or empty if not found
      */
     private Optional<Path> findSystemBinary(String binaryName) {
-        // Check PATH environment variable
+        // Check well-known system directories FIRST so a malicious binary
+        // planted early on $PATH cannot hijack discovery (PATH hijack).
+        for (String systemPath : SYSTEM_PATHS) {
+            Path binaryPath = Paths.get(systemPath, binaryName);
+            if (isTrustedBinary(binaryPath, binaryName)) {
+                return Optional.of(binaryPath);
+            }
+        }
+
+        // Fall back to $PATH entries, still requiring the binary to report a
+        // parseable version (proves it is the real tool, not a shim).
         String pathEnv = System.getenv("PATH");
         if (pathEnv != null) {
             String[] paths = pathEnv.split(":");
             for (String pathDir : paths) {
                 Path binaryPath = Paths.get(pathDir, binaryName);
-                if (Files.isExecutable(binaryPath)) {
+                if (isTrustedBinary(binaryPath, binaryName)) {
                     return Optional.of(binaryPath);
                 }
             }
         }
 
-        // Check standard system paths
-        for (String systemPath : SYSTEM_PATHS) {
-            Path binaryPath = Paths.get(systemPath, binaryName);
-            if (Files.isExecutable(binaryPath)) {
-                return Optional.of(binaryPath);
-            }
-        }
-
         return Optional.empty();
+    }
+
+    /**
+     * A system binary is trusted only if it is a regular executable file AND
+     * actually runs (exits 0 with version output). This rejects broken
+     * symlinks, wrapper shims that fail, and wrong-tool name collisions,
+     * while tolerating future version-string formats (any non-blank output
+     * is accepted, not just currently parseable versions).
+     */
+    private boolean isTrustedBinary(Path binaryPath, String binaryName) {
+        if (!Files.isRegularFile(binaryPath) || !Files.isExecutable(binaryPath)) {
+            return false;
+        }
+        try {
+            String flag = "--version";
+            if (binaryName.equals(FFMPEG_NAME) || binaryName.equals(FFPROBE_NAME)) {
+                flag = "-version";
+            }
+            ProcessBuilder pb = new ProcessBuilder(binaryPath.toString(), flag);
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            java.util.concurrent.Future<String> out = readStreamAsync(process);
+            String captured;
+            try {
+                captured = out.get(VERSION_CHECK_TIMEOUT, TimeUnit.MILLISECONDS);
+            } catch (Exception e) {
+                out.cancel(true);
+                process.destroyForcibly();
+                logger.debug("Rejecting unrunnable binary {}: {}", binaryPath, e.getMessage());
+                return false;
+            }
+            boolean finished = process.waitFor(VERSION_CHECK_TIMEOUT, TimeUnit.MILLISECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                return false;
+            }
+            boolean ok = process.exitValue() == 0 && !captured.isBlank();
+            if (!ok) {
+                logger.debug("Rejecting binary with no version output: {}", binaryPath);
+            }
+            return ok;
+        } catch (Exception e) {
+            logger.debug("Rejecting untrusted binary {}: {}", binaryPath, e.getMessage());
+            return false;
+        }
     }
 
     /**
@@ -424,6 +491,41 @@ public class ToolDiscovery {
      * @param versionFlag the version flag to use (e.g., "--version")
      * @return the detected version string, or empty if detection failed
      */
+    /**
+     * Reads a process output stream asynchronously with a byte cap.
+     * The reader thread is daemonized so it can never pin JVM shutdown, and
+     * output is capped at 64KB so runaway binaries cannot OOM discovery.
+     */
+    private static java.util.concurrent.Future<String> readStreamAsync(Process process) {
+        java.util.concurrent.ExecutorService reader = java.util.concurrent.Executors
+                .newSingleThreadExecutor(r -> {
+                    Thread t = new Thread(r, "tool-discovery-reader");
+                    t.setDaemon(true);
+                    return t;
+                });
+        java.util.concurrent.Future<String> future = reader.submit(() -> {
+            StringBuilder output = new StringBuilder();
+            try (BufferedReader br = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    if (output.length() + line.length() + 1 > 64 * 1024) {
+                        break;
+                    }
+                    output.append(line).append("\n");
+                    if (Thread.currentThread().isInterrupted()) {
+                        break;
+                    }
+                }
+            } catch (IOException e) {
+                logger.debug("Version probe stream closed: {}", e.getMessage());
+            }
+            return output.toString();
+        });
+        reader.shutdown();
+        return future;
+    }
+
     private Optional<String> detectVersion(Path toolPath, String versionFlag) {
         try {
             ProcessBuilder pb = new ProcessBuilder(toolPath.toString(), versionFlag);
@@ -431,14 +533,22 @@ public class ToolDiscovery {
 
             Process process = pb.start();
 
-            // Read output
-            StringBuilder output = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    output.append(line).append("\n");
-                }
+            // Async read: a binary emitting infinite output without EOF must
+            // not block detection; waitFor(timeout) below must always fire.
+            java.util.concurrent.Future<String> outputFuture = readStreamAsync(process);
+            String captured;
+            try {
+                captured = outputFuture.get(VERSION_CHECK_TIMEOUT, TimeUnit.MILLISECONDS);
+            } catch (java.util.concurrent.TimeoutException e) {
+                outputFuture.cancel(true);
+                process.destroyForcibly();
+                logger.warn("Version detection timed out for: {}", toolPath);
+                return Optional.empty();
+            } catch (java.util.concurrent.ExecutionException e) {
+                logger.warn("Failed to detect version for {}: {}", toolPath,
+                        e.getCause() != null ? e.getCause().getMessage() : e.getMessage());
+                process.destroyForcibly();
+                return Optional.empty();
             }
 
             // Wait for process to complete with timeout
@@ -450,10 +560,14 @@ public class ToolDiscovery {
             }
 
             // Parse version from output
-            return parseVersion(toolPath.getFileName().toString(), output.toString());
+            return parseVersion(toolPath.getFileName().toString(), captured);
 
-        } catch (IOException | InterruptedException e) {
+        } catch (IOException e) {
             logger.warn("Failed to detect version for {}: {}", toolPath, e.getMessage());
+            return Optional.empty();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            logger.warn("Version detection interrupted for {}: {}", toolPath, e.getMessage());
             return Optional.empty();
         }
     }

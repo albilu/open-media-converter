@@ -52,7 +52,7 @@ class SettingsManagerTest {
     private Path cacheDir;
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws Exception {
         // Create temporary directories for testing
         configDir = tempDir.resolve("config");
         dataDir = tempDir.resolve("data");

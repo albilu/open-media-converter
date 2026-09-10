@@ -41,7 +41,7 @@ class NativeFeatureWorkflowTest {
                 manager.addSectionPreset(SectionPreset.forImage("Native A", "", ImageSettings.builder().quality(30).build(), false));
                 manager.addSectionPreset(SectionPreset.forImage("Native-A", "", ImageSettings.builder().quality(90).build(), false));
                 var window = app.getMainWindow();
-                var dialog = new SettingsDialogJavaGi(window, controller.getCurrentSettings(), manager);
+                var dialog = new SettingsDialogJavaGi(window, controller.getCurrentSettings(), manager, controller);
                 dialog.setAvailableCategories(controller.getAvailableCategories());
                 dialog.showDialog();
                 PresetsBySection presets = manager.loadPresetsBySection();

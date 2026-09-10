@@ -57,7 +57,7 @@ class SettingsManagerMigrationTest {
     private Path outputDir; // Output directory for test presets
 
     @BeforeEach
-    void setUp() throws IOException {
+    void setUp() throws Exception {
         // Create temporary directories for testing
         configDir = tempDir.resolve("config");
         dataDir = tempDir.resolve("data");

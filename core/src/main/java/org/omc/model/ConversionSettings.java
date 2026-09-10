@@ -225,7 +225,7 @@ public final class ConversionSettings {
 
     /**
      * Returns the primary output format (first non-null from settings).
-     * 
+     *
      * @return the output format, or null if none set
      */
     public FileFormat outputFormat() {
@@ -238,6 +238,58 @@ public final class ConversionSettings {
         if (documentSettings != null && documentSettings.outputFormat() != null)
             return documentSettings.outputFormat();
         return null;
+    }
+
+    /**
+     * Resolves the effective output format for a format category from these
+     * settings.
+     *
+     * <p>
+     * This is the single canonical resolution used by the UI (file list output
+     * column, file details dialog) instead of per-site category switches. A
+     * missing section or a section without an explicit output format resolves
+     * to {@code null} (callers render "Not Set"), never throws.
+     * </p>
+     *
+     * @param fileCategory the format category (VIDEO, AUDIO, IMAGE, DOCUMENT)
+     * @return the section's output format, or null when unset/unsupported
+     * @throws NullPointerException if fileCategory is null
+     */
+    public FileFormat resolveOutputFormat(FormatCategory fileCategory) {
+        return outputFormat(Objects.requireNonNull(fileCategory, "fileCategory cannot be null"));
+    }
+
+    /**
+     * Resolves the effective output format for a specific file, honoring a
+     * per-file settings override.
+     *
+     * <p>
+     * If the file has a custom settings override, the override section matching
+     * the file's category is consulted and its format is returned even when
+     * null (an override deliberately shadows global settings; callers fall back
+     * to displaying the preset name). Otherwise the global section format for
+     * the file's category is returned.
+     * </p>
+     *
+     * @param file the file whose output format should be resolved
+     * @return the resolved output format, or null when unset
+     * @throws NullPointerException if file is null
+     */
+    public FileFormat resolveOutputFormat(ConversionFile file) {
+        Objects.requireNonNull(file, "file cannot be null");
+        FormatCategory category = file.format().getCategory();
+        if (file.hasCustomSettings()) {
+            FileSettingsOverride override = file.settingsOverride();
+            return switch (category) {
+                case VIDEO -> override.videoSettings() != null ? override.videoSettings().outputFormat() : null;
+                case AUDIO -> override.audioSettings() != null ? override.audioSettings().outputFormat() : null;
+                case IMAGE -> override.imageSettings() != null ? override.imageSettings().outputFormat() : null;
+                case DOCUMENT ->
+                    override.documentSettings() != null ? override.documentSettings().outputFormat() : null;
+                default -> null;
+            };
+        }
+        return resolveOutputFormat(category);
     }
 
     /**

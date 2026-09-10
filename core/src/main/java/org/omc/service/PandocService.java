@@ -23,6 +23,7 @@ import org.omc.model.DocumentSettings;
 import org.omc.model.FileFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 /**
  * Service for executing Pandoc document conversions.
@@ -131,6 +132,22 @@ public class PandocService {
             String fileId,
             ProcessRegistry processRegistry) throws ToolExecutionException {
 
+        // MDC correlation: every log line emitted during this conversion
+        // carries the file and tool context
+        try (MDC.MDCCloseable omcFileCtx = MDC.putCloseable("omcFile", String.valueOf(fileId));
+                MDC.MDCCloseable omcToolCtx = MDC.putCloseable("omcTool", "pandoc")) {
+            return convertDocumentInternal(inputPath, outputPath, settings, progressCallback, fileId, processRegistry);
+        }
+    }
+
+    private ConversionResult convertDocumentInternal(
+            Path inputPath,
+            Path outputPath,
+            DocumentSettings settings,
+            ProgressCallback progressCallback,
+            String fileId,
+            ProcessRegistry processRegistry) throws ToolExecutionException {
+
         Objects.requireNonNull(inputPath, "inputPath must not be null");
         Objects.requireNonNull(outputPath, "outputPath must not be null");
         Objects.requireNonNull(settings, "settings must not be null");
@@ -174,13 +191,18 @@ public class PandocService {
                 processRegistry.registerProcess(fileId, process);
             }
 
-            // Read output in a separate thread
+            // Read output in a separate daemon thread (named + handler so a
+            // leak can never pin JVM shutdown)
             StringBuilder outputLog = new StringBuilder(4096); // Initial capacity for performance
+            // errorOutput is capped independently: warning spam on corrupt
+            // input must not bypass the 1MB cap via this side buffer.
             StringBuilder errorOutput = new StringBuilder();
+            final int MAX_ERROR_OUTPUT_SIZE = 64 * 1024;
 
-            Thread outputReader = new Thread(() -> {
+            Thread outputReader = org.omc.util.ThreadUtils.createThreadFactory("Pandoc-Reader")
+                    .newThread(() -> {
                 try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(process.getInputStream()))) {
+                        new InputStreamReader(process.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
                     String line;
                     int lineCount = 0;
                     boolean outputTruncated = false;
@@ -188,10 +210,11 @@ public class PandocService {
                     while ((line = reader.readLine()) != null) {
                         lineCount++;
 
-                        // Requirement: Task 6.21 - Enforce 1MB output size limit
-                        // Check every 100 lines for performance (avoid constant size checks)
+                        // Requirement: Task 6.21 - Enforce 1MB output size
+                        // limit (checked on every line so oversized single
+                        // lines also truncate).
                         if (!outputTruncated) {
-                            if (lineCount % 100 == 0 && outputLog.length() > MAX_OUTPUT_SIZE) {
+                            if (outputLog.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
                                 outputLog.append(TRUNCATION_MESSAGE);
                                 outputTruncated = true;
                                 logger.warn("Tool output exceeded 1MB limit, truncating further output");
@@ -201,9 +224,12 @@ public class PandocService {
                         }
                         // Continue reading even after truncation to detect errors
 
-                        // Track errors and warnings separately
-                        if (line.toLowerCase().contains("error") || line.toLowerCase().contains("warning")) {
-                            errorOutput.append(line).append("\n");
+                        // Track errors and warnings separately (capped)
+                        if (line.toLowerCase(java.util.Locale.ROOT).contains("error")
+                                || line.toLowerCase(java.util.Locale.ROOT).contains("warning")) {
+                            if (errorOutput.length() + line.length() + 1 <= MAX_ERROR_OUTPUT_SIZE) {
+                                errorOutput.append(line).append("\n");
+                            }
                         }
                         logger.trace("Pandoc output: {}", line);
                     }
@@ -338,17 +364,22 @@ public class PandocService {
         Objects.requireNonNull(input, "input must not be null");
         Objects.requireNonNull(output, "output must not be null");
         Objects.requireNonNull(settings, "settings must not be null");
+        if (!settings.isValid()) {
+            throw new IllegalArgumentException("Invalid document settings: " + settings);
+        }
 
         List<String> command = new ArrayList<>();
         command.add(pandocPath.toString());
 
-        // Input file
-        command.add(input.toString());
-        command.add("--resource-path=" + input.toAbsolutePath().getParent());
+        // Input file (dash-prefixed basenames are absolutized so getopt
+        // never parses them as flags)
+        command.add(FFmpegService.safePathArg(input));
+        Path resourceDir = input.toAbsolutePath().getParent();
+        command.add("--resource-path=" + (resourceDir != null ? resourceDir.toString() : "."));
 
         // Output file
         command.add("-o");
-        command.add(output.toString());
+        command.add(FFmpegService.safePathArg(output));
 
         // Detect input and output formats from extensions
         FileFormat inputFormat = detectFormat(input);
@@ -377,7 +408,9 @@ public class PandocService {
             command.add("--toc-depth=3");
         }
 
-        // Template (if provided)
+        // Template (if provided). NOTE: deliberately lenient (exists-only):
+        // callers/tests pass directories here and pandoc reports misuse
+        // itself; strict isRegularFile/isReadable checks broke that contract.
         if (settings.templatePath() != null && Files.exists(settings.templatePath())) {
             command.add((outputFormat == FileFormat.DOCX || outputFormat == FileFormat.ODT
                     ? "--reference-doc=" : "--template=") + settings.templatePath());
@@ -498,7 +531,9 @@ public class PandocService {
         Path html = null;
         Instant start = Instant.now();
         try {
-            html = Files.createTempFile(output.toAbsolutePath().getParent(), "omc-document-", ".html");
+            // System temp dir (not the user output dir): inherits safe
+            // permissions and avoids symlink games in world-writable parents.
+            html = Files.createTempFile("omc-document-", ".html");
             ConversionResult textResult = convertDocument(input, html, settings.withOutputFormat(FileFormat.HTML),
                     (percent, bytes, speed) -> callback.onProgress(percent * 0.5, bytes, speed), fileId, registry);
             if (!textResult.success()) return textResult;
@@ -533,15 +568,19 @@ public class PandocService {
      * @return the progress thread (caller must join before checking exit code)
      */
     private Thread simulateProgress(Process process, ProgressCallback callback, long inputSize) {
-        Thread progressThread = new Thread(() -> {
+        Thread progressThread = org.omc.util.ThreadUtils.createThreadFactory("Pandoc-Progress")
+                .newThread(() -> {
             try {
                 double progress = 0.0;
+                long startNanos = System.nanoTime();
                 while (process.isAlive() && progress < 100.0) {
                     // Simulate progress: increment by 10% every 500ms
                     progress = Math.min(progress + 10.0, 95.0); // Cap at 95% until done
 
                     long bytesProcessed = (long) (inputSize * progress / 100.0);
-                    double speed = bytesProcessed / (progress / 100.0 + 0.1); // Rough estimate
+                    // Real bytes/second from elapsed wall time (was bytes, not B/s).
+                    double elapsedSeconds = Math.max((System.nanoTime() - startNanos) / 1_000_000_000.0, 0.001);
+                    double speed = bytesProcessed / elapsedSeconds;
 
                     callback.onProgress(progress, bytesProcessed, speed);
 

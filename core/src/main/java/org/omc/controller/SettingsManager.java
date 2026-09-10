@@ -24,14 +24,15 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 
 /**
  * Manages application settings and preset persistence and retrieval.
@@ -112,10 +113,19 @@ public class SettingsManager {
      * Loads settings from disk.
      * If the settings file doesn't exist or is corrupted, returns default settings.
      * Corrupted files are backed up with timestamp.
-     * 
+     *
+     * <p>
+     * <b>Corruption recovery:</b> when the file cannot be bound to
+     * {@link ConversionSettings} or fails validation, valid per-section
+     * subtrees (video/audio/image/document) and valid global fields are
+     * salvaged from the JSON tree; only the corrupt or invalid parts are reset
+     * to defaults. Files that are not parseable JSON at all are fully reset to
+     * defaults (after backup).
+     * </p>
+     *
      * Requirement REQ-005.3: Settings persistence
      *
-     * @return Loaded or default settings
+     * @return Loaded, salvaged or default settings
      */
     public ConversionSettings loadSettings() {
         Path settingsPath = configurationManager.getSettingsFilePath();
@@ -138,31 +148,22 @@ public class SettingsManager {
             // Validate loaded settings
             if (settings == null) {
                 logger.warn("Settings file is empty or null, using defaults");
-                backupCorruptedSettings(settingsPath);
-                ConversionSettings defaults = createDefaultSettings();
-                currentSettings.set(defaults);
-                return defaults;
+                return recoverCorruptedSettings(settingsPath);
             }
 
             settings = settings.withDefaults();
 
             // Validate settings using basic validation
             if (!settings.isValid()) {
-                logger.warn("Loaded settings are invalid, using defaults");
-                backupCorruptedSettings(settingsPath);
-                ConversionSettings defaults = createDefaultSettings();
-                currentSettings.set(defaults);
-                return defaults;
+                logger.warn("Loaded settings are invalid, salvaging valid sections");
+                return recoverCorruptedSettings(settingsPath);
             }
 
             // Additional validation using ValidationEngine
             ValidationResult validationResult = validationEngine.validateSettings(settings);
             if (validationResult.isFailure()) {
                 logger.warn("Settings validation failed: {}", validationResult.getErrors());
-                backupCorruptedSettings(settingsPath);
-                ConversionSettings defaults = createDefaultSettings();
-                currentSettings.set(defaults);
-                return defaults;
+                return recoverCorruptedSettings(settingsPath);
             }
 
             if (validationResult.hasWarnings()) {
@@ -175,17 +176,161 @@ public class SettingsManager {
 
         } catch (IOException e) {
             logger.error("Error reading settings file: {}", settingsPath, e);
-            backupCorruptedSettings(settingsPath);
-            ConversionSettings defaults = createDefaultSettings();
-            currentSettings.set(defaults);
-            return defaults;
+            return recoverCorruptedSettings(settingsPath);
+        }
+    }
+
+    /**
+     * Recovers a settings file that could not be loaded normally.
+     *
+     * <p>
+     * The file is parsed into a JSON tree; valid section subtrees and global
+     * fields are salvaged and only the corrupt parts are reset to defaults.
+     * The original file is always backed up first (same behaviour as a full
+     * reset). Files that are not parseable JSON keep the historical
+     * full-reset behaviour.
+     * </p>
+     *
+     * @param settingsPath path to the settings file
+     * @return salvaged settings, or full defaults when nothing is recoverable
+     */
+    private ConversionSettings recoverCorruptedSettings(Path settingsPath) {
+        JsonNode root;
+        try {
+            root = JsonUtils.getObjectMapper().readTree(settingsPath.toFile());
+        } catch (IOException e) {
+            logger.warn("Settings file is not parseable JSON; resetting to defaults", e);
+            return resetSettingsToDefaults(settingsPath);
+        }
+
+        if (root == null || !root.isObject()) {
+            logger.warn("Settings file is not a JSON object; resetting to defaults");
+            return resetSettingsToDefaults(settingsPath);
+        }
+
+        // Keep the historical backup behaviour before using salvaged data
+        backupCorruptedSettings(settingsPath);
+
+        ConversionSettings salvaged = salvageSettings(root);
+        if (salvaged == null) {
+            salvaged = createDefaultSettings();
+        }
+
+        currentSettings.set(salvaged);
+        logger.info("Settings recovered after corruption; invalid parts were reset to defaults");
+        return salvaged;
+    }
+
+    /**
+     * Full-reset recovery: backs the file up and returns defaults.
+     */
+    private ConversionSettings resetSettingsToDefaults(Path settingsPath) {
+        backupCorruptedSettings(settingsPath);
+        ConversionSettings defaults = createDefaultSettings();
+        currentSettings.set(defaults);
+        return defaults;
+    }
+
+    /**
+     * Builds settings from a JSON tree, keeping every subtree that binds and
+     * validates, and taking defaults for the rest.
+     *
+     * @param root object node of the settings file
+     * @return candidate settings, or null if even the salvaged result is invalid
+     */
+    private ConversionSettings salvageSettings(JsonNode root) {
+        ConversionSettings defaults = createDefaultSettings();
+        ConversionSettings.Builder builder = ConversionSettings.builder()
+                .outputDirectory(defaults.outputDirectory())
+                .overwriteExisting(defaults.overwriteExisting())
+                .createSubdirectory(defaults.createSubdirectory())
+                .parallelConversions(defaults.parallelConversions())
+                .deleteOriginalFile(defaults.deleteOriginalFile());
+
+        // Global scalar fields, salvaged one by one
+        JsonNode node = root.get("parallelConversions");
+        if (node != null && node.isInt() && node.asInt() >= 1 && node.asInt() <= 16) {
+            builder.parallelConversions(node.asInt());
+        }
+        node = root.get("overwriteExisting");
+        if (node != null && node.isBoolean()) {
+            builder.overwriteExisting(node.asBoolean());
+        }
+        node = root.get("createSubdirectory");
+        if (node != null && node.isBoolean()) {
+            builder.createSubdirectory(node.asBoolean());
+        }
+        node = root.get("deleteOriginalFile");
+        if (node != null && node.isBoolean()) {
+            builder.deleteOriginalFile(node.asBoolean());
+        }
+        node = root.get("outputDirectory");
+        if (node != null && node.isTextual()) {
+            try {
+                Path directory = Path.of(node.asText());
+                if (Files.isDirectory(directory)) {
+                    builder.outputDirectory(directory);
+                } else {
+                    logger.warn("Discarding non-existent outputDirectory during salvage: {}", directory);
+                }
+            } catch (InvalidPathException e) {
+                logger.warn("Discarding malformed outputDirectory during salvage: {}", node.asText());
+            }
+        }
+
+        // Section subtrees, salvaged independently of each other
+        builder.videoSettings(salvageSection(
+                root.get("videoSettings"), VideoSettings.class, VideoSettings::isValid, "videoSettings"));
+        builder.audioSettings(salvageSection(
+                root.get("audioSettings"), AudioSettings.class, AudioSettings::isValid, "audioSettings"));
+        builder.imageSettings(salvageSection(
+                root.get("imageSettings"), ImageSettings.class, ImageSettings::isValid, "imageSettings"));
+        builder.documentSettings(salvageSection(
+                root.get("documentSettings"), DocumentSettings.class, DocumentSettings::isValid,
+                "documentSettings"));
+
+        ConversionSettings candidate = builder.build().withDefaults();
+        if (!candidate.isValid() || validationEngine.validateSettings(candidate).isFailure()) {
+            logger.warn("Salvaged settings still invalid; falling back to full defaults");
+            return null;
+        }
+        return candidate;
+    }
+
+    /**
+     * Converts one section subtree to its model type, rejecting it on any
+     * binding or validation problem so only that section is reset.
+     *
+     * @param node      the section subtree, may be null or absent
+     * @param type      the section model class
+     * @param isValid   validator for the bound section value
+     * @param fieldName JSON field name, used for logging
+     * @param <T>       section model type
+     * @return the salvaged section, or null when it must be reset
+     */
+    private <T> T salvageSection(JsonNode node, Class<T> type, Predicate<T> isValid, String fieldName) {
+        if (node == null || node.isNull() || !node.isObject()) {
+            return null;
+        }
+
+        try {
+            T value = JsonUtils.getObjectMapper().treeToValue(node, type);
+            if (value == null || !isValid.test(value)) {
+                logger.warn("Discarding invalid '{}' section during settings salvage", fieldName);
+                return null;
+            }
+            return value;
+        } catch (IOException | IllegalArgumentException e) {
+            logger.warn("Discarding corrupt '{}' section during settings salvage: {}",
+                    fieldName, e.getMessage());
+            return null;
         }
     }
 
     /**
      * Saves settings to disk using atomic write operation.
      * Writes to temporary file first, then renames to prevent corruption.
-     * 
+     *
      * Requirement REQ-005.3: Atomic settings persistence
      *
      * @param settings Settings to save
@@ -218,7 +363,9 @@ public class SettingsManager {
             logger.debug("Settings written to temporary file: {}", tempPath);
 
             // Atomically rename temporary file to final location
-            Files.move(tempPath, settingsPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            // (falls back to a plain move where the filesystem does not
+            // support atomic moves)
+            StateManager.moveWithAtomicFallback(tempPath, settingsPath);
             logger.info("Settings saved successfully to: {}", settingsPath);
 
             // Update current settings
@@ -226,17 +373,11 @@ public class SettingsManager {
 
         } catch (IOException e) {
             logger.error("Error saving settings to: {}", settingsPath, e);
-
-            // Clean up temporary file if it exists
-            try {
-                if (Files.exists(tempPath)) {
-                    Files.delete(tempPath);
-                }
-            } catch (IOException cleanupError) {
-                logger.warn("Failed to delete temporary settings file: {}", tempPath, cleanupError);
-            }
-
             throw e;
+        } finally {
+            // Clean up the temp file whether the move failed or never happened;
+            // after a successful move this is a no-op because the file is gone.
+            StateManager.deleteQuietly(tempPath);
         }
     }
 
@@ -339,7 +480,13 @@ public class SettingsManager {
     /**
      * Backs up a corrupted settings file.
      * Renames the file with .backup suffix and timestamp.
-     * 
+     *
+     * <p>
+     * Uses the shared sub-second backup timestamp pattern from
+     * {@link StateManager} so state and settings backups share one naming
+     * scheme and cannot collide within the same second.
+     * </p>
+     *
      * Requirement REQ-005.3: Corrupted file handling
      *
      * @param settingsPath Path to corrupted settings file
@@ -347,7 +494,7 @@ public class SettingsManager {
     private void backupCorruptedSettings(Path settingsPath) {
         try {
             if (Files.exists(settingsPath)) {
-                String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSSSSSSSS"));
+                String timestamp = LocalDateTime.now().format(StateManager.BACKUP_TIMESTAMP_FORMATTER);
                 Path backupPath = Path.of(settingsPath.toString() + BACKUP_SUFFIX + "_" + timestamp);
 
                 Files.move(settingsPath, backupPath, StandardCopyOption.REPLACE_EXISTING);
@@ -629,19 +776,15 @@ public class SettingsManager {
         try {
             JsonUtils.writeJsonFile(value, tempPath.toFile());
 
-            // Atomic rename
-            Files.move(tempPath, presetsPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            // Atomic rename (falls back to a plain move on filesystems
+            // without atomic move support)
+            StateManager.moveWithAtomicFallback(tempPath, presetsPath);
 
         } catch (IOException e) {
-            // Clean up temp file if it exists
-            if (Files.exists(tempPath)) {
-                try {
-                    Files.delete(tempPath);
-                } catch (IOException cleanupEx) {
-                    logger.warn("Failed to delete temp presets file: {}", tempPath, cleanupEx);
-                }
-            }
             throw e;
+        } finally {
+            // Clean up the temp file whether the move failed or never happened
+            StateManager.deleteQuietly(tempPath);
         }
     }
 
@@ -1030,7 +1173,7 @@ public class SettingsManager {
             return true;
         }
         try {
-            String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSSSSSSSS"));
+            String timestamp = LocalDateTime.now().format(StateManager.BACKUP_TIMESTAMP_FORMATTER);
             Path backupPath = Path.of(presetsPath.toString() + ".old." + timestamp + ".bak");
             Files.copy(presetsPath, backupPath, StandardCopyOption.REPLACE_EXISTING);
             logger.info("Backed up old presets to: {}", backupPath);
@@ -1105,23 +1248,18 @@ public class SettingsManager {
             // Write to temporary file first
             JsonUtils.writeJsonFile(presets, tempPath.toFile());
 
-            // Atomic move to final location
-            Files.move(tempPath, presetsPath,
-                    StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.ATOMIC_MOVE);
+            // Atomic move to final location (falls back to a plain move on
+            // filesystems without atomic move support)
+            StateManager.moveWithAtomicFallback(tempPath, presetsPath);
 
             logger.info("Successfully saved presets by section to: {}", presetsPath);
 
         } catch (IOException e) {
-            // Clean up temp file if it exists
-            if (Files.exists(tempPath)) {
-                try {
-                    Files.delete(tempPath);
-                } catch (IOException cleanupError) {
-                    logger.warn("Failed to delete temp presets file: {}", tempPath, cleanupError);
-                }
-            }
+            logger.error("Failed to save presets by section to: {}", presetsPath, e);
             throw e;
+        } finally {
+            // Clean up the temp file whether the move failed or never happened
+            StateManager.deleteQuietly(tempPath);
         }
     }
 

@@ -10,6 +10,7 @@ import org.omc.controller.ApplicationWorkflowController;
 import org.omc.controller.FileManager;
 import org.omc.controller.SettingsManager;
 import org.omc.controller.StateManager;
+import org.omc.exception.StateIOException;
 import org.omc.model.ToolConfiguration;
 import org.omc.service.FFmpegService;
 import org.omc.service.FileHandler;
@@ -38,17 +39,19 @@ public class DependencyFactory {
     // Default configuration
     private static final int DEFAULT_PARALLEL_CONVERSIONS = 4;
 
-    // Singleton instances (created once)
-    private ConfigurationManager configManager;
-    private FileHandler fileHandler;
-    private ValidationEngine validationEngine;
-    private ProgressEngine progressEngine;
-    private ToolManager toolManager;
-    private ConversionEngine conversionEngine;
-    private FileManager fileManager;
-    private SettingsManager settingsManager;
-    private StateManager stateManager;
-    private ApplicationWorkflowController controller;
+    // Singleton instances (created once). Volatile so components are safely
+    // published to threads that read them through the getters while/after
+    // initialization runs on another thread.
+    private volatile ConfigurationManager configManager;
+    private volatile FileHandler fileHandler;
+    private volatile ValidationEngine validationEngine;
+    private volatile ProgressEngine progressEngine;
+    private volatile ToolManager toolManager;
+    private volatile ConversionEngine conversionEngine;
+    private volatile FileManager fileManager;
+    private volatile SettingsManager settingsManager;
+    private volatile StateManager stateManager;
+    private volatile ApplicationWorkflowController controller;
 
     // Custom configuration directory (optional)
     private final Path customConfigDirectory;
@@ -94,11 +97,11 @@ public class DependencyFactory {
     /**
      * Initializes all application dependencies in the correct order.
      * This method should be called once during application startup.
-     * 
+     *
      * @return the fully initialized ApplicationWorkflowController
      * @throws IllegalStateException if dependencies have already been initialized
      */
-    public ApplicationWorkflowController createApplicationController() {
+    public synchronized ApplicationWorkflowController createApplicationController() {
         logger.info("Initializing application dependencies");
 
         if (controller != null) {
@@ -123,15 +126,38 @@ public class DependencyFactory {
 
         } catch (Exception e) {
             logger.error("Failed to initialize application dependencies", e);
+            // Phase 3 already created a ConversionEngine owning a worker pool
+            // and a disk-space monitor thread; leaving it running would leak
+            // both for the lifetime of the JVM, so shut it down before rethrowing.
+            shutdownConversionEngineQuietly();
             throw new RuntimeException("Dependency initialization failed", e);
+        }
+    }
+
+    /**
+     * Shuts down an already-created ConversionEngine without throwing, for
+     * use on the failure path of {@link #createApplicationController()}.
+     */
+    private void shutdownConversionEngineQuietly() {
+        if (conversionEngine != null) {
+            try {
+                conversionEngine.shutdown();
+            } catch (Exception shutdownError) {
+                logger.error("Error shutting down ConversionEngine after failed initialization", shutdownError);
+            }
         }
     }
 
     /**
      * Phase 1: Creates foundation services that other components depend on.
      * Order: ConfigurationManager → FileHandler → ValidationEngine → ProgressEngine
+     *
+     * @throws StateIOException when a required configuration directory cannot
+     *                          be created; propagated to
+     *                          {@link #createApplicationController()}'s failure
+     *                          handling
      */
-    private void createFoundationServices() {
+    private void createFoundationServices() throws StateIOException {
         logger.debug("Creating foundation services");
 
         // ConfigurationManager - no dependencies

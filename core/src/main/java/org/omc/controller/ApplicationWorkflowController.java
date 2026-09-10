@@ -24,6 +24,7 @@ import org.omc.model.ConversionResult;
 import org.omc.model.ConversionSettings;
 import org.omc.model.ConversionStatus;
 import org.omc.model.FileListSortState;
+import org.omc.model.FileFormat;
 import org.omc.model.FileSettingsOverride;
 import org.omc.model.FormatCategory;
 import org.omc.model.PresetsBySection;
@@ -74,9 +75,11 @@ public class ApplicationWorkflowController {
 
     // UI callback handlers for progress and completion events
     // Requirement REQ-004.2: Forward conversion events to UI
-    private BiConsumer<String, ConversionProgress> uiProgressCallback;
-    private BiConsumer<String, ConversionResult> uiCompletionCallback;
-    private Consumer<BatchProgress> uiBatchProgressCallback;
+    // UI callbacks: written on the GTK thread, read on conversion worker
+    // threads (engine listeners) - volatile guarantees publication.
+    private volatile BiConsumer<String, ConversionProgress> uiProgressCallback;
+    private volatile BiConsumer<String, ConversionResult> uiCompletionCallback;
+    private volatile Consumer<BatchProgress> uiBatchProgressCallback;
 
     /**
      * Creates a new ApplicationWorkflowController with required dependencies.
@@ -677,35 +680,9 @@ public class ApplicationWorkflowController {
 
     // ===== Conversion Control Methods =====
 
-    /**
-     * Starts the conversion process for all pending files.
-     * 
-     * Requirement REQ-004.2: Conversion workflow control
-     * 
-     * @throws IllegalStateException if conversion already in progress or no files
-     */
-    public void startConversion() {
-        if (conversionInProgress.get()) {
-            throw new IllegalStateException("Conversion already in progress");
-        }
-
-        List<ConversionFile> files = fileManager.getFiles();
-        if (files.isEmpty()) {
-            throw new IllegalStateException("No files to convert");
-        }
-
-        logger.info("Starting conversion for {} files", files.size());
-
-        try {
-            conversionEngine.convertBatch(files, currentSettings);
-            conversionInProgress.set(true);
-            logger.info("Conversion started successfully");
-
-        } catch (Exception e) {
-            logger.error("Failed to start conversion", e);
-            throw new RuntimeException("Failed to start conversion: " + e.getMessage(), e);
-        }
-    }
+    // NOTE: The former startConversion() variant was removed: it duplicated
+    // handleStartConversion() with weaker validation and had no callers.
+    // All entry points go through handleStartConversion().
 
     /**
      * Pauses the current conversion process.
@@ -1549,8 +1526,7 @@ public class ApplicationWorkflowController {
             return List.of();
         }
 
-        logger.debug("Getting available presets for {} file(s)", fileIds.size());
-
+                logger.debug("Getting available presets for {} file(s)", fileIds.size());
         // Get ConversionFile objects from FileManager
         List<ConversionFile> files = new ArrayList<>();
         for (String fileId : fileIds) {
@@ -1725,7 +1701,7 @@ public class ApplicationWorkflowController {
     /**
      * Gets the saved file list sort state from application state.
      * Task 82: REQ-FL-4.5 - Retrieve saved sort state for restoration on startup.
-     * 
+     *
      * @return The saved sort state, or FileListSortState.unsorted() if none saved
      */
     public FileListSortState getSavedSortState() {
@@ -1737,5 +1713,28 @@ public class ApplicationWorkflowController {
             logger.error("Failed to retrieve saved sort state", e);
             return FileListSortState.unsorted();
         }
+    }
+
+    /**
+     * Availability-aware document conversion capability query.
+     *
+     * <p>
+     * Unlike the static {@code PandocService.canConvert}/{@code LibreOfficeService.canConvert}
+     * helpers (which only describe format support), this also verifies that a
+     * backing service was constructed for a discovered binary. The UI uses it
+     * to gray out unsupported document options instead of depending on
+     * service implementations directly.
+     * </p>
+     *
+     * @param input source document format
+     * @param output target document format
+     * @return true if an installed document service supports the pair
+     * @throws IllegalStateException if the controller is not initialized
+     */
+    public boolean canConvertDocuments(FileFormat input, FileFormat output) {
+        if (!initialized.get()) {
+            throw new IllegalStateException("Controller not initialized");
+        }
+        return conversionEngine.canConvertDocuments(input, output);
     }
 }

@@ -46,7 +46,7 @@ class StateManagerTest {
     private Path cacheDir;
 
     @BeforeEach
-    void setUp() throws IOException {
+    void setUp() throws Exception {
         // Create temporary directories
         configDir = tempDir.resolve("config");
         dataDir = tempDir.resolve("data");

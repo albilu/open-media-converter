@@ -11,7 +11,19 @@ import java.text.DecimalFormat;
  * Utility class for file operations including copy, move, delete, and size
  * formatting.
  * All methods are static and provide comprehensive error handling.
- * 
+ *
+ * <p>
+ * This class is the single source of truth for the copy/move/getFileSize
+ * validation and error mapping shared with
+ * {@link org.omc.service.FileHandler}: the Path-based overloads below carry
+ * the implementation and both the String-based overloads here and the
+ * corresponding FileHandler methods delegate to them. Methods that only
+ * look similar but genuinely differ (deleteFile: FileHandler also maintains
+ * its cleanup registry; disk-space queries: FileHandler walks up to an
+ * existing parent directory; exists/isReadable/isWritable: different
+ * exception semantics) are intentionally NOT deduplicated.
+ * </p>
+ *
  * Requirements: REQ-002.1, REQ-002.3
  */
 public final class FileUtils {
@@ -28,29 +40,29 @@ public final class FileUtils {
 
     /**
      * Copies a file from source to destination.
+     * Path-based source of truth for the copy logic; the String-based
+     * {@link #copyFile(String, String, boolean)} overload delegates here so
+     * the validation/error mapping exists in exactly one place.
      *
-     * @param sourcePath The source file path
-     * @param destPath   The destination file path
-     * @param overwrite  Whether to overwrite if destination exists
+     * @param source    The source file path
+     * @param dest      The destination file path
+     * @param overwrite Whether to overwrite if destination exists
      * @throws FileOperationException if copy fails
      */
-    public static void copyFile(String sourcePath, String destPath, boolean overwrite)
+    public static void copyFile(Path source, Path dest, boolean overwrite)
             throws FileOperationException {
-        Path source = Paths.get(sourcePath);
-        Path dest = Paths.get(destPath);
-
         if (!Files.exists(source)) {
             throw new FileOperationException(
                     "Source file does not exist",
                     ErrorCode.FILE_NOT_FOUND,
-                    sourcePath);
+                    source.toString());
         }
 
         if (!Files.isReadable(source)) {
             throw new FileOperationException(
                     "Source file is not readable",
                     ErrorCode.FILE_NOT_READABLE,
-                    sourcePath);
+                    source.toString());
         }
 
         try {
@@ -63,13 +75,67 @@ public final class FileUtils {
             throw new FileOperationException(
                     "Destination file already exists",
                     ErrorCode.FILE_ALREADY_EXISTS,
-                    destPath,
+                    dest.toString(),
                     e);
         } catch (IOException e) {
             throw new FileOperationException(
                     "Failed to copy file",
                     ErrorCode.FILE_IO_ERROR,
-                    sourcePath,
+                    source.toString(),
+                    e);
+        }
+    }
+
+    /**
+     * Copies a file from source to destination.
+     *
+     * @param sourcePath The source file path
+     * @param destPath   The destination file path
+     * @param overwrite  Whether to overwrite if destination exists
+     * @throws FileOperationException if copy fails
+     */
+    public static void copyFile(String sourcePath, String destPath, boolean overwrite)
+            throws FileOperationException {
+        copyFile(Paths.get(sourcePath), Paths.get(destPath), overwrite);
+    }
+
+    /**
+     * Moves a file from source to destination.
+     * Path-based source of truth for the move logic; the String-based
+     * {@link #moveFile(String, String, boolean)} overload delegates here so
+     * the validation/error mapping exists in exactly one place.
+     *
+     * @param source    The source file path
+     * @param dest      The destination file path
+     * @param overwrite Whether to overwrite if destination exists
+     * @throws FileOperationException if move fails
+     */
+    public static void moveFile(Path source, Path dest, boolean overwrite)
+            throws FileOperationException {
+        if (!Files.exists(source)) {
+            throw new FileOperationException(
+                    "Source file does not exist",
+                    ErrorCode.FILE_NOT_FOUND,
+                    source.toString());
+        }
+
+        try {
+            if (overwrite) {
+                Files.move(source, dest, StandardCopyOption.REPLACE_EXISTING);
+            } else {
+                Files.move(source, dest);
+            }
+        } catch (FileAlreadyExistsException e) {
+            throw new FileOperationException(
+                    "Destination file already exists",
+                    ErrorCode.FILE_ALREADY_EXISTS,
+                    dest.toString(),
+                    e);
+        } catch (IOException e) {
+            throw new FileOperationException(
+                    "Failed to move file",
+                    ErrorCode.FILE_IO_ERROR,
+                    source.toString(),
                     e);
         }
     }
@@ -84,35 +150,7 @@ public final class FileUtils {
      */
     public static void moveFile(String sourcePath, String destPath, boolean overwrite)
             throws FileOperationException {
-        Path source = Paths.get(sourcePath);
-        Path dest = Paths.get(destPath);
-
-        if (!Files.exists(source)) {
-            throw new FileOperationException(
-                    "Source file does not exist",
-                    ErrorCode.FILE_NOT_FOUND,
-                    sourcePath);
-        }
-
-        try {
-            if (overwrite) {
-                Files.move(source, dest, StandardCopyOption.REPLACE_EXISTING);
-            } else {
-                Files.move(source, dest);
-            }
-        } catch (FileAlreadyExistsException e) {
-            throw new FileOperationException(
-                    "Destination file already exists",
-                    ErrorCode.FILE_ALREADY_EXISTS,
-                    destPath,
-                    e);
-        } catch (IOException e) {
-            throw new FileOperationException(
-                    "Failed to move file",
-                    ErrorCode.FILE_IO_ERROR,
-                    sourcePath,
-                    e);
-        }
+        moveFile(Paths.get(sourcePath), Paths.get(destPath), overwrite);
     }
 
     /**
@@ -157,19 +195,20 @@ public final class FileUtils {
 
     /**
      * Gets the size of a file in bytes.
+     * Path-based source of truth for the size logic; the String-based
+     * {@link #getFileSize(String)} overload delegates here so the
+     * validation/error mapping exists in exactly one place.
      *
-     * @param filePath The file path
+     * @param path The file path
      * @return The file size in bytes
      * @throws FileOperationException if size query fails
      */
-    public static long getFileSize(String filePath) throws FileOperationException {
-        Path path = Paths.get(filePath);
-
+    public static long getFileSize(Path path) throws FileOperationException {
         if (!Files.exists(path)) {
             throw new FileOperationException(
                     "File does not exist",
                     ErrorCode.FILE_NOT_FOUND,
-                    filePath);
+                    path.toString());
         }
 
         try {
@@ -178,9 +217,20 @@ public final class FileUtils {
             throw new FileOperationException(
                     "Failed to get file size",
                     ErrorCode.FILE_IO_ERROR,
-                    filePath,
+                    path.toString(),
                     e);
         }
+    }
+
+    /**
+     * Gets the size of a file in bytes.
+     *
+     * @param filePath The file path
+     * @return The file size in bytes
+     * @throws FileOperationException if size query fails
+     */
+    public static long getFileSize(String filePath) throws FileOperationException {
+        return getFileSize(Paths.get(filePath));
     }
 
     /**

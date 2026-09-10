@@ -60,6 +60,18 @@ public class FileListView {
     // Maps fileId -> ProgressWidgets (progressBar, statusLabel, progressLabel)
     private final Map<String, ProgressWidgets> progressWidgetCache;
 
+    // Snapshot of the controller's ConversionSettings for output-format
+    // resolution. Refreshed in setFiles()/refreshSettingsCache() instead of
+    // querying the controller inside every onBind, which made scrolling O(n)
+    // in controller calls.
+    private volatile org.omc.model.ConversionSettings cachedSettings;
+
+    // Receiver used for override-only resolution when the settings snapshot is
+    // unavailable (controller failure); the override branch never reads
+    // global sections, so an empty settings instance resolves identically.
+    private static final org.omc.model.ConversionSettings EMPTY_SETTINGS =
+            org.omc.model.ConversionSettings.builder().build();
+
     /**
      * Container for cached progress column widgets to enable direct updates.
      * 
@@ -455,13 +467,48 @@ public class FileListView {
             var stringObject = (org.gnome.gtk.StringObject) listItem.getItem();
 
             if (stringObject != null) {
-                String fileId = stringObject.getString();
-                // Don't remove from cache - widgets may be reused for same file
-                // Cache will be cleared when file list is completely reset
+                // Release only if the cache still points at THESE widgets:
+                // recycled rows re-bind to other files, and blindly keeping
+                // (or clearing) the entry would corrupt another file's updates.
+                releaseStatusLabel(stringObject.getString(), (Label) listItem.getChild());
             }
         });
 
         column.setFactory(factory);
+    }
+
+    /**
+     * Releases a cached status label on row unbind when it is still the cached
+     * instance. Nulls the slot instead of dropping the whole entry so a live
+     * progress-bar reference from the sibling column survives; drops the key
+     * once no widget references remain.
+     */
+    private void releaseStatusLabel(String fileId, Label label) {
+        ProgressWidgets widgets = progressWidgetCache.get(fileId);
+        if (widgets != null && widgets.statusLabel == label) {
+            if (widgets.progressBar == null && widgets.progressLabel == null) {
+                progressWidgetCache.remove(fileId);
+            } else {
+                progressWidgetCache.put(fileId,
+                        new ProgressWidgets(widgets.progressBar, null, widgets.progressLabel));
+            }
+        }
+    }
+
+    /**
+     * Releases cached progress widgets on row unbind under the same
+     * identity-checked rules as {@link #releaseStatusLabel}.
+     */
+    private void releaseProgressWidgets(String fileId, ProgressBar progressBar, Label progressLabel) {
+        ProgressWidgets widgets = progressWidgetCache.get(fileId);
+        if (widgets != null && widgets.progressBar == progressBar && widgets.progressLabel == progressLabel) {
+            if (widgets.statusLabel == null) {
+                progressWidgetCache.remove(fileId);
+            } else {
+                progressWidgetCache.put(fileId,
+                        new ProgressWidgets(null, widgets.statusLabel, null));
+            }
+        }
     }
 
     /**
@@ -541,11 +588,12 @@ public class FileListView {
         factory.onUnbind(item -> {
             var listItem = (ListItem) item;
             var stringObject = (org.gnome.gtk.StringObject) listItem.getItem();
+            var overlay = (Overlay) listItem.getChild();
 
-            if (stringObject != null) {
-                String fileId = stringObject.getString();
-                // Don't remove from cache - widgets may be reused for same file
-                // Cache will be cleared when file list is completely reset
+            if (stringObject != null && overlay != null) {
+                var progressBar = (ProgressBar) overlay.getChild();
+                var progressLabel = (Label) overlay.getFirstChild().getNextSibling();
+                releaseProgressWidgets(stringObject.getString(), progressBar, progressLabel);
             }
         });
 
@@ -565,6 +613,10 @@ public class FileListView {
         this.files.clear();
         this.fileIdToIndexMap.clear();
         this.progressWidgetCache.clear(); // Clear widget cache when file list is reset
+
+        // Rebuild the settings snapshot so output-format binds resolve against
+        // current settings without a controller call per row.
+        refreshSettingsCache();
 
         // Clear the string list model
         stringListModel.splice(0, stringListModel.getNItems(), new String[0]);
@@ -769,8 +821,12 @@ public class FileListView {
                 return override.presetName();
             }
 
-            // Otherwise get format from override settings
-            return resolveFormatFromOverride(override);
+            // Otherwise resolve the format from the override section (own
+            // category only; never falls through to global settings)
+            org.omc.model.ConversionSettings resolver =
+                    cachedSettings != null ? cachedSettings : EMPTY_SETTINGS;
+            org.omc.model.FileFormat format = resolver.resolveOutputFormat(file);
+            return format != null ? format.name() : "Not Set";
         }
 
         // Use global settings for file category
@@ -778,38 +834,25 @@ public class FileListView {
     }
 
     /**
-     * Resolves output format from a FileSettingsOverride.
-     * 
+     * Refreshes the cached ConversionSettings snapshot from the controller.
+     *
      * <p>
-     * Requirement REQ-FL-1.1: Extract format from custom settings
+     * Called from {@link #setFiles(List)} and by the main window whenever
+     * settings-changing dialogs commit, so per-row binds never query the
+     * controller directly (the old per-bind lookup made scrolling O(n) in
+     * controller calls).
      * </p>
-     * <p>
-     * Task 35: Add helper method for override format resolution
-     * </p>
-     * 
-     * @param override the settings override
-     * @return the format name or "Not Set"
      */
-    private String resolveFormatFromOverride(org.omc.model.FileSettingsOverride override) {
-        // Check each settings type and extract output format
-        if (override.videoSettings() != null) {
-            org.omc.model.FileFormat format = override.videoSettings().outputFormat();
-            return format != null ? format.name() : "Not Set";
-        } else if (override.audioSettings() != null) {
-            org.omc.model.FileFormat format = override.audioSettings().outputFormat();
-            return format != null ? format.name() : "Not Set";
-        } else if (override.imageSettings() != null) {
-            org.omc.model.FileFormat format = override.imageSettings().outputFormat();
-            return format != null ? format.name() : "Not Set";
-        } else if (override.documentSettings() != null) {
-            org.omc.model.FileFormat format = override.documentSettings().outputFormat();
-            return format != null ? format.name() : "Not Set";
+    public void refreshSettingsCache() {
+        try {
+            this.cachedSettings = controller.getCurrentSettings();
+        } catch (RuntimeException e) {
+            logger.warn("Failed to cache conversion settings for output-format column", e);
+            this.cachedSettings = null;
         }
-
-        return "Not Set";
     }
 
-    /**
+        /**
      * Resolves output format from global ConversionSettings for the file's
      * category.
      * 
@@ -825,20 +868,8 @@ public class FileListView {
      */
     private String resolveFormatFromGlobalSettings(org.omc.model.ConversionFile file) {
         try {
-            // Get current conversion settings from controller
-            org.omc.model.ConversionSettings settings = controller.getCurrentSettings();
-
-            // Determine file category and extract corresponding output format
-            org.omc.model.FormatCategory category = file.format().getCategory();
-
-            org.omc.model.FileFormat outputFormat = switch (category) {
-                case VIDEO -> settings.videoSettings().outputFormat();
-                case AUDIO -> settings.audioSettings().outputFormat();
-                case IMAGE -> settings.imageSettings().outputFormat();
-                case DOCUMENT -> settings.documentSettings().outputFormat();
-                case UNKNOWN -> null; // Unknown formats not supported for conversion
-            };
-
+            org.omc.model.FileFormat outputFormat =
+                    cachedSettings.resolveOutputFormat(file.format().getCategory());
             return outputFormat != null ? outputFormat.name() : "Not Set";
         } catch (Exception e) {
             logger.warn("Failed to resolve output format from global settings", e);

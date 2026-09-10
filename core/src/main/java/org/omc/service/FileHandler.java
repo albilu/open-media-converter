@@ -11,12 +11,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 /**
  * Service for file system operations including file queries, operations, format
@@ -32,8 +38,30 @@ import java.util.stream.Stream;
 public class FileHandler {
     private static final Logger logger = LoggerFactory.getLogger(FileHandler.class);
 
-    // Magic bytes for format detection (first 16 bytes of common formats)
-    private static final Map<String, byte[][]> MAGIC_BYTES = new HashMap<>();
+    // Magic bytes for format detection (first 16 bytes of common formats).
+    // A LinkedHashMap with most-specific signatures FIRST: iteration order is
+    // the tie-break, so wildcard entries (MP4's 0x00 box-size bytes, EBML)
+    // must never shadow longer specific ones (M4A/MOV). A HashMap here made
+    // MKV-vs-WEBM and MP4-vs-MOV/M4A detection order-random.
+    // NOTE: 0x00 in a signature means "any byte" (box/chunk sizes vary).
+    private static final Map<String, byte[][]> MAGIC_BYTES = new LinkedHashMap<>();
+
+    // Guard rails for ZIP content inspection (zip-bomb / hostile archive
+    // protection): never scan more than 1000 entries nor read more than 1MB
+    // from a single entry.
+    private static final int MAX_ZIP_ENTRIES_TO_SCAN = 1000;
+    private static final int MAX_ZIP_ENTRY_READ_BYTES = 1024 * 1024;
+
+    // MIME strings carried in the "mimetype" entry of ODF and EPUB archives.
+    private static final Map<String, FileFormat> ZIP_MIME_FORMATS = Map.of(
+            "application/vnd.oasis.opendocument.text", FileFormat.ODT,
+            "application/vnd.oasis.opendocument.spreadsheet", FileFormat.ODS,
+            "application/vnd.oasis.opendocument.presentation", FileFormat.ODP,
+            "application/epub+zip", FileFormat.EPUB);
+
+    // Streamed copy chunk size; progress callbacks are emitted per chunk,
+    // which naturally throttles them to at most one per 64KB.
+    private static final int COPY_BUFFER_SIZE = 64 * 1024;
 
     // Registered files for cleanup on shutdown
     private final Set<Path> cleanupRegistry = ConcurrentHashMap.newKeySet();
@@ -41,7 +69,17 @@ public class FileHandler {
     private final ConfigurationManager configManager;
 
     static {
-        // Video formats
+        // Audio first: M4A's specific ftypM4A must precede MP4's wildcard ftyp.
+        MAGIC_BYTES.put("M4A", new byte[][] {
+                { 0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x4D, 0x34, 0x41 } // ftyp M4A
+        });
+        // Video formats: MOV's ftypqt precedes MP4's wildcard ftyp for the
+        // same reason; MKV precedes WEBM (identical EBML headers - true
+        // separation needs DocType parsing, so MKV wins deterministically and
+        // both stay VIDEO for routing).
+        MAGIC_BYTES.put("MOV", new byte[][] {
+                { 0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74, 0x20, 0x20 } // ftyp qt
+        });
         MAGIC_BYTES.put("MP4", new byte[][] {
                 { 0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70 }, // ftyp at offset 4
                 { 0x00, 0x00, 0x00, 0x1c, 0x66, 0x74, 0x79, 0x70 }
@@ -54,9 +92,6 @@ public class FileHandler {
         });
         MAGIC_BYTES.put("WEBM", new byte[][] {
                 { 0x1A, 0x45, (byte) 0xDF, (byte) 0xA3 } // EBML header (same as MKV)
-        });
-        MAGIC_BYTES.put("MOV", new byte[][] {
-                { 0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74, 0x20, 0x20 } // ftyp qt
         });
 
         // Audio formats
@@ -75,10 +110,6 @@ public class FileHandler {
         MAGIC_BYTES.put("OGG", new byte[][] {
                 { 0x4F, 0x67, 0x67, 0x53 } // OggS
         });
-        MAGIC_BYTES.put("M4A", new byte[][] {
-                { 0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x4D, 0x34, 0x41 } // ftyp M4A
-        });
-
         // Image formats
         MAGIC_BYTES.put("PNG", new byte[][] {
                 { (byte) 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }
@@ -158,28 +189,16 @@ public class FileHandler {
 
     /**
      * Gets the size of a file in bytes.
+     * Delegates to {@link FileUtils#getFileSize(Path)}: the validation and
+     * error mapping is shared with the static utility so it exists in
+     * exactly one place.
      *
      * @param filePath The file path
      * @return The file size in bytes
      * @throws FileOperationException if file doesn't exist or size query fails
      */
     public long getFileSize(Path filePath) throws FileOperationException {
-        if (!exists(filePath)) {
-            throw new FileOperationException(
-                    "File does not exist",
-                    ErrorCode.FILE_NOT_FOUND,
-                    filePath.toString());
-        }
-
-        try {
-            return Files.size(filePath);
-        } catch (IOException e) {
-            throw new FileOperationException(
-                    "Failed to get file size",
-                    ErrorCode.FILE_IO_ERROR,
-                    filePath.toString(),
-                    e);
-        }
+        return FileUtils.getFileSize(filePath);
     }
 
     /**
@@ -240,6 +259,11 @@ public class FileHandler {
 
     /**
      * Copies a file from source to destination.
+     * Delegates to {@link FileUtils#copyFile(Path, Path, boolean)}: the
+     * validation and error mapping is shared with the static utility so it
+     * exists in exactly one place. Use
+     * {@link #copyFile(Path, Path, boolean, Consumer)} when progress
+     * reporting is needed.
      *
      * @param source      The source file path
      * @param destination The destination file path
@@ -248,49 +272,33 @@ public class FileHandler {
      */
     public void copyFile(Path source, Path destination, boolean overwrite)
             throws FileOperationException {
-        if (!exists(source)) {
-            throw new FileOperationException(
-                    "Source file does not exist",
-                    ErrorCode.FILE_NOT_FOUND,
-                    source.toString());
-        }
-
-        if (!isReadable(source)) {
-            throw new FileOperationException(
-                    "Source file is not readable",
-                    ErrorCode.FILE_NOT_READABLE,
-                    source.toString());
-        }
-
-        try {
-            if (overwrite) {
-                Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING);
-            } else {
-                Files.copy(source, destination);
-            }
-            logger.debug("Copied file from {} to {}", source, destination);
-        } catch (FileAlreadyExistsException e) {
-            throw new FileOperationException(
-                    "Destination file already exists",
-                    ErrorCode.FILE_ALREADY_EXISTS,
-                    destination.toString(),
-                    e);
-        } catch (IOException e) {
-            throw new FileOperationException(
-                    "Failed to copy file",
-                    ErrorCode.FILE_IO_ERROR,
-                    source.toString(),
-                    e);
-        }
+        FileUtils.copyFile(source, destination, overwrite);
+        logger.debug("Copied file from {} to {}", source, destination);
     }
 
     /**
-     * Copies a file with progress callback.
+     * Copies a file with real streaming progress.
+     *
+     * <p>
+     * The copy streams through a 64KB buffer and invokes the callback with
+     * the cumulative number of bytes copied after every chunk, so callers see
+     * progress grow during the copy instead of a single fake 100% report
+     * after an atomic copy. An empty file produces no callbacks.
+     * </p>
+     *
+     * <p>
+     * Semantics preserved from the previous atomic implementation: the
+     * overwrite flag behavior (no silent replacement when false) and the
+     * thrown {@link FileOperationException} error codes. Last-modified time
+     * is carried over from the source as a best-effort replacement for the
+     * COPY_ATTRIBUTES option.
+     * </p>
      *
      * @param source           The source file path
      * @param destination      The destination file path
      * @param overwrite        Whether to overwrite if destination exists
-     * @param progressCallback Callback invoked with bytes copied
+     * @param progressCallback Callback invoked with cumulative bytes copied
+     *                         (may be null)
      * @throws FileOperationException if copy fails
      */
     public void copyFile(Path source, Path destination, boolean overwrite,
@@ -302,26 +310,31 @@ public class FileHandler {
                     source.toString());
         }
 
-        try {
-            long fileSize = getFileSize(source);
-            long bytesCopied = 0;
+        // Fail fast when overwriting is not allowed (the CREATE_NEW open
+        // option below closes the remaining race window).
+        if (!overwrite && exists(destination)) {
+            throw new FileOperationException(
+                    "Destination file already exists",
+                    ErrorCode.FILE_ALREADY_EXISTS,
+                    destination.toString());
+        }
 
-            if (!overwrite && exists(destination)) {
-                throw new FileOperationException(
-                        "Destination file already exists",
-                        ErrorCode.FILE_ALREADY_EXISTS,
-                        destination.toString());
+        long bytesCopied = 0;
+        byte[] buffer = new byte[COPY_BUFFER_SIZE];
+        try (InputStream input = Files.newInputStream(source);
+                OutputStream output = overwrite
+                        ? Files.newOutputStream(destination, StandardOpenOption.CREATE,
+                                StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
+                        : Files.newOutputStream(destination, StandardOpenOption.CREATE_NEW,
+                                StandardOpenOption.WRITE)) {
+            int bytesRead;
+            while ((bytesRead = input.read(buffer)) != -1) {
+                output.write(buffer, 0, bytesRead);
+                bytesCopied += bytesRead;
+                if (progressCallback != null) {
+                    progressCallback.accept(bytesCopied);
+                }
             }
-
-            Files.copy(source, destination,
-                    overwrite ? StandardCopyOption.REPLACE_EXISTING : StandardCopyOption.COPY_ATTRIBUTES);
-
-            // Report progress after completion (for large files, streaming would be better)
-            if (progressCallback != null) {
-                progressCallback.accept(fileSize);
-            }
-
-            logger.debug("Copied file from {} to {} ({} bytes)", source, destination, fileSize);
         } catch (FileAlreadyExistsException e) {
             throw new FileOperationException(
                     "Destination file already exists",
@@ -335,10 +348,23 @@ public class FileHandler {
                     source.toString(),
                     e);
         }
+
+        // Best-effort last-modified preservation (COPY_ATTRIBUTES
+        // replacement for the streamed copy; failure is non-fatal).
+        try {
+            Files.setLastModifiedTime(destination, Files.getLastModifiedTime(source));
+        } catch (IOException e) {
+            logger.debug("Could not preserve last-modified time for {}", destination, e);
+        }
+
+        logger.debug("Copied file from {} to {} ({} bytes)", source, destination, bytesCopied);
     }
 
     /**
      * Moves a file from source to destination.
+     * Delegates to {@link FileUtils#moveFile(Path, Path, boolean)}: the
+     * validation and error mapping is shared with the static utility so it
+     * exists in exactly one place.
      *
      * @param source      The source file path
      * @param destination The destination file path
@@ -347,33 +373,8 @@ public class FileHandler {
      */
     public void moveFile(Path source, Path destination, boolean overwrite)
             throws FileOperationException {
-        if (!exists(source)) {
-            throw new FileOperationException(
-                    "Source file does not exist",
-                    ErrorCode.FILE_NOT_FOUND,
-                    source.toString());
-        }
-
-        try {
-            if (overwrite) {
-                Files.move(source, destination, StandardCopyOption.REPLACE_EXISTING);
-            } else {
-                Files.move(source, destination);
-            }
-            logger.debug("Moved file from {} to {}", source, destination);
-        } catch (FileAlreadyExistsException e) {
-            throw new FileOperationException(
-                    "Destination file already exists",
-                    ErrorCode.FILE_ALREADY_EXISTS,
-                    destination.toString(),
-                    e);
-        } catch (IOException e) {
-            throw new FileOperationException(
-                    "Failed to move file",
-                    ErrorCode.FILE_IO_ERROR,
-                    source.toString(),
-                    e);
-        }
+        FileUtils.moveFile(source, destination, overwrite);
+        logger.debug("Moved file from {} to {}", source, destination);
     }
 
     /**
@@ -606,6 +607,15 @@ public class FileHandler {
             // Check against known magic bytes
             for (Map.Entry<String, byte[][]> entry : MAGIC_BYTES.entrySet()) {
                 String formatName = entry.getKey();
+                // "ZIP" is a container signature, not a terminal format: it
+                // must fall through to detectZipBasedFormat() below. Without
+                // this skip the loop would match the ZIP entry first and
+                // FileFormat.valueOf("ZIP") / mapFormatName("ZIP") would
+                // return UNKNOWN, making the ZIP content inspection dead code
+                // and reducing every zip-based file to extension detection.
+                if ("ZIP".equals(formatName)) {
+                    continue;
+                }
                 for (byte[] signature : entry.getValue()) {
                     if (matchesMagicBytes(header, signature)) {
                         // Convert format name to FileFormat enum
@@ -688,15 +698,114 @@ public class FileHandler {
     }
 
     /**
-     * Detects ZIP-based document formats by examining internal structure.
+     * Detects ZIP-based document formats by examining the ZIP container's
+     * content, falling back to the file extension.
      *
-     * @param filePath The file path
-     * @return The detected format
+     * <p>
+     * Trusting the extension alone misroutes renamed archives (e.g. a .jar
+     * renamed to .docx), so the internal structure is inspected first:
+     * </p>
+     * <ul>
+     * <li>ODT/ODS/ODP/EPUB: the {@code mimetype} entry (always the first
+     * entry in conforming ODF/EPUB files) is mapped by its exact MIME
+     * string.</li>
+     * <li>DOCX/XLSX/PPTX: presence of a {@code [Content_Types].xml} entry
+     * whose content references wordprocessingml / spreadsheetml /
+     * presentationml respectively.</li>
+     * </ul>
+     *
+     * <p>
+     * Guard rails against hostile archives: at most
+     * {@value #MAX_ZIP_ENTRIES_TO_SCAN} entries are scanned, at most
+     * {@value #MAX_ZIP_ENTRY_READ_BYTES} bytes are read from any single
+     * entry, and every parse failure (truncated zip, unsupported zip
+     * variants, unexpected runtime errors) falls back to the extension-based
+     * result. The extension is always the final fallback.
+     * </p>
+     *
+     * @param filePath The file path (already known to start with ZIP magic
+     *                 bytes)
+     * @return The detected format, or the extension-based result when the
+     *         content is not recognizable
      */
     private FileFormat detectZipBasedFormat(Path filePath) {
+        FileFormat byExtension = detectZipBasedFormatByExtension(filePath);
+        try (ZipFile zipFile = new ZipFile(filePath.toFile())) {
+            ZipEntry mimetypeEntry = null;
+            ZipEntry contentTypesEntry = null;
+            int scanned = 0;
+            Enumeration<? extends ZipEntry> entries = zipFile.entries();
+            while (entries.hasMoreElements() && scanned < MAX_ZIP_ENTRIES_TO_SCAN) {
+                ZipEntry entry = entries.nextElement();
+                scanned++;
+                String name = entry.getName();
+                if ("mimetype".equals(name)) {
+                    mimetypeEntry = entry;
+                } else if ("[Content_Types].xml".equals(name)) {
+                    contentTypesEntry = entry;
+                }
+                if (mimetypeEntry != null && contentTypesEntry != null) {
+                    break;
+                }
+            }
+
+            // ODF and EPUB archives identify themselves via the mimetype entry
+            if (mimetypeEntry != null) {
+                String mime = readZipEntryAsString(zipFile, mimetypeEntry).trim();
+                FileFormat format = ZIP_MIME_FORMATS.get(mime);
+                if (format != null) {
+                    logger.debug("Detected {} by ZIP mimetype entry '{}': {}", format, mime, filePath);
+                    return format;
+                }
+            }
+
+            // OOXML archives carry [Content_Types].xml naming the part types
+            if (contentTypesEntry != null) {
+                String contentTypes = readZipEntryAsString(zipFile, contentTypesEntry);
+                if (contentTypes.contains("wordprocessingml")) {
+                    return logZipContentDetection(filePath, FileFormat.DOCX);
+                }
+                if (contentTypes.contains("spreadsheetml")) {
+                    return logZipContentDetection(filePath, FileFormat.XLSX);
+                }
+                if (contentTypes.contains("presentationml")) {
+                    return logZipContentDetection(filePath, FileFormat.PPTX);
+                }
+            }
+
+            return byExtension;
+        } catch (Exception e) {
+            // Unparseable/truncated zip or unexpected failure: the extension
+            // stays authoritative rather than guessing UNKNOWN.
+            logger.debug("ZIP content inspection failed for {}, using extension fallback", filePath, e);
+            return byExtension;
+        }
+    }
+
+    private FileFormat logZipContentDetection(Path filePath, FileFormat format) {
+        logger.debug("Detected {} by [Content_Types].xml content: {}", format, filePath);
+        return format;
+    }
+
+    /**
+     * Reads a ZIP entry as a string, capped at
+     * {@value #MAX_ZIP_ENTRY_READ_BYTES} bytes to bound memory on hostile
+     * archives.
+     */
+    private String readZipEntryAsString(ZipFile zipFile, ZipEntry entry) throws IOException {
+        try (InputStream input = zipFile.getInputStream(entry)) {
+            byte[] bytes = input.readNBytes(MAX_ZIP_ENTRY_READ_BYTES);
+            return new String(bytes, StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * Maps a ZIP file's extension to a ZIP-based document format. This is the
+     * final fallback used when the ZIP content is missing or unrecognized.
+     */
+    private FileFormat detectZipBasedFormatByExtension(Path filePath) {
         String extension = PathUtils.getExtension(filePath.toString()).toUpperCase();
 
-        // Use extension as hint for ZIP-based formats
         return switch (extension) {
             case "DOCX" -> FileFormat.DOCX;
             case "XLSX" -> FileFormat.XLSX;
@@ -830,18 +939,39 @@ public class FileHandler {
      * Tries to open a directory using xdg-open.
      * 
      * Task 64: Implement xdg-open command execution
-     * 
+     *
      * @param directory The directory to open
      * @return true if successful, false otherwise
      */
     private boolean tryXdgOpen(Path directory) {
         try {
             ProcessBuilder pb = new ProcessBuilder("xdg-open", directory.toString());
-            pb.start(); // Don't wait for process to complete
+            // DISCARD so a chatty child never blocks on a full stdout pipe
+            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+            Process process = pb.start();
+            // xdg-open normally exits right after handing off to the desktop
+            // environment; reaping it avoids a zombie and detects failure.
+            boolean exited = process.waitFor(10, TimeUnit.SECONDS);
+            if (!exited) {
+                process.destroyForcibly();
+                process.waitFor(5, TimeUnit.SECONDS);
+                logger.debug("xdg-open did not exit for: {}", directory);
+                // Hand-off likely already happened; treat as success
+                return true;
+            }
+            if (process.exitValue() != 0) {
+                logger.debug("xdg-open exited with {}: {}", process.exitValue(), directory);
+                return false;
+            }
             logger.debug("Successfully launched xdg-open for: {}", directory);
             return true;
         } catch (IOException e) {
             logger.debug("xdg-open failed: {}", e.getMessage());
+            return false;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            logger.debug("xdg-open wait interrupted for: {}", directory);
             return false;
         }
     }
@@ -850,7 +980,7 @@ public class FileHandler {
      * Tries to open a file using common Linux file managers.
      * 
      * Task 65: Implement fallback file manager execution
-     * 
+     *
      * Tries each file manager in order: nautilus, dolphin, thunar, nemo, pcmanfm.
      * Most file managers accept a file path and will show it selected in the parent
      * directory.
@@ -865,7 +995,11 @@ public class FileHandler {
         for (String fileManager : fileManagers) {
             try {
                 ProcessBuilder pb = new ProcessBuilder(fileManager, filePath.toString());
-                pb.start(); // Don't wait for process to complete
+                // GUI managers keep running; do NOT waitFor, but DISCARD so
+                // they never block writing to an unread pipe.
+                pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+                pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+                pb.start();
                 logger.debug("Successfully launched {} for: {}", fileManager, filePath);
                 return true;
             } catch (IOException e) {

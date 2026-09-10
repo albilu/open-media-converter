@@ -13,9 +13,11 @@
 # Usage: ./scripts/build-arch.sh [OPTIONS]
 #
 # Options:
-#   --skip-build    Skip Maven build (use existing JAR)
-#   --no-validate   Skip namcap validation
-#   --help          Show this help message
+#   --skip-build     Skip Maven build (use existing JAR)
+#   --no-validate    Skip namcap validation
+#   --allow-missing  Exit 0 (with a warning) instead of failing when
+#                    makepkg is not installed on this host
+#   --help           Show this help message
 #
 # Output: dist/open-media-converter-1.0.0-1-x86_64.pkg.tar.zst
 ###############################################################################
@@ -32,6 +34,19 @@ PACKAGING_DIR="${OMC_GTK_ROOT}/packaging/arch"
 
 # Auto-detect version from POM file
 detect_version() {
+    # Preferred: ask Maven for the project version. Grepping the POM for the
+    # first <version> tag is fragile (it can match a parent or plugin
+    # declaration instead of the project version).
+    if command -v mvn &> /dev/null; then
+        local version
+        if version="$(cd "${PROJECT_ROOT}" && mvn -q help:evaluate -Dexpression=project.version -DforceStdout 2>/dev/null | tail -n 1 | tr -d '[:space:]')" \
+                && [ -n "$version" ]; then
+            echo "$version"
+            return 0
+        fi
+        echo "Warning: mvn help:evaluate failed, falling back to POM grep for version detection" >&2
+    fi
+    # Fallback: first <version> tag in the POM, then hardcoded default
     local pom_file="${OMC_GTK_ROOT}/pom.xml"
     if [ ! -f "$pom_file" ]; then
         pom_file="${PROJECT_ROOT}/pom.xml"
@@ -67,6 +82,7 @@ NC='\033[0m'
 # Parse command-line options
 SKIP_BUILD=false
 NO_VALIDATE=false
+ALLOW_MISSING=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -76,6 +92,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-validate)
             NO_VALIDATE=true
+            shift
+            ;;
+        --allow-missing)
+            ALLOW_MISSING=true
             shift
             ;;
         --help)
@@ -118,8 +138,14 @@ check_prerequisites() {
     local missing=false
     
     if ! command -v makepkg &> /dev/null; then
+        if [ "$ALLOW_MISSING" = true ]; then
+            log_warn "makepkg not found - skipping Arch package (--allow-missing)"
+            log_warn "Arch packages can only be built on Arch Linux systems"
+            exit 0
+        fi
         log_error "makepkg not found. Install with:"
         log_error "  sudo pacman -S base-devel"
+        log_error "Or re-run with --allow-missing to skip the Arch package"
         missing=true
     else
         log_success "makepkg found"

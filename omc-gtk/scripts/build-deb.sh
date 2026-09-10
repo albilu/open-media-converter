@@ -32,7 +32,19 @@ PACKAGING_DIR="${OMC_GTK_ROOT}/packaging/deb"
 
 # Auto-detect version from POM file
 detect_version() {
-    # Try omc-gtk module pom.xml first, then fall back to root pom.xml
+    # Preferred: ask Maven for the project version. Grepping the POM for the
+    # first <version> tag is fragile (it can match a parent or plugin
+    # declaration instead of the project version).
+    if command -v mvn &> /dev/null; then
+        local version
+        if version="$(cd "${PROJECT_ROOT}" && mvn -q help:evaluate -Dexpression=project.version -DforceStdout 2>/dev/null | tail -n 1 | tr -d '[:space:]')" \
+                && [ -n "$version" ]; then
+            echo "$version"
+            return 0
+        fi
+        echo "Warning: mvn help:evaluate failed, falling back to POM grep for version detection" >&2
+    fi
+    # Fallback: first <version> tag in the POM, then hardcoded default
     local pom_file="${OMC_GTK_ROOT}/pom.xml"
     if [ ! -f "$pom_file" ]; then
         pom_file="${PROJECT_ROOT}/pom.xml"

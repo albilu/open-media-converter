@@ -16,8 +16,9 @@
         <maven.compiler.source>23</maven.compiler.source>
         <maven.compiler.target>23</maven.compiler.target>
         <maven.build.timestamp.format>yyyy-MM-dd HH:mm:ss</maven.build.timestamp.format>
-        
-        <!-- Dependency versions -->
+
+        <!-- Dependency versions: pinned here via dependencyManagement;
+             child modules must reference these deps without versions -->
         <java-gi.version>0.12.2</java-gi.version>
         <jackson.version>2.17.0</jackson.version>
         <slf4j.version>2.0.12</slf4j.version>
@@ -26,13 +27,129 @@
         <mockito.version>5.11.0</mockito.version>
     </properties>
 
+    <!-- Central version management for all modules (versions kept exactly
+         as previously declared inline by the child poms) -->
+    <dependencyManagement>
+        <dependencies>
+            <!-- GTK 4 bindings via java-gi -->
+            <dependency>
+                <groupId>io.github.jwharm.javagi</groupId>
+                <artifactId>gtk</artifactId>
+                <version>${java-gi.version}</version>
+            </dependency>
+
+            <!-- JSON processing with Jackson -->
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-databind</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-annotations</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.datatype</groupId>
+                <artifactId>jackson-datatype-jsr310</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+
+            <!-- Logging -->
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-api</artifactId>
+                <version>${slf4j.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>ch.qos.logback</groupId>
+                <artifactId>logback-classic</artifactId>
+                <version>${logback.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>ch.qos.logback</groupId>
+                <artifactId>logback-core</artifactId>
+                <version>${logback.version}</version>
+            </dependency>
+
+            <!-- Testing -->
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter</artifactId>
+                <version>${junit.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-core</artifactId>
+                <version>${mockito.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-junit-jupiter</artifactId>
+                <version>${mockito.version}</version>
+                <scope>test</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <build>
         <directory>${omc.build.directory}</directory>
+        <plugins>
+            <!-- Fail fast on unsuitable build environments -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions>
+                    <execution>
+                        <id>enforce-build-environment</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireJavaVersion>
+                                    <version>[23,)</version>
+                                    <message>Open Media Converter requires Java 23 or newer to build.</message>
+                                </requireJavaVersion>
+                                <requireMavenVersion>
+                                    <version>[3.8,)</version>
+                                    <message>Open Media Converter requires Maven 3.8 or newer to build.</message>
+                                </requireMavenVersion>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
     </build>
 
     <modules>
         <module>core</module>
         <module>omc-gtk</module>
     </modules>
+
+    <profiles>
+        <!-- Use the compiler "release" flag (API-safe cross-compilation)
+             whenever the running JDK ships the historical platform data
+             (ct.sym) that the release flag requires. JRE-only installs
+             (e.g. Debian's openjdk-23-jre) lack ct.sym and cannot honour
+             the release flag at all, so those fall back to source/target
+             from the properties above. On a full JDK the release flag
+             takes precedence over source/target. -->
+        <profile>
+            <id>compiler-release</id>
+            <activation>
+                <file>
+                    <exists>${java.home}/lib/ct.sym</exists>
+                </file>
+            </activation>
+            <properties>
+                <maven.compiler.release>23</maven.compiler.release>
+            </properties>
+        </profile>
+    </profiles>
 
 </project>

@@ -17,7 +17,7 @@
 #   --no-validate   Skip rpmlint validation
 #   --help          Show this help message
 #
-# Output: dist/open-media-converter-1.0.0-1.x86_64.rpm
+# Output: dist/open-media-converter-1.0.0-1.<uname -m>.rpm
 ###############################################################################
 
 set -e  # Exit on error
@@ -32,7 +32,19 @@ PACKAGING_DIR="${OMC_GTK_ROOT}/packaging/rpm"
 
 # Auto-detect version from POM file
 detect_version() {
-    # Try omc-gtk module pom.xml first, then fall back to root pom.xml
+    # Preferred: ask Maven for the project version. Grepping the POM for the
+    # first <version> tag is fragile (it can match a parent or plugin
+    # declaration instead of the project version).
+    if command -v mvn &> /dev/null; then
+        local version
+        if version="$(cd "${PROJECT_ROOT}" && mvn -q help:evaluate -Dexpression=project.version -DforceStdout 2>/dev/null | tail -n 1 | tr -d '[:space:]')" \
+                && [ -n "$version" ]; then
+            echo "$version"
+            return 0
+        fi
+        echo "Warning: mvn help:evaluate failed, falling back to POM grep for version detection" >&2
+    fi
+    # Fallback: first <version> tag in the POM, then hardcoded default
     local pom_file="${OMC_GTK_ROOT}/pom.xml"
     if [ ! -f "$pom_file" ]; then
         pom_file="${PROJECT_ROOT}/pom.xml"
@@ -55,7 +67,17 @@ APP_NAME="open-media-converter"
 APP_SNAPSHOT_VERSION="$(detect_version)"
 APP_VERSION="${APP_SNAPSHOT_VERSION%-SNAPSHOT}"  # Remove -SNAPSHOT suffix for package version
 RELEASE="1"
-ARCH="x86_64"
+
+# Target architecture from the host (RPM arch names match uname -m);
+# exit with an explicit error when the host architecture is unsupported
+ARCH="$(uname -m)"
+if [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "aarch64" ]; then
+    echo "Error: unsupported architecture '${ARCH}' for RPM packaging." >&2
+    echo "Supported: x86_64, aarch64." >&2
+    echo "Missing for '${ARCH}': rpmbuild toolchain support and arch-matching" >&2
+    echo "runtime artifacts (GTK 4 libraries, Java 23 JRE)." >&2
+    exit 1
+fi
 RPM_FILENAME="${APP_NAME}-${APP_VERSION}-${RELEASE}.${ARCH}.rpm"
 
 # Color output
@@ -312,6 +334,9 @@ copy_spec_file() {
         
         # Update version in spec file dynamically
         sed -i "s/^Version:.*/Version:        ${APP_VERSION}/" "${BUILD_DIR}/SPECS/open-media-converter.spec"
+        
+        # Keep the packaged architecture in sync with the host architecture
+        sed -i "s/^BuildArch:.*/BuildArch:      ${ARCH}/" "${BUILD_DIR}/SPECS/open-media-converter.spec"
         
         # Update JAR filename in spec file (install and files sections)
         # Match both literal app name and RPM %{name} variable

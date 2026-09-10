@@ -17,10 +17,10 @@
 #   --skip-build         Skip Maven build (use existing JAR)
 #   --no-embedded-tools  Skip embedding ffmpeg/pandoc (smaller package)
 #   --no-gtk-bundle      Use system GTK instead of bundling (not recommended)
-#   --arch ARCH          Target architecture (x86_64 or aarch64, default: x86_64)
+#   --arch ARCH          Target architecture (x86_64 or aarch64, default: host architecture)
 #   --help               Show this help message
 #
-# Output: dist/Open_Media_Converter-1.0.0-x86_64.AppImage
+# Output: dist/Open_Media_Converter-1.0.0-<arch>.AppImage
 #
 # The resulting AppImage will be:
 #   - Fully self-contained with Java 23 runtime
@@ -43,6 +43,19 @@ DOWNLOAD_DIR="${BUILD_DIR}/downloads"
 
 # Auto-detect version from POM file
 detect_version() {
+    # Preferred: ask Maven for the project version. Grepping the POM for the
+    # first <version> tag is fragile (it can match a parent or plugin
+    # declaration instead of the project version).
+    if command -v mvn &> /dev/null; then
+        local version
+        if version="$(cd "${PROJECT_ROOT}" && mvn -q help:evaluate -Dexpression=project.version -DforceStdout 2>/dev/null | tail -n 1 | tr -d '[:space:]')" \
+                && [ -n "$version" ]; then
+            echo "$version"
+            return 0
+        fi
+        echo "Warning: mvn help:evaluate failed, falling back to POM grep for version detection" >&2
+    fi
+    # Fallback: first <version> tag in the POM, then hardcoded default
     local pom_file="${OMC_GTK_ROOT}/pom.xml"
     if [ ! -f "$pom_file" ]; then
         pom_file="${PROJECT_ROOT}/pom.xml"
@@ -63,12 +76,8 @@ detect_version() {
 APP_NAME="open-media-converter"
 APP_SNAPSHOT_VERSION="$(detect_version)"
 APP_VERSION="${APP_SNAPSHOT_VERSION%-SNAPSHOT}"  # Remove -SNAPSHOT suffix for package version
-ARCH="x86_64"
-APPIMAGE_FILENAME="Open_Media_Converter-${APP_VERSION}-${ARCH}.AppImage"
-
-# Download URLs (using well-known stable sources)
-JRE_URL="https://github.com/adoptium/temurin23-binaries/releases/download/jdk-23.0.1%2B11/OpenJDK23U-jre_x64_linux_hotspot_23.0.1_11.tar.gz"
-APPIMAGETOOL_URL="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+# Target architecture: detected from the host unless overridden with --arch
+ARCH=""
 
 # Color output
 RED='\033[0;31m'
@@ -113,6 +122,38 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Resolve and validate the target architecture (default: host architecture,
+# mapped the same way prepare-tools.py maps to linux-x86_64/linux-aarch64)
+if [ -z "$ARCH" ]; then
+    ARCH="$(uname -m)"
+fi
+case "$ARCH" in
+    x86_64|aarch64) ;;
+    *)
+        echo "Error: unsupported architecture '${ARCH}' for AppImage packaging." >&2
+        echo "Supported architectures: x86_64, aarch64." >&2
+        echo "Missing for '${ARCH}': appimagetool-${ARCH}.AppImage, Temurin 23 JRE" >&2
+        echo "and GTK 4 runtime artifacts for this architecture." >&2
+        exit 1
+        ;;
+esac
+
+# Arch-specific download URLs (using well-known stable sources)
+# and Debian multiarch triplet for the bundled GTK libraries
+case "$ARCH" in
+    x86_64)
+        JRE_URL="https://github.com/adoptium/temurin23-binaries/releases/download/jdk-23.0.1%2B11/OpenJDK23U-jre_x64_linux_hotspot_23.0.1_11.tar.gz"
+        MULTIARCH_TRIPLET="x86_64-linux-gnu"
+        LDCONFIG_ARCH_FILTER="x86-64"
+        ;;
+    aarch64)
+        JRE_URL="https://github.com/adoptium/temurin23-binaries/releases/download/jdk-23.0.1%2B11/OpenJDK23U-jre_aarch64_linux_hotspot_23.0.1_11.tar.gz"
+        MULTIARCH_TRIPLET="aarch64-linux-gnu"
+        LDCONFIG_ARCH_FILTER="aarch64"
+        ;;
+esac
+APPIMAGETOOL_URL="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${ARCH}.AppImage"
 
 # Update filenames based on architecture
 APPIMAGE_FILENAME="Open_Media_Converter-${APP_VERSION}-${ARCH}.AppImage"
@@ -336,9 +377,9 @@ bundle_gtk_libraries() {
     log_step "Bundling GTK 4 libraries"
     
     # Create library directories
-    mkdir -p "$APPDIR/usr/lib/x86_64-linux-gnu"
-    mkdir -p "$APPDIR/usr/lib/x86_64-linux-gnu/girepository-1.0"
-    mkdir -p "$APPDIR/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders"
+    mkdir -p "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}"
+    mkdir -p "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/girepository-1.0"
+    mkdir -p "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/gdk-pixbuf-2.0/2.10.0/loaders"
     
     # List of critical GTK 4 libraries to bundle
     local gtk_libs=(
@@ -365,14 +406,14 @@ bundle_gtk_libraries() {
     
     for lib in "${gtk_libs[@]}"; do
         # Find library on system
-        local lib_path=$(ldconfig -p | grep "$lib" | grep x86-64 | awk '{print $NF}' | head -1)
+        local lib_path=$(ldconfig -p | grep "$lib" | grep -i "$LDCONFIG_ARCH_FILTER" | awk '{print $NF}' | head -1)
         
         if [ -n "$lib_path" ] && [ -f "$lib_path" ]; then
-            cp -P "$lib_path" "$APPDIR/usr/lib/x86_64-linux-gnu/"
+            cp -P "$lib_path" "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/"
             # Also copy any symlinks
             local lib_dir=$(dirname "$lib_path")
             local lib_base=$(basename "$lib" | cut -d. -f1,2,3)
-            cp -P "$lib_dir/$lib_base"* "$APPDIR/usr/lib/x86_64-linux-gnu/" 2>/dev/null || true
+            cp -P "$lib_dir/$lib_base"* "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/" 2>/dev/null || true
             copied=$((copied + 1))
         else
             log_warn "  Library not found: $lib (AppImage may need system version)"
@@ -384,19 +425,19 @@ bundle_gtk_libraries() {
     
     # Copy GObject Introspection typelibs
     log_info "Copying GObject Introspection typelibs..."
-    local typelib_dir="/usr/lib/x86_64-linux-gnu/girepository-1.0"
+    local typelib_dir="/usr/lib/${MULTIARCH_TRIPLET}/girepository-1.0"
     if [ -d "$typelib_dir" ]; then
-        cp "$typelib_dir/Gtk-4.0.typelib" "$APPDIR/usr/lib/x86_64-linux-gnu/girepository-1.0/" 2>/dev/null || true
-        cp "$typelib_dir/GLib-2.0.typelib" "$APPDIR/usr/lib/x86_64-linux-gnu/girepository-1.0/" 2>/dev/null || true
-        cp "$typelib_dir/GObject-2.0.typelib" "$APPDIR/usr/lib/x86_64-linux-gnu/girepository-1.0/" 2>/dev/null || true
-        cp "$typelib_dir/Gio-2.0.typelib" "$APPDIR/usr/lib/x86_64-linux-gnu/girepository-1.0/" 2>/dev/null || true
-        cp "$typelib_dir/Gdk-4.0.typelib" "$APPDIR/usr/lib/x86_64-linux-gnu/girepository-1.0/" 2>/dev/null || true
-        cp "$typelib_dir/GdkPixbuf-2.0.typelib" "$APPDIR/usr/lib/x86_64-linux-gnu/girepository-1.0/" 2>/dev/null || true
-        cp "$typelib_dir/Pango-1.0.typelib" "$APPDIR/usr/lib/x86_64-linux-gnu/girepository-1.0/" 2>/dev/null || true
-        cp "$typelib_dir/cairo-1.0.typelib" "$APPDIR/usr/lib/x86_64-linux-gnu/girepository-1.0/" 2>/dev/null || true
-        cp "$typelib_dir/HarfBuzz-0.0.typelib" "$APPDIR/usr/lib/x86_64-linux-gnu/girepository-1.0/" 2>/dev/null || true
-        cp "$typelib_dir/Graphene-1.0.typelib" "$APPDIR/usr/lib/x86_64-linux-gnu/girepository-1.0/" 2>/dev/null || true
-        local typelib_count=$(ls -1 "$APPDIR/usr/lib/x86_64-linux-gnu/girepository-1.0" | wc -l)
+        cp "$typelib_dir/Gtk-4.0.typelib" "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/girepository-1.0/" 2>/dev/null || true
+        cp "$typelib_dir/GLib-2.0.typelib" "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/girepository-1.0/" 2>/dev/null || true
+        cp "$typelib_dir/GObject-2.0.typelib" "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/girepository-1.0/" 2>/dev/null || true
+        cp "$typelib_dir/Gio-2.0.typelib" "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/girepository-1.0/" 2>/dev/null || true
+        cp "$typelib_dir/Gdk-4.0.typelib" "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/girepository-1.0/" 2>/dev/null || true
+        cp "$typelib_dir/GdkPixbuf-2.0.typelib" "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/girepository-1.0/" 2>/dev/null || true
+        cp "$typelib_dir/Pango-1.0.typelib" "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/girepository-1.0/" 2>/dev/null || true
+        cp "$typelib_dir/cairo-1.0.typelib" "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/girepository-1.0/" 2>/dev/null || true
+        cp "$typelib_dir/HarfBuzz-0.0.typelib" "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/girepository-1.0/" 2>/dev/null || true
+        cp "$typelib_dir/Graphene-1.0.typelib" "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/girepository-1.0/" 2>/dev/null || true
+        local typelib_count=$(ls -1 "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/girepository-1.0" | wc -l)
         log_info "  Copied $typelib_count typelibs"
     else
         log_warn "  Typelib directory not found: $typelib_dir"
@@ -404,17 +445,17 @@ bundle_gtk_libraries() {
     
     # Copy GdkPixbuf loaders
     log_info "Copying GdkPixbuf loaders..."
-    local pixbuf_loaders="/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders"
+    local pixbuf_loaders="/usr/lib/${MULTIARCH_TRIPLET}/gdk-pixbuf-2.0/2.10.0/loaders"
     if [ -d "$pixbuf_loaders" ]; then
-        cp -r "$pixbuf_loaders"/* "$APPDIR/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders/" 2>/dev/null || true
+        cp -r "$pixbuf_loaders"/* "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/gdk-pixbuf-2.0/2.10.0/loaders/" 2>/dev/null || true
         # Update loader cache to use AppDir paths
         if command -v gdk-pixbuf-query-loaders &> /dev/null; then
-            GDK_PIXBUF_MODULEDIR="$APPDIR/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders" \
-                gdk-pixbuf-query-loaders > "$APPDIR/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache" 2>/dev/null || true
+            GDK_PIXBUF_MODULEDIR="$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/gdk-pixbuf-2.0/2.10.0/loaders" \
+                gdk-pixbuf-query-loaders > "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}/gdk-pixbuf-2.0/2.10.0/loaders.cache" 2>/dev/null || true
         fi
     fi
     
-    local gtk_size=$(du -sh "$APPDIR/usr/lib/x86_64-linux-gnu" | cut -f1)
+    local gtk_size=$(du -sh "$APPDIR/usr/lib/${MULTIARCH_TRIPLET}" | cut -f1)
     log_success "GTK libraries bundled (${gtk_size})"
 }
 

@@ -24,6 +24,13 @@
 #   --all                Build all packages (default)
 #   --skip-build         Skip Maven build (use existing JAR)
 #   --no-embedded-tools  Skip embedding ffmpeg/pandoc in AppImage
+#   --skip-validate      Skip package validation (lintian/rpmlint/namcap).
+#                        Default: validate whenever the tool is installed,
+#                        warn and skip when it is not.
+#   --allow-missing      Do not fail when an optional packager toolchain
+#                        (e.g. makepkg on non-Arch hosts) is unavailable;
+#                        the affected package is skipped with a warning.
+#                        Default: missing toolchains fail the build.
 #   --clean              Clean build/ directory before building (dist/ always cleaned)
 #   --help               Show this help message
 #
@@ -55,12 +62,24 @@ BUILD_DIR="${PROJECT_ROOT}/build"
 
 # Auto-detect version from POM file
 detect_version() {
-    # Try omc-gtk module pom.xml first, then fall back to root pom.xml
+    # Preferred: ask Maven for the project version. Grepping the POM for the
+    # first <version> tag is fragile (it can match a parent or plugin
+    # declaration instead of the project version).
+    if command -v mvn &> /dev/null; then
+        local version
+        if version="$(cd "${PROJECT_ROOT}" && mvn -q help:evaluate -Dexpression=project.version -DforceStdout 2>/dev/null | tail -n 1 | tr -d '[:space:]')" \
+                && [ -n "$version" ]; then
+            echo "$version"
+            return 0
+        fi
+        echo "Warning: mvn help:evaluate failed, falling back to POM grep for version detection" >&2
+    fi
+    # Fallback: first <version> tag in the POM, then hardcoded default
     local pom_file="${OMC_GTK_ROOT}/pom.xml"
     if [ ! -f "$pom_file" ]; then
         pom_file="${PROJECT_ROOT}/pom.xml"
     fi
-    
+
     if [ -f "$pom_file" ]; then
         # Extract version from pom.xml (handles SNAPSHOT versions)
         local version=$(grep -m 1 "<version>" "$pom_file" | sed 's/.*<version>\(.*\)<\/version>.*/\1/' | tr -d '[:space:]')
@@ -77,6 +96,18 @@ detect_version() {
 APP_NAME="Open Media Converter"
 APP_SNAPSHOT_VERSION="$(detect_version)"  # Keep SNAPSHOT for JAR filename
 APP_VERSION="${APP_SNAPSHOT_VERSION%-SNAPSHOT}"  # Remove -SNAPSHOT suffix for package version
+
+# Target architecture for package naming (RPM/AppImage follow uname -m;
+# DEB follows dpkg's architecture naming)
+ARCH="$(uname -m)"
+if command -v dpkg &> /dev/null; then
+    DEB_ARCH="$(dpkg --print-architecture)"
+else
+    case "$ARCH" in
+        x86_64) DEB_ARCH="amd64" ;;
+        *)      DEB_ARCH="$ARCH" ;;
+    esac
+fi
 
 # Color output
 RED='\033[0;31m'
@@ -96,6 +127,8 @@ BUILD_APPIMAGE=false
 SKIP_BUILD=false
 NO_EMBEDDED_TOOLS=false
 CLEAN_BUILD=false
+SKIP_VALIDATE=false
+ALLOW_MISSING=false
 
 # Parse command-line options
 if [ $# -eq 0 ]; then
@@ -137,6 +170,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-embedded-tools)
             NO_EMBEDDED_TOOLS=true
+            shift
+            ;;
+        --skip-validate)
+            SKIP_VALIDATE=true
+            shift
+            ;;
+        --allow-missing)
+            ALLOW_MISSING=true
             shift
             ;;
         --clean)
@@ -376,7 +417,9 @@ build_deb() {
     if [ "$SKIP_BUILD" = true ]; then
         deb_args="$deb_args --skip-build"
     fi
-    deb_args="$deb_args --no-validate"  # Skip lintian in batch mode
+    if [ "$SKIP_VALIDATE" = true ]; then
+        deb_args="$deb_args --no-validate"  # Only skip lintian when explicitly requested
+    fi
     
     log_step "Running build-deb.sh..."
     
@@ -394,7 +437,7 @@ build_deb() {
     rm -f "$deb_output"
     
     # Check if DEB build succeeded
-    if [ $deb_exit_code -eq 0 ] && [ -f "${DIST_DIR}/open-media-converter_${APP_VERSION}_amd64.deb" ]; then
+    if [ $deb_exit_code -eq 0 ] && [ -f "${DIST_DIR}/open-media-converter_${APP_VERSION}_${DEB_ARCH}.deb" ]; then
         log_success "Debian package built"
     else
         log_error "Debian package build failed"
@@ -426,7 +469,9 @@ build_rpm() {
     if [ "$SKIP_BUILD" = true ]; then
         rpm_args="$rpm_args --skip-build"
     fi
-    rpm_args="$rpm_args --no-validate"  # Skip rpmlint in batch mode
+    if [ "$SKIP_VALIDATE" = true ]; then
+        rpm_args="$rpm_args --no-validate"  # Only skip rpmlint when explicitly requested
+    fi
     
     log_step "Running build-rpm.sh..."
     
@@ -444,7 +489,7 @@ build_rpm() {
     rm -f "$rpm_output"
     
     # Check if RPM build succeeded
-    if [ $rpm_exit_code -eq 0 ] && [ -f "${DIST_DIR}/open-media-converter-${APP_VERSION}-1.x86_64.rpm" ]; then
+    if [ $rpm_exit_code -eq 0 ] && [ -f "${DIST_DIR}/open-media-converter-${APP_VERSION}-1.${ARCH}.rpm" ]; then
         log_success "RPM package built"
     else
         log_error "RPM package build failed"
@@ -466,9 +511,15 @@ build_arch() {
     
     # Check if makepkg is available
     if ! command -v makepkg &> /dev/null; then
-        log_warn "makepkg not found - skipping Arch package"
-        log_warn "Arch packages can only be built on Arch Linux systems"
-        return
+        if [ "$ALLOW_MISSING" = true ]; then
+            log_warn "makepkg not found - skipping Arch package (--allow-missing)"
+            log_warn "Arch packages can only be built on Arch Linux systems"
+            return 0
+        fi
+        log_error "makepkg not found - cannot build the Arch package"
+        log_error "Arch packages can only be built on Arch Linux systems (sudo pacman -S base-devel)"
+        log_error "Re-run with --allow-missing to skip Arch packages instead of failing"
+        exit 1
     fi
     
     local arch_script="${SCRIPT_DIR}/build-arch.sh"
@@ -483,7 +534,12 @@ build_arch() {
     if [ "$SKIP_BUILD" = true ]; then
         arch_args="$arch_args --skip-build"
     fi
-    arch_args="$arch_args --no-validate"  # Skip namcap in batch mode
+    if [ "$SKIP_VALIDATE" = true ]; then
+        arch_args="$arch_args --no-validate"  # Only skip namcap when explicitly requested
+    fi
+    if [ "$ALLOW_MISSING" = true ]; then
+        arch_args="$arch_args --allow-missing"  # Propagate to build-arch.sh
+    fi
     
     log_step "Running build-arch.sh..."
     
@@ -554,7 +610,7 @@ build_appimage() {
     rm -f "$appimage_output"
     
     # Check if AppImage build succeeded
-    if [ $appimage_exit_code -eq 0 ] && [ -f "${DIST_DIR}/Open_Media_Converter-${APP_VERSION}-x86_64.AppImage" ]; then
+    if [ $appimage_exit_code -eq 0 ] && [ -f "${DIST_DIR}/Open_Media_Converter-${APP_VERSION}-${ARCH}.AppImage" ]; then
         log_success "AppImage built"
     else
         log_error "AppImage build failed"
@@ -577,7 +633,7 @@ show_summary() {
     
     # Show built packages
     if [ "$BUILD_DEB" = true ]; then
-        local deb_file="${DIST_DIR}/open-media-converter_${APP_VERSION}_amd64.deb"
+        local deb_file="${DIST_DIR}/open-media-converter_${APP_VERSION}_${DEB_ARCH}.deb"
         if [ -f "$deb_file" ]; then
             local deb_size=$(du -h "$deb_file" | cut -f1)
             echo -e "${GREEN}✓${NC} Debian Package:"
@@ -589,7 +645,7 @@ show_summary() {
     fi
     
     if [ "$BUILD_RPM" = true ]; then
-        local rpm_file="${DIST_DIR}/open-media-converter-${APP_VERSION}-1.x86_64.rpm"
+        local rpm_file="${DIST_DIR}/open-media-converter-${APP_VERSION}-1.${ARCH}.rpm"
         if [ -f "$rpm_file" ]; then
             local rpm_size=$(du -h "$rpm_file" | cut -f1)
             echo -e "${GREEN}✓${NC} RPM Package:"
@@ -613,7 +669,7 @@ show_summary() {
     fi
     
     if [ "$BUILD_APPIMAGE" = true ]; then
-        local appimage_file="${DIST_DIR}/Open_Media_Converter-${APP_VERSION}-x86_64.AppImage"
+        local appimage_file="${DIST_DIR}/Open_Media_Converter-${APP_VERSION}-${ARCH}.AppImage"
         if [ -f "$appimage_file" ]; then
             local appimage_size=$(du -h "$appimage_file" | cut -f1)
             echo -e "${GREEN}✓${NC} AppImage:"
@@ -636,19 +692,19 @@ show_summary() {
     # Installation instructions
     echo -e "${BOLD}Installation:${NC}"
     
-    if [ "$BUILD_DEB" = true ] && [ -f "${DIST_DIR}/open-media-converter_${APP_VERSION}_amd64.deb" ]; then
+    if [ "$BUILD_DEB" = true ] && [ -f "${DIST_DIR}/open-media-converter_${APP_VERSION}_${DEB_ARCH}.deb" ]; then
         echo ""
         echo -e "${YELLOW}Debian/Ubuntu:${NC}"
-        echo "  sudo dpkg -i ${DIST_DIR}/open-media-converter_${APP_VERSION}_amd64.deb"
+        echo "  sudo dpkg -i ${DIST_DIR}/open-media-converter_${APP_VERSION}_${DEB_ARCH}.deb"
         echo "  sudo apt-get install -f  # Fix dependencies if needed"
     fi
     
-    if [ "$BUILD_RPM" = true ] && [ -f "${DIST_DIR}/open-media-converter-${APP_VERSION}-1.x86_64.rpm" ]; then
+    if [ "$BUILD_RPM" = true ] && [ -f "${DIST_DIR}/open-media-converter-${APP_VERSION}-1.${ARCH}.rpm" ]; then
         echo ""
         echo -e "${YELLOW}Fedora/RHEL:${NC}"
-        echo "  sudo dnf install ${DIST_DIR}/open-media-converter-${APP_VERSION}-1.x86_64.rpm"
+        echo "  sudo dnf install ${DIST_DIR}/open-media-converter-${APP_VERSION}-1.${ARCH}.rpm"
         echo "  OR"
-        echo "  sudo rpm -ivh ${DIST_DIR}/open-media-converter-${APP_VERSION}-1.x86_64.rpm"
+        echo "  sudo rpm -ivh ${DIST_DIR}/open-media-converter-${APP_VERSION}-1.${ARCH}.rpm"
     fi
     
     local arch_file=$(find "${DIST_DIR}" -name "open-media-converter-*.pkg.tar.zst" -type f 2>/dev/null | head -1)
@@ -658,11 +714,11 @@ show_summary() {
         echo "  sudo pacman -U ${arch_file}"
     fi
     
-    if [ "$BUILD_APPIMAGE" = true ] && [ -f "${DIST_DIR}/Open_Media_Converter-${APP_VERSION}-x86_64.AppImage" ]; then
+    if [ "$BUILD_APPIMAGE" = true ] && [ -f "${DIST_DIR}/Open_Media_Converter-${APP_VERSION}-${ARCH}.AppImage" ]; then
         echo ""
         echo -e "${YELLOW}AppImage (Universal):${NC}"
-        echo "  chmod +x ${DIST_DIR}/Open_Media_Converter-${APP_VERSION}-x86_64.AppImage"
-        echo "  ./Open_Media_Converter-${APP_VERSION}-x86_64.AppImage"
+        echo "  chmod +x ${DIST_DIR}/Open_Media_Converter-${APP_VERSION}-${ARCH}.AppImage"
+        echo "  ./Open_Media_Converter-${APP_VERSION}-${ARCH}.AppImage"
     fi
     
     echo ""
@@ -689,6 +745,9 @@ main() {
     echo -e "  Skip Maven Build:  ${SKIP_BUILD}"
     echo -e "  Embedded Tools:    $( [ "$NO_EMBEDDED_TOOLS" = true ] && echo "false" || echo "true" )"
     echo -e "  Clean Build:       ${CLEAN_BUILD}"
+    echo -e "  Skip Validation:   ${SKIP_VALIDATE}"
+    echo -e "  Allow Missing:     ${ALLOW_MISSING}"
+    echo -e "  Architecture:      ${ARCH} (deb: ${DEB_ARCH})"
     
     check_prerequisites
     clean_builds

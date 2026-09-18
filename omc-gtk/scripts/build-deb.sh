@@ -185,6 +185,7 @@ prepare_build_directory() {
     mkdir -p "$BUILD_DIR/usr/share/${APP_NAME}/lib"
     mkdir -p "$BUILD_DIR/usr/bin"
     mkdir -p "$BUILD_DIR/usr/share/applications"
+    mkdir -p "$BUILD_DIR/usr/share/metainfo"
     mkdir -p "$BUILD_DIR/usr/share/icons/hicolor/16x16/apps"
     mkdir -p "$BUILD_DIR/usr/share/icons/hicolor/32x32/apps"
     mkdir -p "$BUILD_DIR/usr/share/icons/hicolor/48x48/apps"
@@ -276,6 +277,24 @@ copy_desktop_entry() {
     chmod 644 "$desktop_dest"
     
     log_success "Desktop entry copied"
+}
+
+# Copy AppStream metainfo (GNOME Software / Ubuntu App Center / Flathub discovery)
+copy_metainfo() {
+    log_step "Copying AppStream metainfo"
+    
+    local metainfo_source="${PACKAGING_DIR}/usr/share/metainfo/${APP_NAME}.metainfo.xml"
+    local metainfo_dest="$BUILD_DIR/usr/share/metainfo/${APP_NAME}.metainfo.xml"
+    
+    if [ ! -f "$metainfo_source" ]; then
+        log_error "Metainfo file not found: $metainfo_source"
+        exit 1
+    fi
+    
+    cp "$metainfo_source" "$metainfo_dest"
+    chmod 644 "$metainfo_dest"
+    
+    log_success "Metainfo copied"
 }
 
 # Copy icons
@@ -439,6 +458,7 @@ main() {
     copy_jar
     copy_launcher
     copy_desktop_entry
+    copy_metainfo
     copy_icons
     copy_embedded_binaries
     copy_documentation

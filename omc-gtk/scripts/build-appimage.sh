@@ -312,6 +312,7 @@ prepare_build_directory() {
     mkdir -p "$APPDIR/usr/bin"
     mkdir -p "$APPDIR/usr/lib"
     mkdir -p "$APPDIR/usr/share/applications"
+    mkdir -p "$APPDIR/usr/share/metainfo"
     mkdir -p "$APPDIR/usr/share/icons/hicolor/16x16/apps"
     mkdir -p "$APPDIR/usr/share/icons/hicolor/24x24/apps"
     mkdir -p "$APPDIR/usr/share/icons/hicolor/32x32/apps"
@@ -533,6 +534,24 @@ copy_desktop_entry() {
     ln -sf "usr/share/applications/${APP_NAME}.desktop" "$APPDIR/${APP_NAME}.desktop"
     
     log_success "Desktop entry copied and symlinked"
+}
+
+# Copy AppStream metainfo (picked up by appimagetool + AppImageHub catalog)
+copy_metainfo() {
+    log_step "Copying AppStream metainfo"
+    
+    local metainfo_source="${OMC_GTK_ROOT}/packaging/deb/usr/share/metainfo/${APP_NAME}.metainfo.xml"
+    local metainfo_dest="$APPDIR/usr/share/metainfo/${APP_NAME}.metainfo.xml"
+    
+    if [ ! -f "$metainfo_source" ]; then
+        log_error "Metainfo file not found: $metainfo_source"
+        exit 1
+    fi
+    
+    cp "$metainfo_source" "$metainfo_dest"
+    chmod 644 "$metainfo_dest"
+    
+    log_success "Metainfo copied"
 }
 
 # Copy icons
@@ -792,6 +811,7 @@ main() {
     copy_launcher
     copy_apprun
     copy_desktop_entry
+    copy_metainfo
     copy_icons
     copy_embedded_tools
     set_permissions

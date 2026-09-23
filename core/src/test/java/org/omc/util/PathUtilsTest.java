@@ -165,4 +165,24 @@ class PathUtilsTest {
         assertEquals("", PathUtils.expandHome(""));
         assertEquals("   ", PathUtils.expandHome("   "));
     }
+
+    @Test
+    void xdgDir_withAbsoluteEnvValue_usesEnvValue() {
+        assertEquals(java.nio.file.Paths.get("/run/user/1000/app"),
+                PathUtils.xdgDir("/run/user/1000/app", ".config"));
+    }
+
+    @Test
+    void xdgDir_withRelativeEnvValue_fallsBackToUserHome() {
+        String home = System.getProperty("user.home");
+        assertEquals(java.nio.file.Paths.get(home, ".config"),
+                PathUtils.xdgDir("relative/path", ".config"));
+    }
+
+    @Test
+    void xdgDir_withNullOrBlankEnvValue_fallsBackToUserHome() {
+        String home = System.getProperty("user.home");
+        assertEquals(java.nio.file.Paths.get(home, ".cache"), PathUtils.xdgDir(null, ".cache"));
+        assertEquals(java.nio.file.Paths.get(home, ".cache"), PathUtils.xdgDir("   ", ".cache"));
+    }
 }

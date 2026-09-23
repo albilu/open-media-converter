@@ -70,7 +70,10 @@ public class StateIOException extends MediaConverterException {
     @Override
     public String getDetailedMessage() {
         String operation = isLoadOperation ? "Loading" : "Saving";
-        return String.format("[%s] %s: %s (File: %s)",
-                getErrorCode().getCode(), operation, getMessage(), stateFile);
+        // The error code is optional (see base class): stay null-safe
+        String prefix = getErrorCode() != null
+                ? String.format("[%s] ", getErrorCode().getCode())
+                : "";
+        return String.format("%s%s: %s (File: %s)", prefix, operation, getMessage(), stateFile);
     }
 }

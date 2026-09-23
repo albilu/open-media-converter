@@ -62,6 +62,18 @@ class ConversionSettingsTest {
     }
 
     @Test
+    void builderOutputFormat_withUnknownFormat_throws() {
+        assertThrows(IllegalArgumentException.class,
+                () -> ConversionSettings.builder().outputFormat(FileFormat.UNKNOWN));
+    }
+
+    @Test
+    void builderOutputFormat_withNullFormat_throws() {
+        assertThrows(NullPointerException.class,
+                () -> ConversionSettings.builder().outputFormat(null));
+    }
+
+    @Test
     void shouldBuildWithAllSettings() {
         // Given
         Path outputDir = validOutputDir();

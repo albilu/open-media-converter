@@ -97,6 +97,18 @@ public class SettingsManager {
     private final AtomicReference<ConversionSettings> currentSettings;
 
     /**
+     * Memoized {@link #loadPresetsBySection()} result, guarded by file mtime
+     * and size so external edits and deletions still invalidate. Context-menu
+     * popups and settings-open call the loader on the GTK thread; without
+     * caching each call re-reads and re-parses presets.json.
+     */
+    private final Object presetsCacheLock = new Object();
+    private PresetsBySection cachedPresetsBySection;
+    private long cachedPresetsModifiedNanos = Long.MIN_VALUE;
+    private long cachedPresetsSize = -1;
+    private boolean cachedPresetsFileMissing;
+
+    /**
      * Creates a new SettingsManager.
      *
      * @param configurationManager Configuration manager for paths
@@ -141,9 +153,16 @@ public class SettingsManager {
 
         try {
             // Read settings from file
-            ConversionSettings settings = JsonUtils.readJsonFile(
-                    settingsPath.toFile(),
-                    ConversionSettings.class);
+            JsonNode settingsTree = JsonUtils.getObjectMapper().readTree(settingsPath.toFile());
+            if (settingsTree instanceof ObjectNode object) {
+                // Reuse preset migration before the new model can discard the
+                // legacy field. Reading never rewrites the user's original file.
+                var wrapper = JsonUtils.getObjectMapper().createObjectNode();
+                wrapper.set("settings", object);
+                mapLegacyGlobalOutputFormats(JsonUtils.getObjectMapper().createArrayNode().add(wrapper));
+            }
+            ConversionSettings settings = JsonUtils.getObjectMapper().treeToValue(
+                    settingsTree, ConversionSettings.class);
 
             // Validate loaded settings
             if (settings == null) {
@@ -153,8 +172,9 @@ public class SettingsManager {
 
             settings = settings.withDefaults();
 
-            // Validate settings using basic validation
-            if (!settings.isValid()) {
+            // Structural validation only: transient filesystem state (offline
+            // template, missing output directory) is not corruption
+            if (!settings.isStructurallyValid()) {
                 logger.warn("Loaded settings are invalid, salvaging valid sections");
                 return recoverCorruptedSettings(settingsPath);
             }
@@ -162,8 +182,16 @@ public class SettingsManager {
             // Additional validation using ValidationEngine
             ValidationResult validationResult = validationEngine.validateSettings(settings);
             if (validationResult.isFailure()) {
-                logger.warn("Settings validation failed: {}", validationResult.getErrors());
-                return recoverCorruptedSettings(settingsPath);
+                List<String> persistentErrors = validationResult.getErrors().stream()
+                        .filter(error -> !isTransientFileSystemError(error))
+                        .toList();
+                if (persistentErrors.isEmpty()) {
+                    logger.warn("Keeping settings despite transient filesystem state: {}",
+                            validationResult.getErrors());
+                } else {
+                    logger.warn("Settings validation failed: {}", persistentErrors);
+                    return recoverCorruptedSettings(settingsPath);
+                }
             }
 
             if (validationResult.hasWarnings()) {
@@ -249,7 +277,9 @@ public class SettingsManager {
 
         // Global scalar fields, salvaged one by one
         JsonNode node = root.get("parallelConversions");
-        if (node != null && node.isInt() && node.asInt() >= 1 && node.asInt() <= 16) {
+        if (node != null && node.isInt()
+                && node.asInt() >= org.omc.core.ValidationEngine.MIN_PARALLEL_CONVERSIONS
+                && node.asInt() <= org.omc.core.ValidationEngine.MAX_PARALLEL_CONVERSIONS) {
             builder.parallelConversions(node.asInt());
         }
         node = root.get("overwriteExisting");
@@ -286,15 +316,29 @@ public class SettingsManager {
         builder.imageSettings(salvageSection(
                 root.get("imageSettings"), ImageSettings.class, ImageSettings::isValid, "imageSettings"));
         builder.documentSettings(salvageSection(
-                root.get("documentSettings"), DocumentSettings.class, DocumentSettings::isValid,
+                root.get("documentSettings"), DocumentSettings.class, DocumentSettings::isStructurallyValid,
                 "documentSettings"));
 
         ConversionSettings candidate = builder.build().withDefaults();
-        if (!candidate.isValid() || validationEngine.validateSettings(candidate).isFailure()) {
+        if (!candidate.isStructurallyValid()) {
+            logger.warn("Salvaged settings still invalid; falling back to full defaults");
+            return null;
+        }
+        ValidationResult candidateValidation = validationEngine.validateSettings(candidate);
+        if (candidateValidation.isFailure()
+                && candidateValidation.getErrors().stream().anyMatch(error -> !isTransientFileSystemError(error))) {
             logger.warn("Salvaged settings still invalid; falling back to full defaults");
             return null;
         }
         return candidate;
+    }
+
+    /**
+     * Whether a ValidationEngine error reports transient filesystem state
+     * (missing/unwritable output directory) rather than corrupt settings data.
+     */
+    private static boolean isTransientFileSystemError(String error) {
+        return error != null && error.startsWith("Output directory");
     }
 
     /**
@@ -538,7 +582,8 @@ public class SettingsManager {
         List<SettingsPreset> allPresets = new ArrayList<>();
 
         // Add built-in presets first
-        allPresets.addAll(createBuiltInPresets());
+        List<SettingsPreset> builtInPresets = createBuiltInPresets();
+        allPresets.addAll(builtInPresets);
 
         // Load custom presets from file
         Path presetsPath = configurationManager.getConfigDirectory().resolve("presets.json");
@@ -554,7 +599,7 @@ public class SettingsManager {
             }
         }
 
-        logger.info("Loaded {} total presets ({} built-in)", allPresets.size(), createBuiltInPresets().size());
+        logger.info("Loaded {} total presets ({} built-in)", allPresets.size(), builtInPresets.size());
         return allPresets;
     }
 
@@ -794,6 +839,7 @@ public class SettingsManager {
             // Atomic rename (falls back to a plain move on filesystems
             // without atomic move support)
             StateManager.moveWithAtomicFallback(tempPath, presetsPath);
+            invalidatePresetsCache();
 
         } catch (IOException e) {
             throw e;
@@ -868,6 +914,78 @@ public class SettingsManager {
     public PresetsBySection loadPresetsBySection() {
         Path presetsPath = configurationManager.getConfigDirectory().resolve("presets.json");
 
+        synchronized (presetsCacheLock) {
+            if (cachedPresetsBySection != null && isPresetsCacheCurrent(presetsPath)) {
+                logger.debug("Serving presets by section from cache");
+                return cachedPresetsBySection;
+            }
+        }
+
+        PresetsBySection loaded = doLoadPresetsBySection(presetsPath);
+
+        synchronized (presetsCacheLock) {
+            cachedPresetsBySection = loaded;
+            snapshotPresetsFileState(presetsPath);
+        }
+        return loaded;
+    }
+
+    /**
+     * Whether the cached presets still match the on-disk file (missing state,
+     * mtime and size). One stat syscall instead of a full read + JSON parse.
+     */
+    private boolean isPresetsCacheCurrent(Path presetsPath) {
+        try {
+            if (!Files.exists(presetsPath)) {
+                return cachedPresetsFileMissing;
+            }
+            if (cachedPresetsFileMissing) {
+                return false;
+            }
+            java.nio.file.attribute.BasicFileAttributes attrs = Files.readAttributes(presetsPath,
+                    java.nio.file.attribute.BasicFileAttributes.class);
+            return attrs.lastModifiedTime().to(java.util.concurrent.TimeUnit.NANOSECONDS) == cachedPresetsModifiedNanos
+                    && attrs.size() == cachedPresetsSize;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private void snapshotPresetsFileState(Path presetsPath) {
+        try {
+            if (!Files.exists(presetsPath)) {
+                cachedPresetsFileMissing = true;
+                cachedPresetsModifiedNanos = Long.MIN_VALUE;
+                cachedPresetsSize = -1;
+                return;
+            }
+            java.nio.file.attribute.BasicFileAttributes attrs = Files.readAttributes(presetsPath,
+                    java.nio.file.attribute.BasicFileAttributes.class);
+            cachedPresetsFileMissing = false;
+            cachedPresetsModifiedNanos = attrs.lastModifiedTime().to(java.util.concurrent.TimeUnit.NANOSECONDS);
+            cachedPresetsSize = attrs.size();
+        } catch (IOException e) {
+            cachedPresetsFileMissing = false;
+            cachedPresetsModifiedNanos = Long.MIN_VALUE;
+            cachedPresetsSize = -1;
+        }
+    }
+
+    /**
+     * Forces the next {@link #loadPresetsBySection()} to re-read disk. Called
+     * by every presets write path so a same-millisecond, same-size write can
+     * never serve stale data.
+     */
+    private void invalidatePresetsCache() {
+        synchronized (presetsCacheLock) {
+            cachedPresetsBySection = null;
+            cachedPresetsFileMissing = false;
+            cachedPresetsModifiedNanos = Long.MIN_VALUE;
+            cachedPresetsSize = -1;
+        }
+    }
+
+    private PresetsBySection doLoadPresetsBySection(Path presetsPath) {
         logger.debug("Loading presets by section from: {}", presetsPath);
 
         // If presets file doesn't exist, return empty
@@ -1326,6 +1444,8 @@ public class SettingsManager {
                 settingsObject.set(sectionField, sectionSettings);
                 logger.debug("Mapped legacy global outputFormat '{}' to {} for migration",
                         legacyFormat, sectionField);
+            } else if (existingSection instanceof ObjectNode section && !section.hasNonNull("outputFormat")) {
+                section.put("outputFormat", legacyFormat.name());
             }
         }
     }
@@ -1459,17 +1579,26 @@ public class SettingsManager {
      * @return converted list, or empty list if the node is unreadable
      */
     private List<SectionPreset> readSectionPresetList(JsonNode node) {
+        List<SectionPreset> presets = new ArrayList<>();
         if (node == null || !node.isArray()) {
-            return new ArrayList<>();
+            return presets;
         }
-        try {
-            return JsonUtils.getObjectMapper().convertValue(
-                    node, new TypeReference<List<SectionPreset>>() {
-                    });
-        } catch (IllegalArgumentException e) {
-            logger.warn("Skipping unreadable section presets during migration: {}", e.getMessage());
-            return new ArrayList<>();
+        // Per-entry salvage: one malformed entry must not drop the whole
+        // section's presets (mirrors the pendingFiles per-entry salvage in
+        // StateManager)
+        for (JsonNode entry : node) {
+            try {
+                SectionPreset preset = JsonUtils.getObjectMapper().treeToValue(entry, SectionPreset.class);
+                if (preset != null) {
+                    presets.add(preset);
+                } else {
+                    logger.warn("Skipping null section preset entry during migration");
+                }
+            } catch (IOException | IllegalArgumentException e) {
+                logger.warn("Skipping unreadable section preset entry during migration: {}", e.getMessage());
+            }
         }
+        return presets;
     }
 
     /**
@@ -1597,6 +1726,7 @@ public class SettingsManager {
             // Atomic move to final location (falls back to a plain move on
             // filesystems without atomic move support)
             StateManager.moveWithAtomicFallback(tempPath, presetsPath);
+            invalidatePresetsCache();
 
             logger.info("Successfully saved presets by section to: {}", presetsPath);
 

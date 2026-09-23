@@ -276,6 +276,37 @@ public record FileListSortState(
     }
 
     /**
+     * Creates a comparator that resolves OUTPUT_FORMAT against the global
+     * conversion settings, so files without a per-file override sort by the
+     * same format the UI's Output Format column displays.
+     *
+     * @param globalSettings the global settings to resolve section output
+     *                       formats from; may be null (falls back to
+     *                       override-only resolution)
+     * @return A Comparator that can be used to sort ConversionFile lists
+     */
+    public Comparator<ConversionFile> createComparator(ConversionSettings globalSettings) {
+        if (!isSorted() || sortField != SortField.OUTPUT_FORMAT) {
+            return createComparator();
+        }
+
+        Comparator<ConversionFile> comparator = Comparator.comparing(
+                (ConversionFile file) -> resolveOutputFormat(file, globalSettings),
+                this::compareOutputFormat);
+
+        if (sortDir == SortDirection.DESCENDING) {
+            comparator = comparator.reversed();
+        }
+
+        // Apply direction
+        if (sortDir == SortDirection.DESCENDING) {
+            comparator = comparator.reversed();
+        }
+
+        return comparator;
+    }
+
+    /**
      * Natural string comparison for file names.
      * 
      * <p>
@@ -384,7 +415,26 @@ public record FileListSortState(
             // Try to extract format from settings
             return extractFormatFromOverride(override);
         }
-        return "Not Set"; // Simplified - full implementation would check global settings
+        return "Not Set";
+    }
+
+    /**
+     * Resolves the output format string for a file against global settings:
+     * preset name for override files, otherwise the override or global
+     * section format for the file's category, mirroring the UI's Output
+     * Format column. Falls back to override-only resolution when
+     * {@code globalSettings} is null.
+     */
+    private String resolveOutputFormat(ConversionFile file, ConversionSettings globalSettings) {
+        if (globalSettings == null) {
+            return resolveOutputFormat(file);
+        }
+        if (file.hasCustomSettings() && file.settingsOverride().presetName() != null
+                && !file.settingsOverride().presetName().isEmpty()) {
+            return file.settingsOverride().presetName();
+        }
+        FileFormat format = globalSettings.resolveOutputFormat(file);
+        return format != null ? format.name() : "Not Set";
     }
 
     /**

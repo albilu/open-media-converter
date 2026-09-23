@@ -1166,6 +1166,147 @@ class FFmpegServiceTest {
         }
 
         @Test
+        void testParseProgressLine_ProgressPipeTotalSize() throws Exception {
+                // -progress pipe:1 emits total_size as raw bytes on its own line
+                // (unlike the console format's "size=...kB")
+                java.lang.reflect.Method method = FFmpegService.class.getDeclaredMethod(
+                                "parseProgressLine", String.class);
+                method.setAccessible(true);
+
+                Object result = method.invoke(service, "total_size=2097152");
+
+                assertNotNull(result, "total_size line must be parsed in -progress pipe mode");
+
+                Class<?> progressInfoClass = result.getClass();
+                java.lang.reflect.Field bytesField = progressInfoClass.getDeclaredField("bytesProcessed");
+                bytesField.setAccessible(true);
+                long bytes = (Long) bytesField.get(result);
+                assertEquals(2097152L, bytes, "total_size is raw bytes and must map to bytesProcessed");
+
+                java.lang.reflect.Field timeField = progressInfoClass.getDeclaredField("currentTime");
+                timeField.setAccessible(true);
+                assertNull(timeField.get(result), "total_size carries no timestamp");
+        }
+
+        @Test
+        void testParseProgressLine_ProgressPipeSpeedMultiplier() throws Exception {
+                // -progress pipe:1 emits speed as a multiplier on its own line
+                java.lang.reflect.Method method = FFmpegService.class.getDeclaredMethod(
+                                "parseProgressLine", String.class);
+                method.setAccessible(true);
+
+                Object result = method.invoke(service, "speed=1.5x");
+
+                assertNotNull(result, "speed line must be parsed in -progress pipe mode");
+
+                Class<?> progressInfoClass = result.getClass();
+                java.lang.reflect.Field speedField = progressInfoClass.getDeclaredField("speed");
+                speedField.setAccessible(true);
+                double speed = (Double) speedField.get(result);
+                assertEquals(1.5, speed, 0.0001, "speed=1.5x must parse to the 1.5 multiplier");
+        }
+
+        @Test
+        void testParseProgressLine_ProgressPipeSpeedNA() throws Exception {
+                // FFmpeg prints speed=N/A while the rate is still unknown; this
+                // must not blow up with a NumberFormatException
+                java.lang.reflect.Method method = FFmpegService.class.getDeclaredMethod(
+                                "parseProgressLine", String.class);
+                method.setAccessible(true);
+
+                Object result = assertDoesNotThrow(() -> method.invoke(service, "speed=N/A"));
+
+                assertNotNull(result, "speed=N/A must still yield progress info (unknown speed)");
+                Class<?> progressInfoClass = result.getClass();
+                java.lang.reflect.Field speedField = progressInfoClass.getDeclaredField("speed");
+                speedField.setAccessible(true);
+                double speed = (Double) speedField.get(result);
+                assertEquals(0.0, speed, 0.0001, "speed=N/A maps to 0 (unknown)");
+        }
+
+        /**
+         * End-to-end: a simulated -progress pipe:1 stream (one key per line,
+         * including an early speed=N/A) must surface total_size bytes and the
+         * speed multiplier on the progress callback - previously both were
+         * always reported as 0 because the parser only understood the
+         * console-style single-line format.
+         */
+        @Test
+        @org.junit.jupiter.api.Timeout(value = 30)
+        void testConvertVideo_ProgressPipeStream_PopulatesBytesAndSpeed() throws Exception {
+                // ffprobe answers both metadata probes with a 10s duration and
+                // no stream section (frame-based progress stays disabled)
+                Path ffprobeStub = tempDir.resolve("ffprobe-pipe");
+                Files.writeString(ffprobeStub, "#!/bin/sh\necho '{\"format\":{\"duration\":\"10.0\"},\"streams\":[]}'\n");
+                Files.setPosixFilePermissions(ffprobeStub,
+                                java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+
+                // ffmpeg emits a realistic -progress pipe:1 stream; total_size
+                // and speed ride their own lines, speed=N/A appears early
+                Path ffmpegStub = tempDir.resolve("ffmpeg-pipe");
+                Files.writeString(ffmpegStub, String.join("\n",
+                                "#!/bin/sh",
+                                "echo frame=0",
+                                "echo fps=0.0",
+                                "echo total_size=0",
+                                "echo out_time_ms=0",
+                                "echo out_time=00:00:00.000000",
+                                "echo speed=N/A",
+                                "echo progress=continue",
+                                "sleep 0.7",
+                                "echo frame=100",
+                                "echo fps=25.0",
+                                "echo bitrate=1000.0kbits/s",
+                                "echo total_size=2097152",
+                                "echo out_time_ms=5000000",
+                                "echo out_time=00:00:05.000000",
+                                "echo speed=1.5x",
+                                "echo progress=continue",
+                                "sleep 0.7",
+                                "echo frame=200",
+                                "echo fps=25.0",
+                                "echo bitrate=1000.0kbits/s",
+                                "echo total_size=4194304",
+                                "echo out_time_ms=10000000",
+                                "echo out_time=00:00:10.000000",
+                                "echo speed=1.5x",
+                                "echo progress=end",
+                                "for last; do :; done",
+                                ": > \"$last\"",
+                                ""));
+                Files.setPosixFilePermissions(ffmpegStub,
+                                java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+
+                FFmpegService pipeService = new FFmpegService(ffmpegStub, ffprobeStub);
+
+                Path input = tempDir.resolve("input-pipe.mp4");
+                Files.writeString(input, "not-a-real-video");
+                Path output = tempDir.resolve("output-pipe.mp4");
+
+                VideoSettings settings = VideoSettings.builder()
+                                .codec("H264")
+                                .crf(23)
+                                .preset("ultrafast")
+                                .build();
+
+                java.util.List<Long> bytesSeen = new java.util.concurrent.CopyOnWriteArrayList<>();
+                java.util.List<Double> speedsSeen = new java.util.concurrent.CopyOnWriteArrayList<>();
+                ProgressCallback callback = (pct, bytes, speed) -> {
+                        bytesSeen.add(bytes);
+                        speedsSeen.add(speed);
+                };
+
+                ConversionResult result = pipeService.convertVideo(input, output, settings, callback);
+
+                assertTrue(result.success(), "simulated conversion must succeed: "
+                                + result.errorMessage().orElse("no error"));
+                assertTrue(bytesSeen.stream().anyMatch(b -> b == 4194304L),
+                                "total_size bytes must reach the callback, got: " + bytesSeen);
+                assertTrue(speedsSeen.stream().anyMatch(s -> Math.abs(s - 1.5) < 0.0001),
+                                "speed multiplier must reach the callback, got: " + speedsSeen);
+        }
+
+        @Test
         void testProgressCallback_IsInvoked() throws Exception {
                 // This test would require mocking ProcessBuilder which is complex
                 // Instead, we verify that the callback interface works correctly
@@ -3107,6 +3248,86 @@ class FFmpegServiceTest {
                         worker.interrupt(); // unwedge the worker if the assertion failed
                         worker.join(5000);
                 }
+        }
+
+        // ========================================
+        // Conversion process hang tests
+        // ========================================
+
+        /**
+         * A wedged ffmpeg conversion that holds stdout open without producing
+         * any output must not hang the worker forever: the service must
+         * destroy the process and fail after the configured timeout. An inline
+         * readLine-to-EOF loop would block forever before ever reaching the
+         * bounded waitFor, so output is drained on a daemon reader thread.
+         */
+        @Test
+        @org.junit.jupiter.api.Timeout(value = 30)
+        void testConvertVideo_SilentHang_TimesOutAndDestroysProcess() throws Exception {
+                // ffprobe fails fast so the pre-conversion probes return quickly.
+                Path ffprobeStub = tempDir.resolve("ffprobe-quickfail");
+                Files.writeString(ffprobeStub, "#!/bin/sh\nexit 1\n");
+                Files.setPosixFilePermissions(ffprobeStub,
+                                java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+
+                // ffmpeg publishes its pid, then keeps stdout open with no
+                // output and never exits promptly.
+                Path pidFile = tempDir.resolve("ffmpeg-hanging.pid");
+                Path ffmpegStub = tempDir.resolve("ffmpeg-hanging");
+                Files.writeString(ffmpegStub, "#!/bin/sh\necho $$ > '" + pidFile + "'\nexec sleep 60\n");
+                Files.setPosixFilePermissions(ffmpegStub,
+                                java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+
+                FFmpegService hangingService = new FFmpegService(ffmpegStub, ffprobeStub);
+
+                Path input = tempDir.resolve("input-hang.mp4");
+                Files.writeString(input, "not-a-real-video");
+                Path output = tempDir.resolve("output-hang.mp4");
+
+                VideoSettings settings = VideoSettings.builder()
+                                .codec("H264")
+                                .crf(23)
+                                .preset("ultrafast")
+                                .build();
+
+                long originalTimeout = FFmpegService.PROCESS_TIMEOUT_MILLIS;
+                FFmpegService.PROCESS_TIMEOUT_MILLIS = 1200;
+                Object[] outcome = { "unset" };
+                Thread worker = new Thread(() -> {
+                        try {
+                                hangingService.convertVideo(input, output, settings, ProgressCallback.noOp());
+                                outcome[0] = "returned without exception";
+                        } catch (ToolExecutionException e) {
+                                outcome[0] = e;
+                        }
+                });
+                worker.setDaemon(true);
+                worker.start();
+                try {
+                        worker.join(10000);
+                        assertFalse(worker.isAlive(),
+                                        "convertVideo must be bounded even when ffmpeg holds stdout open with no output");
+                        assertTrue(outcome[0] instanceof ToolExecutionException,
+                                        "convertVideo must throw ToolExecutionException on timeout, got: "
+                                                        + outcome[0]);
+                        assertTrue(((ToolExecutionException) outcome[0]).getMessage().contains("timed out"),
+                                        "Timeout failure expected but got: "
+                                                        + ((ToolExecutionException) outcome[0]).getMessage());
+                } finally {
+                        FFmpegService.PROCESS_TIMEOUT_MILLIS = originalTimeout;
+                        worker.interrupt(); // unwedge the worker if the assertion failed
+                        worker.join(5000);
+                }
+
+                // The hung ffmpeg must not outlive the timed-out call.
+                String pid = Files.readString(pidFile).trim();
+                Path procEntry = Path.of("/proc", pid);
+                long destroyDeadline = System.currentTimeMillis() + 5000;
+                while (Files.exists(procEntry) && System.currentTimeMillis() < destroyDeadline) {
+                        Thread.sleep(50);
+                }
+                assertFalse(Files.exists(procEntry),
+                                "timed-out ffmpeg process (pid " + pid + ") must be destroyed");
         }
 
         // ========================================

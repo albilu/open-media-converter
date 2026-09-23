@@ -110,6 +110,15 @@ public class ConversionFlowIntegrationTest {
                 });
     }
 
+    private ConversionResult completedOutput(org.mockito.invocation.InvocationOnMock invocation,
+            ConversionResult result) throws IOException {
+        // A successful tool must actually create its output; an empty placeholder
+        // is now correctly rejected by the engine's publication safety check.
+        Path temporary = invocation.getArgument(2);
+        Files.writeString(temporary, "simulated converter output");
+        return result;
+    }
+
     @AfterEach
     public void tearDown() throws Exception {
         // Cleanup is handled by @TempDir
@@ -160,11 +169,11 @@ public class ConversionFlowIntegrationTest {
         when(toolManager.selectTool(FileFormat.MP4, FileFormat.MKV))
                 .thenReturn(ConversionTool.FFMPEG);
         when(toolManager.executeTool(any(), any(), any(), eq(FileFormat.MKV), any(), any(), any(), any()))
-                .thenReturn(ConversionResult.success(file.id(), outputDir.resolve("video.mkv"), null,
+                .thenAnswer(invocation -> completedOutput(invocation, ConversionResult.success(invocation.getArgument(6), outputDir.resolve("video.mkv"), null,
                         Duration.ofSeconds(10),
                         1000000L,
                         800000L,
-                        ConversionTool.FFMPEG));
+                        ConversionTool.FFMPEG)));
 
         // When: Convert the file
         CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(file, globalSettings);
@@ -207,11 +216,11 @@ public class ConversionFlowIntegrationTest {
         when(toolManager.selectTool(FileFormat.WAV, FileFormat.FLAC))
                 .thenReturn(ConversionTool.FFMPEG);
         when(toolManager.executeTool(any(), any(), any(), eq(FileFormat.FLAC), any(), any(), any(), any()))
-                .thenReturn(ConversionResult.success(file.id(), outputDir.resolve("audio.flac"), null,
+                .thenAnswer(invocation -> completedOutput(invocation, ConversionResult.success(file.id(), outputDir.resolve("audio.flac"), null,
                         Duration.ofSeconds(5),
                         500000L,
                         450000L,
-                        ConversionTool.FFMPEG));
+                        ConversionTool.FFMPEG)));
 
         // When: Convert the file
         CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(file, globalSettings);
@@ -282,6 +291,7 @@ public class ConversionFlowIntegrationTest {
                     FileFormat outputFormat = invocation.getArgument(3);
                     String fileId = inputPath.getFileName().toString().replace(".mp4", "");
                     Path outputPath = outputDir.resolve(fileId + "." + outputFormat.getPrimaryExtension());
+                    Files.writeString(invocation.getArgument(2, Path.class), "simulated converter output");
                     return ConversionResult.success(fileId, outputPath, null, Duration.ofSeconds(10),
                             1000000L,
                             900000L,
@@ -348,11 +358,11 @@ public class ConversionFlowIntegrationTest {
         when(toolManager.selectTool(FileFormat.PNG, FileFormat.WEBP))
                 .thenReturn(ConversionTool.FFMPEG);
         when(toolManager.executeTool(any(), any(), any(), eq(FileFormat.WEBP), any(), any(), any(), any()))
-                .thenReturn(ConversionResult.success(file.id(), outputDir.resolve("photo.webp"), null,
+                .thenAnswer(invocation -> completedOutput(invocation, ConversionResult.success(invocation.getArgument(6), outputDir.resolve("photo.webp"), null,
                         Duration.ofSeconds(2),
                         200000L,
                         150000L,
-                        ConversionTool.FFMPEG));
+                        ConversionTool.FFMPEG)));
 
         // When: Convert the file
         CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(file, globalSettings);
@@ -406,11 +416,11 @@ public class ConversionFlowIntegrationTest {
         when(toolManager.selectTool(FileFormat.DOCX, FileFormat.EPUB))
                 .thenReturn(ConversionTool.PANDOC);
         when(toolManager.executeTool(any(), any(), any(), eq(FileFormat.EPUB), any(), any(), any(), any()))
-                .thenReturn(ConversionResult.success(file.id(), outputDir.resolve("document.epub"), null,
+                .thenAnswer(invocation -> completedOutput(invocation, ConversionResult.success(invocation.getArgument(6), outputDir.resolve("document.epub"), null,
                         Duration.ofSeconds(3),
                         50000L,
                         45000L,
-                        ConversionTool.PANDOC));
+                        ConversionTool.PANDOC)));
 
         // When: Convert the file
         CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(file, globalSettings);
@@ -470,11 +480,11 @@ public class ConversionFlowIntegrationTest {
         when(toolManager.selectTool(FileFormat.AVI, FileFormat.MP4))
                 .thenReturn(ConversionTool.FFMPEG);
         when(toolManager.executeTool(any(), any(), any(), eq(FileFormat.MP4), any(), any(), any(), any()))
-                .thenReturn(ConversionResult.success(file.id(), outputDir.resolve("video.mp4"), null,
+                .thenAnswer(invocation -> completedOutput(invocation, ConversionResult.success(file.id(), outputDir.resolve("video.mp4"), null,
                         Duration.ofSeconds(15),
                         2000000L,
                         1800000L,
-                        ConversionTool.FFMPEG));
+                        ConversionTool.FFMPEG)));
 
         // When: Convert the file
         CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(file, globalSettings);

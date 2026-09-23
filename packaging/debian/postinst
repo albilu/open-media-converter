@@ -1,0 +1,17 @@
+#!/bin/bash
+# Post-installation script for open-media-converter
+set -e
+
+# Refresh desktop, MIME and icon caches so the launcher appears immediately
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q || true
+fi
+if command -v update-mime-database >/dev/null 2>&1; then
+    update-mime-database /usr/share/mime || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+
+echo "[omc] installed to /opt/open-media-converter (bundled Java 23 runtime)"
+echo "[omc] launch with: open-media-converter"

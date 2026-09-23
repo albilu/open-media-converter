@@ -68,6 +68,21 @@ public class ImageMagickService {
     /** Message appended when output is truncated due to size limit */
     private static final String TRUNCATION_MESSAGE = "\n[Output truncated - exceeded 1MB limit]\n";
 
+    /**
+     * Maximum wall time for an ImageMagick process before forced termination
+     * (1 hour, mirroring PandocService). Package-visible and non-final so
+     * tests can scale it down; not part of the public API.
+     */
+    static long PROCESS_TIMEOUT_MILLIS = TimeUnit.HOURS.toMillis(1);
+
+    /**
+     * How long the main thread waits for the output reader to drain after the
+     * process has ended before using whatever was captured. The reader is a
+     * daemon and pipe reads are not interruptible, so this join is a brief
+     * courtesy, not a correctness requirement.
+     */
+    private static final long READER_JOIN_MILLIS = TimeUnit.SECONDS.toMillis(2);
+
     private final Path convertPath;
 
     /**
@@ -176,6 +191,15 @@ public class ImageMagickService {
         // this codebase (int default; -1 = lossless), so > 0 is the correct
         // bound here despite 0 being a legal JPEG quality in theory.
         Integer quality = settings.quality();
+        if (quality != null && quality == ImageSettings.LOSSLESS_QUALITY) {
+            FileFormat outputFormat = FileFormat.fromExtension(getFileExtension(outputPath));
+            if (outputFormat == FileFormat.WEBP) {
+                command.add("-define");
+                command.add("webp:lossless=true");
+            } else if (outputFormat == FileFormat.JPEG) {
+                throw new IllegalArgumentException("JPEG does not support lossless conversion. Choose PNG, TIFF or WebP.");
+            }
+        }
         if (quality != null && quality > 0 && quality <= 100) {
             String outputExt = getFileExtension(outputPath);
             FileFormat outputFormat = FileFormat.fromExtension(outputExt);
@@ -331,7 +355,7 @@ public class ImageMagickService {
 
         Process process = null;
         StringBuilder outputLog = new StringBuilder(4096);
-        boolean outputTruncated = false;
+        final boolean[] outputTruncated = { false };
 
         try {
             // Start process and track start time
@@ -349,85 +373,125 @@ public class ImageMagickService {
                 progressCallback.onProgress(0.0, 0, 0);
             }
 
-            // Task 3.5: Capture output with 1MB limit and parse progress
-            // NOTE: ImageMagick -monitor uses \r (carriage return) instead of \n (newline)
-            // to update progress on the same line, so we must read character-by-character
-            try (InputStreamReader reader = new InputStreamReader(process.getInputStream(),
-                    java.nio.charset.StandardCharsets.UTF_8)) {
-                StringBuilder currentLine = new StringBuilder(256);
-                int ch;
-                int segmentCount = 0;
-                long lastProgressUpdate = 0; // Initialize to 0 to allow first callback immediately
-                // -monitor restarts at 0% for every stage (Resize, then
-                // Extent...); enforce monotonic progress so the UI never jumps
-                // 100% -> 0%.
-                double maxSeenProgress = 0.0;
+            // Effectively-final aliases so the reader lambda can capture them.
+            final Process convertProcess = process;
+            final long inputSizeFinal = inputSize;
 
-                while ((ch = reader.read()) != -1) {
-                    if (ch == '\r' || ch == '\n') {
-                        // Process the accumulated line/segment
-                        if (currentLine.length() > 0) {
-                            String line = currentLine.toString();
-                            segmentCount++;
+            // Task 3.5: Capture output with 1MB limit and parse progress on a
+            // daemon reader thread - a hung convert holding its pipe open with
+            // no output would block an inline read-to-EOF loop forever, so the
+            // bounded waitFor below would never fire (mirrors the
+            // PandocService/LibreOfficeService gobbler pattern).
+            // NOTE: ImageMagick -monitor uses \r (carriage return) instead of \n
+            // (newline) to update progress on the same line, so we must read
+            // character-by-character.
+            Thread outputReader = org.omc.util.ThreadUtils.createThreadFactory("ImageMagick-Reader")
+                    .newThread(() -> {
+                try (InputStreamReader reader = new InputStreamReader(convertProcess.getInputStream(),
+                        java.nio.charset.StandardCharsets.UTF_8)) {
+                    StringBuilder currentLine = new StringBuilder(256);
+                    int ch;
+                    int segmentCount = 0;
+                    long lastProgressUpdate = 0; // Initialize to 0 to allow first callback immediately
+                    // -monitor restarts at 0% for every stage (Resize, then
+                    // Extent...); enforce monotonic progress so the UI never jumps
+                    // 100% -> 0%.
+                    double maxSeenProgress = 0.0;
 
-                            // Append line to output log if not truncated
-                            if (!outputTruncated) {
-                                if (outputLog.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
-                                    outputLog.append(TRUNCATION_MESSAGE);
-                                    outputTruncated = true;
-                                    logger.warn("Tool output exceeded 1MB limit, truncating further output");
-                                } else {
-                                    outputLog.append(line).append('\n');
+                    while ((ch = reader.read()) != -1) {
+                        if (ch == '\r' || ch == '\n') {
+                            // Process the accumulated line/segment
+                            if (currentLine.length() > 0) {
+                                String line = currentLine.toString();
+                                segmentCount++;
+
+                                // Append line to output log if not truncated
+                                if (!outputTruncated[0]) {
+                                    if (outputLog.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
+                                        outputLog.append(TRUNCATION_MESSAGE);
+                                        outputTruncated[0] = true;
+                                        logger.warn("Tool output exceeded 1MB limit, truncating further output");
+                                    } else {
+                                        outputLog.append(line).append('\n');
+                                    }
                                 }
-                            }
 
-                            // Task 3.6: Parse real-time progress from -monitor output
-                            // Format: "Operation/Image//path[filename.ext]: current of total, percentage%
-                            // complete"
-                            // Example: "Resize/Image//home/xxx/Images[20250723_085451.png]: 874 of 875,
-                            // 100% complete"
-                            double parsedProgress = parseMonitorProgress(line);
-                            if (parsedProgress >= 0 && progressCallback != null) {
-                                parsedProgress = Math.max(parsedProgress, maxSeenProgress);
-                                maxSeenProgress = parsedProgress;
-                                long currentTime = System.currentTimeMillis();
-                                // Throttle to max 2 updates/second (500ms intervals)
-                                if (currentTime - lastProgressUpdate >= 500) {
-                                    long estimatedBytes = (long) (inputSize * parsedProgress / 100.0);
-                                    progressCallback.onProgress(parsedProgress, estimatedBytes, 0);
-                                    lastProgressUpdate = currentTime;
+                                // Task 3.6: Parse real-time progress from -monitor output
+                                // Format: "Operation/Image//path[filename.ext]: current of total, percentage%
+                                // complete"
+                                // Example: "Resize/Image//home/xxx/Images[20250723_085451.png]: 874 of 875,
+                                // 100% complete"
+                                double parsedProgress = parseMonitorProgress(line);
+                                if (parsedProgress >= 0 && progressCallback != null) {
+                                    parsedProgress = Math.max(parsedProgress, maxSeenProgress);
+                                    maxSeenProgress = parsedProgress;
+                                    long currentTime = System.currentTimeMillis();
+                                    // Throttle to max 2 updates/second (500ms intervals)
+                                    if (currentTime - lastProgressUpdate >= 500) {
+                                        long estimatedBytes = (long) (inputSizeFinal * parsedProgress / 100.0);
+                                        progressCallback.onProgress(parsedProgress, estimatedBytes, 0);
+                                        lastProgressUpdate = currentTime;
+                                    }
                                 }
+
+                                // Clear buffer for next segment
+                                currentLine.setLength(0);
                             }
-
-                            // Clear buffer for next segment
-                            currentLine.setLength(0);
+                        } else {
+                            // Bound the accumulator: the 1MB cap applies while
+                            // accumulating too, so a segment that never
+                            // terminates cannot grow without limit. The
+                            // oversized partial segment is dropped (same
+                            // semantics as an oversized line in FFmpegService)
+                            // and the truncation marker records the loss.
+                            if (currentLine.length() < MAX_OUTPUT_SIZE) {
+                                currentLine.append((char) ch);
+                            }
+                            if (!outputTruncated[0]
+                                    && outputLog.length() + currentLine.length() + 1 > MAX_OUTPUT_SIZE) {
+                                outputLog.append(TRUNCATION_MESSAGE);
+                                outputTruncated[0] = true;
+                                logger.warn("Tool output exceeded 1MB limit, truncating further output");
+                                currentLine.setLength(0);
+                            }
                         }
-
-                        // Check for thread interruption periodically (every 100 segments)
-                        if (segmentCount % 100 == 0 && Thread.currentThread().isInterrupted()) {
-                            logger.info("Conversion interrupted by user");
-                            process.destroyForcibly();
-                            cleanupPartialFile(outputPath);
-                            throw new InterruptedException("Conversion cancelled by user");
-                        }
-                    } else {
-                        currentLine.append((char) ch);
                     }
+
+                    // Process any remaining content in buffer
+                    if (currentLine.length() > 0 && !outputTruncated[0]) {
+                        String line = currentLine.toString();
+                        if (outputLog.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
+                            outputLog.append(TRUNCATION_MESSAGE);
+                            outputTruncated[0] = true;
+                            logger.warn("Tool output exceeded 1MB limit, truncating further output");
+                        } else {
+                            outputLog.append(line).append('\n');
+                        }
+                    }
+
+                    logger.debug("ImageMagick output reading completed. Total segments parsed: {}", segmentCount);
+                } catch (IOException e) {
+                    logger.trace("Error reading ImageMagick output: {}", e.getMessage());
+                }
+            });
+            outputReader.start();
+
+            // Task 3.7: Wait for process with bounded timeout. Interruption is
+            // checked on a time cadence (every 500ms wait slice) so a silent
+            // convert still observes cancellation.
+            boolean completed = false;
+            long startWaitTime = System.currentTimeMillis();
+
+            while (!completed && (System.currentTimeMillis() - startWaitTime) < PROCESS_TIMEOUT_MILLIS) {
+                if (Thread.currentThread().isInterrupted()) {
+                    logger.info("Conversion interrupted by user");
+                    process.destroyForcibly();
+                    cleanupPartialFile(outputPath);
+                    throw new InterruptedException("Conversion cancelled by user");
                 }
 
-                // Process any remaining content in buffer
-                if (currentLine.length() > 0) {
-                    String line = currentLine.toString();
-                    if (!outputTruncated && outputLog.length() + line.length() + 1 <= MAX_OUTPUT_SIZE) {
-                        outputLog.append(line).append('\n');
-                    }
-                }
-
-                logger.debug("ImageMagick output reading completed. Total segments parsed: {}", segmentCount);
+                completed = process.waitFor(500, TimeUnit.MILLISECONDS);
             }
-
-            // Task 3.7: Wait for process with 1-hour timeout
-            boolean completed = process.waitFor(1, TimeUnit.HOURS);
 
             if (!completed) {
                 // Timeout - destroy process and throw exception
@@ -440,11 +504,26 @@ public class ImageMagickService {
                         "imagemagick");
             }
 
+            // The process has ended, so the pipe is at EOF and the reader
+            // drains quickly; the bounded join only matters for a pipe held
+            // open by a grandchild.
+            outputReader.join(READER_JOIN_MILLIS);
+            if (outputReader.isAlive()) {
+                outputReader.interrupt();
+            }
+
             // Get exit code and calculate conversion time
             int exitCode = process.exitValue();
             Duration conversionTime = Duration.between(startTime, Instant.now());
 
             if (exitCode == 0) {
+                if (!Files.isRegularFile(outputPath) || Files.size(outputPath) == 0) {
+                    cleanupPartialFile(outputPath);
+                    return ConversionResult.failure(inputPath.toString(),
+                            "The image converter did not create a complete output file. "
+                                    + "For animated or multi-page input, choose an output format that retains all frames.",
+                            outputLog.toString(), conversionTime, inputSize, ConversionTool.IMAGEMAGICK);
+                }
                 // Task 3.7: Create success ConversionResult
                 long outputSize = 0;
                 try {
@@ -508,6 +587,16 @@ public class ImageMagickService {
             // Unregister process from ProcessRegistry
             if (fileId != null) {
                 processRegistry.unregisterProcess(fileId);
+            }
+
+            // A convert still running here (interrupt path, or any other
+            // unexpected exit) must not outlive this call: the bounded
+            // timeout no longer applies once the waiter returns.
+            // destroyForcibly is a no-op on an already-terminated process,
+            // so normal completion is unaffected.
+            if (process != null && process.isAlive()) {
+                logger.warn("Forcibly terminating ImageMagick process");
+                process.destroyForcibly();
             }
         }
     }

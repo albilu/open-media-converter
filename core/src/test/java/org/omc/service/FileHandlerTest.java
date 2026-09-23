@@ -602,4 +602,45 @@ class FileHandlerTest {
             }
         });
     }
+
+    // Tests for GUI process reaping (fallback file-manager launches)
+
+    @Test
+    void reapOnDaemonThread_ShouldReapExitedProcess() throws Exception {
+        String os = System.getProperty("os.name").toLowerCase();
+        Assumptions.assumeTrue(
+                os.contains("nix") || os.contains("nux") || os.contains("mac"),
+                "Requires POSIX shell");
+
+        Process process = new ProcessBuilder("/bin/sh", "-c", "exit 0").start();
+
+        Thread reaper = FileHandler.reapOnDaemonThread(process, "test-process");
+
+        assertNotNull(reaper, "reaper thread must be returned");
+        assertTrue(reaper.isDaemon(), "reaper must be a daemon thread so it can never pin JVM shutdown");
+        reaper.join(5000);
+        assertFalse(reaper.isAlive(), "reaper must observe the process exit and finish");
+        assertFalse(process.isAlive(), "process must have exited and been reaped");
+    }
+
+    @Test
+    void reapOnDaemonThread_ShouldNotDestroyLongRunningProcess() throws Exception {
+        String os = System.getProperty("os.name").toLowerCase();
+        Assumptions.assumeTrue(
+                os.contains("nix") || os.contains("nux") || os.contains("mac"),
+                "Requires POSIX shell");
+
+        // A GUI file manager keeps running after launch; the reaper must
+        // observe its eventual exit without ever killing it.
+        Process process = new ProcessBuilder("/bin/sh", "-c", "sleep 0.5").start();
+
+        Thread reaper = FileHandler.reapOnDaemonThread(process, "test-gui");
+
+        Thread.sleep(200);
+        assertTrue(process.isAlive(), "long-running GUI process must not be destroyed by the reaper");
+
+        reaper.join(5000);
+        assertFalse(reaper.isAlive(), "reaper must finish once the process exits on its own");
+        assertFalse(process.isAlive(), "process must have exited on its own schedule");
+    }
 }

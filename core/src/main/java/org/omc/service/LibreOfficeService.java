@@ -54,6 +54,14 @@ public class LibreOfficeService {
      */
     static long PROCESS_TIMEOUT_MILLIS = TimeUnit.HOURS.toMillis(1);
 
+    /**
+     * How long the main thread waits for the output reader to drain after the
+     * process has ended before using whatever was captured. The reader is a
+     * daemon and pipe reads are not interruptible, so this join is a brief
+     * courtesy, not a correctness requirement.
+     */
+    private static final long READER_JOIN_MILLIS = TimeUnit.SECONDS.toMillis(2);
+
     // LibreOffice-supported document formats for input
     private static final List<FileFormat> SUPPORTED_INPUT_FORMATS = List.of(
             FileFormat.DOCX, FileFormat.XLSX, FileFormat.PPTX,
@@ -281,7 +289,13 @@ public class LibreOfficeService {
             // Wait for progress thread to complete its final 100% update before proceeding
             // This ensures the completion status is set AFTER all progress updates
             progressThread.join(1000); // Wait up to 1 second for progress thread
-            outputReader.join();
+            // Bounded join: a grandchild inheriting the pipe would otherwise
+            // block this join forever (pipe reads are not interruptible, but
+            // the reader is a daemon so interrupting is best-effort).
+            outputReader.join(READER_JOIN_MILLIS);
+            if (outputReader.isAlive()) {
+                outputReader.interrupt();
+            }
 
             Duration conversionTime = Duration.between(startTime, Instant.now());
 
@@ -340,6 +354,11 @@ public class LibreOfficeService {
             }
 
             // Move/rename the generated file to the desired output path
+            if (outputFormat == FileFormat.HTML) {
+                // LibreOffice puts images beside the HTML in its private directory.
+                // Embed and validate them before that directory is removed.
+                DocumentResources.embedHtml(generatedFile);
+            }
             Files.createDirectories(outputPath.getParent() != null ? outputPath.getParent() : Path.of("."));
             Files.move(generatedFile, outputPath, StandardCopyOption.REPLACE_EXISTING);
 

@@ -52,13 +52,14 @@ public final class IdleCoalescer {
     }
 
     /**
-     * Default scheduler: one-shot GLib idle callback at default priority.
+     * Default scheduler: one-shot GLib idle callback at default-idle priority
+     * (below input events, so progress bursts cannot starve interactivity).
      * Returning {@code false} from the callback means "do not repeat", matching
      * the codebase's existing idle pattern.
      */
     private static final IdleScheduler GLIB_IDLE_SCHEDULER = task -> {
         try {
-            int sourceId = GLib.idleAdd(0, () -> {
+            int sourceId = GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                 task.run();
                 return false;
             });
@@ -161,17 +162,27 @@ public final class IdleCoalescer {
      * Runs all pending work. Coalesced updates run first (in key arrival
      * order) so a terminal event always lands after the progress update it
      * supersedes.
+     *
+     * <p>
+     * The pending tasks are snapshotted under the lock and run after it is
+     * released, so engine threads blocked in {@link #submit(String, Runnable)}
+     * or {@link #submitForced(String, Runnable)} are not stalled for the
+     * duration of a flush.
+     * </p>
      */
-    private synchronized void flush() {
-        flushScheduled = false;
-        if (coalesced.isEmpty() && forced.isEmpty()) {
-            return;
+    private void flush() {
+        List<Runnable> toRun;
+        synchronized (this) {
+            flushScheduled = false;
+            if (coalesced.isEmpty() && forced.isEmpty()) {
+                return;
+            }
+            toRun = new ArrayList<>(coalesced.size() + forced.size());
+            toRun.addAll(coalesced.values());
+            toRun.addAll(forced);
+            coalesced.clear();
+            forced.clear();
         }
-        List<Runnable> toRun = new ArrayList<>(coalesced.size() + forced.size());
-        toRun.addAll(coalesced.values());
-        toRun.addAll(forced);
-        coalesced.clear();
-        forced.clear();
 
         for (Runnable task : toRun) {
             try {

@@ -440,12 +440,14 @@ public class ErrorScenarioIntegrationTest {
 
                     // Match by input file path to return appropriate result
                     if (inputPath.equals(file1)) {
+                        Files.writeString(invocation.getArgument(2, Path.class), "simulated converter output");
                         return ConversionResult.success(conv1.id(), outputDir.resolve("good1.wav"), null,
                                 Duration.ofSeconds(2), 1000L, 2000L, ConversionTool.FFMPEG);
                     } else if (inputPath.equals(file2)) {
                         return ConversionResult.failure(conv2.id(), "Corrupted audio stream", null,
                                 Duration.ofSeconds(1), 1000L, ConversionTool.FFMPEG);
                     } else if (inputPath.equals(file3)) {
+                        Files.writeString(invocation.getArgument(2, Path.class), "simulated converter output");
                         return ConversionResult.success(conv3.id(), outputDir.resolve("good2.wav"), null,
                                 Duration.ofSeconds(2), 1000L, 2000L, ConversionTool.FFMPEG);
                     } else {

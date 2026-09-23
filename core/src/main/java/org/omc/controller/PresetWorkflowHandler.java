@@ -71,12 +71,22 @@ class PresetWorkflowHandler {
         // Performance tracking: REQ-5.2 - Target < 500ms for 100 files
         long startTime = System.nanoTime();
 
-        // Get ConversionFile objects from FileManager
-        List<ConversionFile> files = fileIds.stream()
-                .map(fileManager::getFile)
-                .filter(Optional::isPresent)
-                .map(Optional::get)
-                .toList();
+        // Resolve every ID strictly: a stale ID must fail loudly rather than
+        // silently applying the preset to only the resolvable files
+        List<ConversionFile> files = new java.util.ArrayList<>(fileIds.size());
+        List<String> missingIds = new java.util.ArrayList<>();
+        for (String fileId : fileIds) {
+            Optional<ConversionFile> fileOpt = fileManager.getFile(fileId);
+            if (fileOpt.isEmpty()) {
+                missingIds.add(fileId);
+            } else {
+                files.add(fileOpt.get());
+            }
+        }
+        if (!missingIds.isEmpty()) {
+            logger.warn("Cannot apply preset: file ID(s) not found: {}", missingIds);
+            throw new IllegalArgumentException("File ID(s) not found: " + missingIds);
+        }
 
         // Validate all files have the same FormatCategory
         java.util.Set<FormatCategory> categories = files.stream()

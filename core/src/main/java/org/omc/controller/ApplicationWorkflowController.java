@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
@@ -66,6 +67,14 @@ public class ApplicationWorkflowController {
     // Current state
     private final AtomicBoolean initialized;
     private final AtomicBoolean conversionInProgress;
+    /**
+     * Terminal completion events still expected for the running batch. The
+     * engine registers futures one at a time during submission, so a fast
+     * first completion can observe {@code getActiveConversionCount() == 0}
+     * while the rest of the batch has not been submitted yet; counting
+     * completion events against the submitted batch size closes that race.
+     */
+    private final AtomicInteger remainingBatchFiles = new AtomicInteger(0);
     private final AtomicBoolean hasUnsavedChanges;
 
     // Tracked state for session persistence
@@ -145,6 +154,12 @@ public class ApplicationWorkflowController {
             // Load settings from disk or use defaults
             // Requirement REQ-003.1, REQ-005.3: Load persisted settings
             currentSettings = settingsManager.loadSettings();
+            if (!settingsManager.settingsFileExists()
+                    && !conversionEngine.canConvertDocuments(FileFormat.MARKDOWN, FileFormat.PDF)
+                    && conversionEngine.canConvertDocuments(FileFormat.MARKDOWN, FileFormat.HTML)) {
+                currentSettings = currentSettings.withDocumentSettings(
+                        currentSettings.documentSettings().withOutputFormat(FileFormat.HTML));
+            }
             logger.info("Settings loaded successfully");
 
             // Apply loaded parallelism setting to ConversionEngine
@@ -219,11 +234,11 @@ public class ApplicationWorkflowController {
 
                 // Check if all conversions are complete
                 // Requirement REQ-004.2: Save session state after batch completion
-                if (conversionEngine.getActiveConversionCount() == 0) {
+                if (remainingBatchFiles.decrementAndGet() == 0) {
                     conversionInProgress.set(false);
                     logger.info("Batch conversion complete, saving session state");
                     sessionState.saveApplicationState(recentFilePaths, lastInputDirectory,
-                    lastOutputDirectory, currentSettings, lastUsedPreset);
+                            lastOutputDirectory, lastUsedPreset);
                 }
 
                 // Forward completion event to UI callback if registered
@@ -320,13 +335,14 @@ public class ApplicationWorkflowController {
             if (conversionInProgress.get()) {
                 logger.info("Cancelling active conversions");
                 conversionEngine.cancelConversion();
+                remainingBatchFiles.set(0);
                 conversionInProgress.set(false);
             }
 
             // Save current application state
             // Requirement REQ-005.1, REQ-005.2, REQ-005.3: Persist state
             sessionState.saveApplicationState(recentFilePaths, lastInputDirectory,
-                    lastOutputDirectory, currentSettings, lastUsedPreset);
+                    lastOutputDirectory, lastUsedPreset);
 
             // Save current settings
             // Requirement REQ-003.1, REQ-005.3: Persist settings
@@ -538,7 +554,8 @@ public class ApplicationWorkflowController {
 
         } catch (Exception e) {
             logger.error("Failed to add files", e);
-            throw new FileOperationException("Failed to add files: " + e.getMessage(), ErrorCode.FILE_IO_ERROR, "", e);
+            throw new FileOperationException("Failed to add files: " + e.getMessage(), ErrorCode.FILE_IO_ERROR,
+                    filePaths.get(0).toString(), e);
         }
     }
 
@@ -614,8 +631,8 @@ public class ApplicationWorkflowController {
 
         } catch (Exception e) {
             logger.error("Failed to remove files", e);
-            throw new FileOperationException("Failed to remove files: " + e.getMessage(), ErrorCode.FILE_IO_ERROR, "",
-                    e);
+            throw new FileOperationException("Failed to remove files: " + e.getMessage(), ErrorCode.FILE_IO_ERROR,
+                    fileIds.get(0), e);
         }
     }
 
@@ -657,13 +674,24 @@ public class ApplicationWorkflowController {
      * @param newSettings the new settings to apply
      * @throws InvalidSettingsException if settings are invalid
      */
-    public void updateSettings(ConversionSettings newSettings) {
+    public void updateSettings(ConversionSettings newSettings) throws InvalidSettingsException {
         Objects.requireNonNull(newSettings, "newSettings cannot be null");
 
         logger.info("Updating conversion settings");
 
-        // Validate settings (assuming ConversionSettings has validation)
-        // For now, assume valid
+        // Persist first: saveSettings validates, so a rejected settings object
+        // never reaches the in-memory cache or the engine
+        try {
+            settingsManager.saveSettings(newSettings);
+        } catch (InvalidSettingsException e) {
+            logger.error("Settings validation failed", e);
+            throw e;
+        } catch (java.io.IOException e) {
+            // Mark as changed so they can be saved later
+            markSettingsChanged();
+            logger.error("Settings updated but failed to save to disk", e);
+            throw new RuntimeException("Failed to save settings to disk: " + e.getMessage(), e);
+        }
 
         // Check if parallelConversions has changed
         int oldParallelConversions = currentSettings != null ? currentSettings.parallelConversions() : -1;
@@ -684,17 +712,8 @@ public class ApplicationWorkflowController {
             }
         }
 
-        // Persist settings to disk immediately
-        try {
-            settingsManager.saveSettings(newSettings);
-            clearUnsavedChanges();
-            logger.info("Settings updated and saved successfully");
-        } catch (InvalidSettingsException | java.io.IOException e) {
-            // Mark as changed so they can be saved later
-            markSettingsChanged();
-            logger.error("Settings updated but failed to save to disk", e);
-            throw new RuntimeException("Failed to save settings to disk: " + e.getMessage(), e);
-        }
+        clearUnsavedChanges();
+        logger.info("Settings updated and saved successfully");
     }
 
     // ===== Conversion Control Methods =====
@@ -781,80 +800,6 @@ public class ApplicationWorkflowController {
     }
 
     /**
-     * Gets the current conversion progress.
-     * 
-     * @return conversion progress or null if no conversion active
-     */
-    public ConversionProgress getConversionProgress() {
-        return null; // Progress is per-file, no overall progress available
-    }
-
-    // ===== Workflow Handler Methods =====
-    // Note: These methods will be fully integrated with GTK UI in Phase 6
-
-    /**
-     * Handles the "Add Files" workflow.
-     * Creates file chooser dialog, validates selected files, and adds to file
-     * manager.
-     * 
-     * Requirement REQ-002.1: File selection workflows
-     * 
-     * NOTE: GTK UI integration is handled by
-     * MainWindowJavaGi.showFileChooserDialog() (line 915).
-     * This workflow handler is called by the UI, which then invokes addFiles() with
-     * the selected paths.
-     * 
-     * @param parentWindow the parent window for the file chooser dialog
-     * @throws IllegalStateException if controller not initialized
-     */
-    public void handleAddFiles(Object parentWindow) {
-        if (!initialized.get()) {
-            throw new IllegalStateException("Controller not initialized");
-        }
-
-        logger.info("handleAddFiles workflow started");
-
-        // NOTE: Dialog display is handled by MainWindowJavaGi.showFileChooserDialog()
-        // The UI calls this method, shows the dialog, and then calls addFiles() with
-        // selected paths.
-        // File addition business logic is in addFiles() method (lines 367-401).
-
-        logger.debug("File chooser dialog handled by MainWindowJavaGi");
-    }
-
-    /**
-     * Handles the "Add Folder" workflow.
-     * Creates folder chooser dialog, scans folder recursively, and adds files to
-     * file manager.
-     * 
-     * Requirement REQ-002.1: File selection workflows
-     * 
-     * NOTE: GTK UI integration is handled by
-     * MainWindowJavaGi.showFolderChooserDialog() (line 972).
-     * This workflow handler is called by the UI, which then invokes
-     * addFilesFromFolder() with the selected path.
-     * 
-     * @param parentWindow the parent window for the folder chooser dialog
-     * @throws IllegalStateException if controller not initialized
-     */
-    public void handleAddFolder(Object parentWindow) {
-        if (!initialized.get()) {
-            throw new IllegalStateException("Controller not initialized");
-        }
-
-        logger.info("handleAddFolder workflow started");
-
-        // NOTE: Dialog display is handled by MainWindowJavaGi.showFolderChooserDialog()
-        // The UI calls this method, shows the dialog, and then calls
-        // addFilesFromFolder() with selected path.
-        // Folder scanning business logic is in addFilesFromFolder() method (lines
-        // 414-449).
-        // Error dialogs are shown by MainWindowJavaGi.showErrorDialog() (line 1051).
-
-        logger.debug("Folder chooser dialog handled by MainWindowJavaGi");
-    }
-
-    /**
      * Handles the "Remove Files" workflow.
      * Confirms removal if conversions in progress, removes files, and saves state.
      * 
@@ -892,7 +837,7 @@ public class ApplicationWorkflowController {
             // Save session state after removal to persist changes
             // Requirement REQ-005.2: Save session state
             sessionState.saveApplicationState(recentFilePaths, lastInputDirectory,
-                    lastOutputDirectory, currentSettings, lastUsedPreset);
+                    lastOutputDirectory, lastUsedPreset);
 
             logger.info("Files removed successfully and state saved");
 
@@ -934,7 +879,7 @@ public class ApplicationWorkflowController {
             // Save session state after clearing
             // Requirement REQ-005.2: Save session state
             sessionState.saveApplicationState(recentFilePaths, lastInputDirectory,
-                    lastOutputDirectory, currentSettings, lastUsedPreset);
+                    lastOutputDirectory, lastUsedPreset);
 
             logger.info("All files cleared successfully and state saved");
 
@@ -943,48 +888,6 @@ public class ApplicationWorkflowController {
             // NOTE: Error dialogs are shown by MainWindowJavaGi.showErrorDialog() (line
             // 1051)
             throw new RuntimeException("Failed to clear files: " + e.getMessage(), e);
-        }
-    }
-
-    // ===== Settings Workflow Methods =====
-
-    /**
-     * Handles the "Settings Dialog" workflow.
-     * Opens settings dialog, handles user input, validates and saves settings.
-     * 
-     * Requirement REQ-003.1: Settings dialog workflow
-     * 
-     * @param parentWindow the parent window for the dialog (for GTK modal dialogs)
-     * @throws IllegalStateException if controller not initialized
-     */
-    public void handleSettingsDialog(Object parentWindow) {
-        if (!initialized.get()) {
-            throw new IllegalStateException("Controller not initialized");
-        }
-
-        logger.info("handleSettingsDialog workflow started");
-
-        try {
-            // Get current settings from SettingsManager
-            ConversionSettings currentSettings = settingsManager.getCurrentSettings();
-
-            // NOTE: SettingsDialogJavaGi handles GTK UI integration
-            // (src/main/java/org/omc/ui/SettingsDialogJavaGi.java)
-            // The UI creates the dialog, displays it to the user, and calls
-            // handleSettingsSave() or handleSettingsCancel() based on user action.
-
-            logger.info("Settings dialog workflow prepared (UI integration handled by SettingsDialogJavaGi)");
-
-            // Business logic is ready:
-            // - Gets current settings from SettingsManager
-            // - Validates and saves settings on OK (handleSettingsSave)
-            // - Discards changes on Cancel (handleSettingsCancel)
-
-        } catch (Exception e) {
-            logger.error("Failed to open settings dialog", e);
-            // NOTE: Error dialogs are shown by MainWindowJavaGi.showErrorDialog() (line
-            // 1051)
-            throw new RuntimeException("Failed to open settings dialog: " + e.getMessage(), e);
         }
     }
 
@@ -1118,10 +1021,11 @@ public class ApplicationWorkflowController {
      * 
      * Requirement REQ-004.2: Conversion start workflow
      * 
+     * @return identities of exactly the files admitted to this batch
      * @throws IllegalStateException if validation fails or conversion already in
      *                               progress
      */
-    public void handleStartConversion() {
+    public List<String> handleStartConversion() {
         if (!initialized.get()) {
             throw new IllegalStateException("Controller not initialized");
         }
@@ -1144,14 +1048,39 @@ public class ApplicationWorkflowController {
                 throw new IllegalStateException("No files to convert");
             }
 
+            // Completed files must never be resubmitted: their originals may
+            // already be deleted (deleteOriginalFile), so reconversion would
+            // fail or re-encode outputs. Failed/cancelled files keep their
+            // originals and stay retryable.
+            List<ConversionFile> convertibleFiles = new ArrayList<>(files.size());
+            for (ConversionFile file : files) {
+                if (file.status() != ConversionStatus.COMPLETED) {
+                    convertibleFiles.add(file);
+                }
+            }
+            if (convertibleFiles.isEmpty()) {
+                throw new IllegalStateException("No files to convert: all files have already been converted");
+            }
+            files = convertibleFiles;
+
             // Requirement REQ-004.2: Validate output directory configured
             if (currentSettings == null || currentSettings.outputDirectory() == null) {
                 throw new IllegalStateException("Output directory not configured");
             }
 
             // Requirement REQ-004.2: Validate output format selected
-            if (!currentSettings.isValid()) {
+            // Structural validity only: a document template on offline storage
+            // must not block unrelated video/audio/image conversions
+            if (!currentSettings.isStructurallyValid()) {
                 throw new IllegalStateException("Settings are not valid");
+            }
+
+            // The output directory itself must exist and be writable right now
+            java.nio.file.Path outputDirectory = currentSettings.outputDirectory();
+            if (!java.nio.file.Files.isDirectory(outputDirectory)
+                    || !java.nio.file.Files.isWritable(outputDirectory)) {
+                throw new IllegalStateException(
+                        "Output directory does not exist or is not writable: " + outputDirectory);
             }
 
             // Apply current sort order to file list before conversion
@@ -1160,7 +1089,7 @@ public class ApplicationWorkflowController {
             if (sortState.isSorted()) {
                 logger.debug("Applying sort order to conversion list: {}", sortState);
                 files = new ArrayList<>(files); // Make a mutable copy
-                files.sort(sortState.createComparator());
+                files.sort(sortState.createComparator(currentSettings));
             }
 
             logger.info("Starting conversion for {} files in {} order",
@@ -1175,6 +1104,7 @@ public class ApplicationWorkflowController {
                 throw new IllegalStateException("Conversion already in progress");
             }
             startedByThisCall = true;
+            remainingBatchFiles.set(files.size());
 
             try {
                 // Call ConversionEngine to start batch conversion
@@ -1187,10 +1117,13 @@ public class ApplicationWorkflowController {
                 // NOTE: UI updates are handled via registered callbacks (uiProgressCallback,
                 // uiCompletionCallback)
 
+                return files.stream().map(ConversionFile::id).toList();
+
             } catch (Exception conversionException) {
                 // Reset flag if conversion failed to start, but only when this
                 // invocation actually claimed it (the CAS winner owns the flag)
                 if (startedByThisCall) {
+                    remainingBatchFiles.set(0);
                     conversionInProgress.set(false);
                 }
                 logger.error("Failed to start conversion", conversionException);

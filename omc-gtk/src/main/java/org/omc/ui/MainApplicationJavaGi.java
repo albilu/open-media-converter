@@ -4,6 +4,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import org.gnome.gio.ApplicationFlags;
@@ -40,18 +41,47 @@ public class MainApplicationJavaGi extends Application {
     private List<String> filesToPreload = new ArrayList<>();
     private String customConfigDir = null;
     private boolean debugMode = false;
+    private boolean settingsRequested;
 
     /**
      * Creates the main GTK application.
      * Uses a unique application ID to prevent multiple instances.
      */
     public MainApplicationJavaGi() {
-        super("org.omc.OpenMediaConverter", ApplicationFlags.FLAGS_NONE);
+        super("org.omc.OpenMediaConverter", ApplicationFlags.HANDLES_COMMAND_LINE);
         logger.debug("MainApplicationJavaGi created");
 
         // Connect the activate signal - this is required for GTK to trigger activation
         // Without this, the application exits immediately with the GLib-GIO warning
         this.onActivate(() -> this.activate());
+        this.onCommandLine(commandLine -> {
+            int status = 1;
+            try {
+                String[] arguments = commandLine.getArguments();
+                filesToPreload.clear();
+                settingsRequested = false;
+                Path callerDirectory = commandLine.getCwd() == null ? Path.of("").toAbsolutePath()
+                        : Path.of(commandLine.getCwd());
+                parseCommandLineArguments(Arrays.copyOfRange(arguments, Math.min(1, arguments.length), arguments.length),
+                        callerDirectory);
+                // Emit the native signal so all activation handlers run in the
+                // primary instance, including on subsequent desktop launches.
+                emitActivate();
+                preloadFiles();
+                if (settingsRequested && mainWindow != null) mainWindow.triggerSettings();
+                status = 0;
+                return status;
+            } catch (IllegalArgumentException e) {
+                commandLine.printerrLiteral(e.getMessage() + "\n");
+                return status;
+            } finally {
+                // Java retains the native wrapper until GC. Gio must receive
+                // completion now so the invoking process can exit immediately.
+                commandLine.setExitStatus(status);
+                if (org.gnome.glib.GLib.checkVersion(2, 80, 0) == null) commandLine.done();
+                else commandLine.runDispose(); // Older Gio completes the reply on disposal.
+            }
+        });
 
         // Register application actions
         setupActions();
@@ -215,14 +245,7 @@ public class MainApplicationJavaGi extends Application {
 
             // Preload files from command-line if any
             // Requirement REQ-001.1: Pre-load files from command-line arguments
-            if (!filesToPreload.isEmpty()) {
-                logger.info("Preloading {} files from command-line", filesToPreload.size());
-                List<Path> pathsToAdd = new ArrayList<>();
-                for (String filePath : filesToPreload) {
-                    pathsToAdd.add(Paths.get(filePath));
-                }
-                mainWindow.addFilesAsync(pathsToAdd);
-            }
+            preloadFiles();
 
             // Update file list UI to reflect restored/preloaded files
             // This also sets the initial button states (Convert/Clear All disabled if no
@@ -240,6 +263,13 @@ public class MainApplicationJavaGi extends Application {
             System.err.println("Failed to initialize application: " + e.getMessage());
             System.exit(1);
         }
+    }
+
+    private void preloadFiles() {
+        if (mainWindow == null || filesToPreload.isEmpty()) return;
+        List<Path> paths = filesToPreload.stream().map(Paths::get).toList();
+        filesToPreload.clear();
+        mainWindow.addFilesAsync(paths);
     }
 
     /**
@@ -348,12 +378,12 @@ public class MainApplicationJavaGi extends Application {
         // Create and run the GTK application
         MainApplicationJavaGi app = new MainApplicationJavaGi();
 
-        // Parse remaining arguments (files, flags)
-        app.parseCommandLineArguments(args);
-
-        // Run the application without passing args (already parsed manually)
-        // This ensures the activate() signal is properly triggered
-        int exitCode = app.run(new String[0]);
+        // Gio forwards arguments and the caller's working directory to the
+        // existing primary instance. argv[0] is the application name.
+        String[] applicationArguments = new String[args.length + 1];
+        applicationArguments[0] = "open-media-converter";
+        System.arraycopy(args, 0, applicationArguments, 1, args.length);
+        int exitCode = app.run(applicationArguments);
 
         logger.info("Application exited with code: {}", exitCode);
         System.exit(exitCode);
@@ -374,10 +404,19 @@ public class MainApplicationJavaGi extends Application {
      * @param args command-line arguments
      */
     private void parseCommandLineArguments(String[] args) {
+        parseCommandLineArguments(args, Path.of("").toAbsolutePath());
+    }
+
+    private void parseCommandLineArguments(String[] args, Path callerDirectory) {
         logger.debug("Parsing command-line arguments: {}", (Object) args);
 
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
+
+            if ("--settings".equals(arg)) {
+                settingsRequested = true;
+                continue;
+            }
 
             // Skip help and version (already handled in main)
             if ("--help".equals(arg) || "-h".equals(arg) ||
@@ -398,7 +437,12 @@ public class MainApplicationJavaGi extends Application {
             // Requirement REQ-001.1: Override config directory via --config-dir
             if ("--config-dir".equals(arg)) {
                 if (i + 1 < args.length) {
-                    customConfigDir = args[++i];
+                    String requestedConfig = args[++i];
+                    if (mainWindow != null) {
+                        logger.warn("Configuration directory cannot change while the application is running");
+                        continue;
+                    }
+                    customConfigDir = callerDirectory.resolve(requestedConfig).normalize().toString();
                     logger.info("Custom config directory set: {}", customConfigDir);
 
                     // Validate config directory
@@ -408,13 +452,13 @@ public class MainApplicationJavaGi extends Application {
                     } else if (!Files.isDirectory(configPath)) {
                         logger.error("Custom config path is not a directory: {}", customConfigDir);
                         System.err.println("Error: --config-dir path is not a directory: " + customConfigDir);
-                        System.exit(1);
+                        throw new IllegalArgumentException("--config-dir path is not a directory: " + customConfigDir);
                     }
                 } else {
                     logger.error("--config-dir flag requires a directory path argument");
                     System.err.println("Error: --config-dir requires a directory path argument");
                     printUsage();
-                    System.exit(1);
+                    throw new IllegalArgumentException("--config-dir requires a directory path argument");
                 }
                 continue;
             }
@@ -428,10 +472,10 @@ public class MainApplicationJavaGi extends Application {
 
             // Treat as file path
             // Requirement REQ-001.1: Validate and preload file paths
-            Path filePath = Paths.get(arg);
+            Path filePath = callerDirectory.resolve(arg).normalize();
             if (Files.exists(filePath)) {
                 if (Files.isRegularFile(filePath) && Files.isReadable(filePath)) {
-                    filesToPreload.add(arg);
+                    filesToPreload.add(filePath.toString());
                     logger.debug("Added file to preload list: {}", arg);
                 } else if (Files.isDirectory(filePath)) {
                     logger.warn("Ignoring directory argument (use Add Folder in UI): {}", arg);
@@ -476,6 +520,7 @@ public class MainApplicationJavaGi extends Application {
         System.out.println();
         System.out.println("Options:");
         System.out.println("  --help, -h              Show this help message and exit");
+        System.out.println("  --settings              Open the Settings dialog");
         System.out.println("  --version, -v           Show version information and exit");
         System.out.println("  --debug                 Enable debug logging");
         System.out.println(

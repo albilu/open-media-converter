@@ -720,6 +720,46 @@ class PandocServiceTest {
                 "Requires POSIX executable scripts");
     }
 
+    /**
+     * A pandoc that exits 0 but leaves a grandchild holding the output pipe
+     * open must not hang the post-exit outputReader join: the join is bounded
+     * and the reader interrupted, so the conversion completes promptly.
+     */
+    @Test
+    @Timeout(value = 30)
+    void testConvertDocument_GrandchildHoldsPipeOpen_CompletesPromptly() throws Exception {
+        assumeUnixLike();
+        Path pandocStub = tempDir.resolve("pandoc-grandchild");
+        // The backgrounded sleep inherits the output pipe; the printf and
+        // short foreground sleep make the hand-off deterministic so the
+        // reader is guaranteed to see the pipe held open after exit.
+        Files.writeString(pandocStub, "#!/bin/sh\n"
+                + "sleep 15 &\n"
+                + "printf 'starting\\n'\n"
+                + "sleep 0.3\n"
+                + "out=\nprev=\n"
+                + "for a in \"$@\"; do\n"
+                + "  if [ \"$prev\" = \"-o\" ]; then out=\"$a\"; fi\n"
+                + "  prev=\"$a\"\n"
+                + "done\n"
+                + "[ -n \"$out\" ] && printf 'stub' > \"$out\"\n"
+                + "exit 0\n");
+        Files.setPosixFilePermissions(pandocStub, PosixFilePermissions.fromString("rwxr-xr-x"));
+        PandocService stubService = new PandocService(pandocStub);
+
+        Path input = tempDir.resolve("input.md");
+        Files.writeString(input, "# Test Document\n");
+        Path output = tempDir.resolve("output.html");
+
+        long startNanos = System.nanoTime();
+        ConversionResult result = stubService.convertDocument(input, output, defaultSettings, noOpCallback);
+        long elapsedMillis = (System.nanoTime() - startNanos) / 1_000_000;
+
+        assertTrue(result.success(), "stub exits 0 so conversion must succeed");
+        assertTrue(elapsedMillis < 10_000,
+                "post-exit reader join must be bounded, took " + elapsedMillis + "ms");
+    }
+
     // ========================================
     // Task 6.22: Integration tests for tool output capture
     // ========================================

@@ -73,7 +73,8 @@ class FileListPerformanceTest {
 
         // Create ToolManager with mocked services for tool selection tests
         FFmpegService ffmpegService = mock(FFmpegService.class);
-        PandocService pandocService = mock(PandocService.class);
+        PandocService pandocService = new PandocService(Path.of("/usr/bin/pandoc"),
+                new LibreOfficeService(Path.of("/usr/bin/soffice")));
         LibreOfficeService libreOfficeService = mock(LibreOfficeService.class);
         ImageMagickService imageMagickService = mock(ImageMagickService.class);
 

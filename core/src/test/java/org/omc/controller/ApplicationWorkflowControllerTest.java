@@ -41,6 +41,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
@@ -446,6 +447,45 @@ class ApplicationWorkflowControllerTest {
         verify(stateManager).updateState(any());
     }
 
+    // ===== updateSettings Tests =====
+
+    @Test
+    void updateSettings_whenPersistenceRejects_keepsPreviousSettingsAndThrowsInvalidSettingsException()
+            throws Exception {
+        // Arrange
+        initializeController();
+        ConversionSettings previous = controller.getCurrentSettings();
+
+        ConversionSettings rejected = createValidSettings();
+        doThrow(new InvalidSettingsException("bad settings", "field"))
+                .when(settingsManager).saveSettings(rejected);
+
+        // Act & Assert: the checked exception must propagate as-is, and the
+        // in-memory cache must not hold settings that failed validation
+        assertThrows(InvalidSettingsException.class, () -> controller.updateSettings(rejected));
+        assertSame(previous, controller.getCurrentSettings());
+    }
+
+    @Test
+    void updateSettings_whenPersistenceSucceeds_appliesNewSettings() throws Exception {
+        // Arrange
+        initializeController();
+
+        ConversionSettings newSettings = ConversionSettings.builder()
+                .outputFormat(FileFormat.MKV)
+                .outputDirectory(tempDir)
+                .overwriteExisting(true)
+                .parallelConversions(2)
+                .build();
+
+        // Act
+        controller.updateSettings(newSettings);
+
+        // Assert
+        assertSame(newSettings, controller.getCurrentSettings());
+        verify(settingsManager).saveSettings(newSettings);
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void saveCurrentSettings_should_callSettingsManagerSave_when_settingsNotNull() throws Exception {
@@ -634,38 +674,6 @@ class ApplicationWorkflowControllerTest {
         }
     }
 
-    // ===== Tests for Workflow Handler Methods =====
-
-    @Test
-    void handleAddFiles_should_throwException_when_notInitialized() {
-        // Act & Assert
-        assertThrows(IllegalStateException.class, () -> controller.handleAddFiles(null));
-    }
-
-    @Test
-    void handleAddFiles_should_complete_when_initialized() {
-        // Arrange
-        initializeController();
-
-        // Act & Assert - should not throw
-        assertDoesNotThrow(() -> controller.handleAddFiles(null));
-    }
-
-    @Test
-    void handleAddFolder_should_throwException_when_notInitialized() {
-        // Act & Assert
-        assertThrows(IllegalStateException.class, () -> controller.handleAddFolder(null));
-    }
-
-    @Test
-    void handleAddFolder_should_complete_when_initialized() {
-        // Arrange
-        initializeController();
-
-        // Act & Assert - should not throw
-        assertDoesNotThrow(() -> controller.handleAddFolder(null));
-    }
-
     @Test
     void handleRemoveFiles_should_throwException_when_notInitialized() {
         // Act & Assert
@@ -788,29 +796,6 @@ class ApplicationWorkflowControllerTest {
     }
 
     // ===== Settings Workflow Tests =====
-
-    @Test
-    void handleSettingsDialog_should_throwException_when_notInitialized() {
-        // Act & Assert
-        assertThrows(IllegalStateException.class, () -> controller.handleSettingsDialog(null));
-    }
-
-    @Test
-    void handleSettingsDialog_should_getCurrentSettings_when_opened() {
-        // Arrange
-        initializeController();
-        ConversionSettings currentSettings = ConversionSettings.builder()
-                .outputDirectory(tempDir)
-                .parallelConversions(4)
-                .build();
-        when(settingsManager.getCurrentSettings()).thenReturn(currentSettings);
-
-        // Act
-        controller.handleSettingsDialog(null);
-
-        // Assert
-        verify(settingsManager).getCurrentSettings();
-    }
 
     @Test
     void handleSettingsSave_should_throwException_when_notInitialized() {
@@ -1056,6 +1041,85 @@ class ApplicationWorkflowControllerTest {
     }
 
     @Test
+    void testHandleStartConversion_ExcludesCompletedFiles() {
+        // Arrange: a completed file (its original may have been deleted) must
+        // never be resubmitted; pending/failed/cancelled files stay retryable
+        initializeController();
+
+        ConversionFile completed = ConversionFile.create(Path.of("/test/done.mp4"), FileFormat.MP4, 1024L)
+                .withStatus(ConversionStatus.COMPLETED);
+        ConversionFile pending = ConversionFile.create(Path.of("/test/new.mp4"), FileFormat.MP4, 1024L);
+        ConversionFile failed = ConversionFile.create(Path.of("/test/failed.mp4"), FileFormat.MP4, 1024L)
+                .withStatus(ConversionStatus.FAILED);
+        ConversionFile cancelled = ConversionFile.create(Path.of("/test/cancelled.mp4"), FileFormat.MP4, 1024L)
+                .withStatus(ConversionStatus.CANCELLED);
+
+        when(fileManager.getFiles()).thenReturn(List.of(completed, pending, failed, cancelled));
+
+        // Act
+        controller.handleStartConversion();
+
+        // Assert
+        ArgumentCaptor<List<ConversionFile>> captor = ArgumentCaptor.forClass(List.class);
+        verify(conversionEngine).convertBatch(captor.capture(), any(ConversionSettings.class));
+        List<ConversionFile> submitted = captor.getValue();
+        assertEquals(3, submitted.size());
+        assertTrue(submitted.stream().noneMatch(f -> f.status() == ConversionStatus.COMPLETED),
+                "completed files must not be resubmitted: " + submitted);
+        assertTrue(submitted.contains(pending) && submitted.contains(failed) && submitted.contains(cancelled));
+    }
+
+    @Test
+    void testHandleStartConversion_AllFilesCompleted_ThrowsWithoutSubmitting() {
+        // Arrange
+        initializeController();
+
+        ConversionFile completed = ConversionFile.create(Path.of("/test/done.mp4"), FileFormat.MP4, 1024L)
+                .withStatus(ConversionStatus.COMPLETED);
+        when(fileManager.getFiles()).thenReturn(List.of(completed));
+
+        // Act & Assert
+        assertThrows(IllegalStateException.class, () -> controller.handleStartConversion());
+        verify(conversionEngine, never()).convertBatch(any(), any());
+        assertFalse(controller.isConversionInProgress());
+    }
+
+    @Test
+    void testHandleStartConversion_OfflineTemplatePath_DoesNotBlockUnrelatedConversions() {
+        // Arrange: a document template on offline storage must not block video
+        // conversions; only structural invalidity may abort the start
+        DocumentSettings offlineTemplateDocs = DocumentSettings.builder()
+                .templatePath(Paths.get("/offline-storage/template.docx"))
+                .build();
+        ConversionSettings settingsWithOfflineTemplate = ConversionSettings.builder()
+                .outputFormat(FileFormat.AVI)
+                .outputDirectory(tempDir)
+                .overwriteExisting(false)
+                .parallelConversions(2)
+                .documentSettings(offlineTemplateDocs)
+                .build();
+
+        ApplicationState mockState = mock(ApplicationState.class);
+        SessionState mockSessionState = mock(SessionState.class);
+        when(settingsManager.loadSettings()).thenReturn(settingsWithOfflineTemplate);
+        when(stateManager.loadState()).thenReturn(mockState);
+        when(mockState.sessionState()).thenReturn(mockSessionState);
+        when(mockSessionState.pendingFiles()).thenReturn(List.of());
+        lenient().when(mockState.fileListSortState()).thenReturn(FileListSortState.unsorted());
+        lenient().when(stateManager.getCurrentState()).thenReturn(mockState);
+        controller.initialize();
+
+        ConversionFile videoFile = ConversionFile.create(Path.of("/test/video.mp4"), FileFormat.MP4, 1024L);
+        when(fileManager.getFiles()).thenReturn(List.of(videoFile));
+
+        // Act
+        controller.handleStartConversion();
+
+        // Assert
+        verify(conversionEngine).convertBatch(any(), eq(settingsWithOfflineTemplate));
+    }
+
+    @Test
     void testHandleStartConversion_ConversionEngineThrowsException() {
         // Arrange
         initializeController();
@@ -1124,7 +1188,6 @@ class ApplicationWorkflowControllerTest {
         assertTrue(controller.isConversionInProgress());
 
         // The completion handler (not the failed second start) clears the flag
-        when(conversionEngine.getActiveConversionCount()).thenReturn(0);
         ConversionResult successResult = ConversionResult.success("file1", Path.of("/output/result.mp4"), null,
                 Duration.ofSeconds(10), 1024L, 512L, ConversionTool.FFMPEG);
         completionCallback.accept("file1", successResult);
@@ -1132,6 +1195,49 @@ class ApplicationWorkflowControllerTest {
         // Assert
         verify(conversionEngine, times(1)).convertBatch(any(), any());
         assertFalse(controller.isConversionInProgress());
+    }
+
+    @Test
+    void testCompletionHandler_FirstCompletionWhileBatchStillSubmitting_DoesNotDeclareBatchComplete()
+            throws Exception {
+        // Arrange: the engine registers futures one at a time, so a fast first
+        // completion can observe activeConversionCount == 0 while the rest of
+        // the batch has not been submitted yet; the controller must count
+        // terminal events against the submitted batch size instead
+        initializeController();
+        ArgumentCaptor<BiConsumer<String, ConversionResult>> completionCallbackCaptor = ArgumentCaptor
+                .forClass(BiConsumer.class);
+        verify(conversionEngine).onConversionComplete(completionCallbackCaptor.capture());
+        BiConsumer<String, ConversionResult> completionCallback = completionCallbackCaptor.getValue();
+
+        ConversionFile file1 = ConversionFile.create(Path.of("/test/a.mp4"), FileFormat.MP4, 1024L);
+        ConversionFile file2 = ConversionFile.create(Path.of("/test/b.mp4"), FileFormat.MP4, 2048L);
+        when(fileManager.getFiles()).thenReturn(List.of(file1, file2));
+        lenient().when(fileManager.getFile(anyString())).thenReturn(Optional.empty());
+
+        controller.handleStartConversion();
+        assertTrue(controller.isConversionInProgress());
+
+        // Act: first file completes while the engine transiently reports zero
+        // active conversions (second future not yet registered)
+        lenient().when(conversionEngine.getActiveConversionCount()).thenReturn(0);
+        ConversionResult result1 = ConversionResult.success(file1.id(), Path.of("/output/a.mp4"), null,
+                Duration.ofSeconds(10), 1024L, 512L, ConversionTool.FFMPEG);
+        completionCallback.accept(file1.id(), result1);
+
+        // Assert: batch must NOT be declared complete yet
+        assertTrue(controller.isConversionInProgress(),
+                "first of two completions must not clear the conversion flag");
+        verify(stateManager, never()).updateState(any());
+
+        // Act: second completion arrives
+        ConversionResult result2 = ConversionResult.success(file2.id(), Path.of("/output/b.mp4"), null,
+                Duration.ofSeconds(10), 2048L, 1024L, ConversionTool.FFMPEG);
+        completionCallback.accept(file2.id(), result2);
+
+        // Assert: now the batch is complete
+        assertFalse(controller.isConversionInProgress());
+        verify(stateManager).updateState(any());
     }
 
     @Test
@@ -1265,7 +1371,6 @@ class ApplicationWorkflowControllerTest {
         verify(conversionEngine).cancelConversion();
         assertTrue(controller.isConversionInProgress());
 
-        when(conversionEngine.getActiveConversionCount()).thenReturn(0);
         ConversionResult cancelledResult = ConversionResult.cancelled("file1", null,
                 Duration.ofSeconds(1), 1024L, ConversionTool.FFMPEG);
         completionCallback.accept("file1", cancelledResult);
@@ -1357,9 +1462,6 @@ class ApplicationWorkflowControllerTest {
         when(fileManager.getFiles()).thenReturn(List.of(convFile));
         controller.handleStartConversion();
 
-        // Mock active conversion count to be 0 (batch complete)
-        when(conversionEngine.getActiveConversionCount()).thenReturn(0);
-
         // Create successful conversion result
         ConversionResult successResult = ConversionResult.success("file1", Path.of("/output/result.mp4"), null,
                 Duration.ofSeconds(10), 1024L, 512L, ConversionTool.FFMPEG);
@@ -1389,9 +1491,6 @@ class ApplicationWorkflowControllerTest {
         controller.handleStartConversion();
         assertTrue(controller.isConversionInProgress());
 
-        // Mock active conversion count to be 0 (batch complete)
-        when(conversionEngine.getActiveConversionCount()).thenReturn(0);
-
         // Create failed conversion result
         ConversionResult failureResult = ConversionResult.failure("file1", "Conversion failed", null,
                 Duration.ofSeconds(5), 1024L, ConversionTool.FFMPEG);
@@ -1414,19 +1513,17 @@ class ApplicationWorkflowControllerTest {
 
         BiConsumer<String, ConversionResult> completionCallback = completionCallbackCaptor.getValue();
 
-        // Setup: Start a conversion
-        Path file = Path.of("/test/input.mp4");
-        ConversionFile convFile = ConversionFile.create(file, FileFormat.MP4, 1024L);
-        when(fileManager.getFiles()).thenReturn(List.of(convFile));
+        // Setup: Start a two-file conversion; one completion must not complete
+        // the batch while the second file is still active
+        ConversionFile convFile1 = ConversionFile.create(Path.of("/test/input1.mp4"), FileFormat.MP4, 1024L);
+        ConversionFile convFile2 = ConversionFile.create(Path.of("/test/input2.mp4"), FileFormat.MP4, 2048L);
+        when(fileManager.getFiles()).thenReturn(List.of(convFile1, convFile2));
         controller.handleStartConversion();
-
-        // Mock active conversion count to be > 0 (batch not complete)
-        when(conversionEngine.getActiveConversionCount()).thenReturn(1);
 
         ConversionResult result = ConversionResult.success("file1", Path.of("/output/result.mp4"), null,
                 Duration.ofSeconds(10), 1024L, 512L, ConversionTool.FFMPEG);
 
-        // Act - Simulate completion callback
+        // Act - Simulate completion callback for the first file only
         completionCallback.accept("file1", result);
 
         // Assert
@@ -1454,8 +1551,6 @@ class ApplicationWorkflowControllerTest {
         String fileId = convFile.id(); // Use the auto-generated ID
 
         when(fileManager.getFile(fileId)).thenReturn(java.util.Optional.of(convFile));
-        when(fileManager.getFiles()).thenReturn(List.of(convFile));
-        when(conversionEngine.getActiveConversionCount()).thenReturn(0);
 
         // Create successful conversion result with output path
         ConversionResult successResult = ConversionResult.success(
@@ -1499,8 +1594,6 @@ class ApplicationWorkflowControllerTest {
         String fileId = convFile.id(); // Use the auto-generated ID
 
         when(fileManager.getFile(fileId)).thenReturn(java.util.Optional.of(convFile));
-        when(fileManager.getFiles()).thenReturn(List.of(convFile));
-        when(conversionEngine.getActiveConversionCount()).thenReturn(0);
 
         // Create failed conversion result (no output path)
         ConversionResult failureResult = ConversionResult.failure(
@@ -1543,8 +1636,6 @@ class ApplicationWorkflowControllerTest {
         String fileId = imageFile.id(); // Use the auto-generated ID
 
         when(fileManager.getFile(fileId)).thenReturn(java.util.Optional.of(imageFile));
-        when(fileManager.getFiles()).thenReturn(List.of(imageFile));
-        when(conversionEngine.getActiveConversionCount()).thenReturn(0);
 
         // Create result with specific output path
         ConversionResult result = ConversionResult.success(
@@ -1668,6 +1759,31 @@ class ApplicationWorkflowControllerTest {
         IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
                 () -> controller.applyPresetToFiles(List.of("video1"), audioPreset));
         assertTrue(ex.getMessage().contains("does not match preset category"));
+    }
+
+    @Test
+    void applyPresetToFiles_should_throwIllegalArgumentException_when_someFileIdsMissing() {
+        // Arrange: a selection mixing a valid ID with a stale ID must fail
+        // loudly instead of silently applying to the valid file only
+        initializeController();
+        ConversionFile videoFile = ConversionFile.create(
+                Path.of("/test/video.mp4"), FileFormat.MP4, 1024L);
+        when(fileManager.getFile("video1")).thenReturn(java.util.Optional.of(videoFile));
+        when(fileManager.getFile("stale-id")).thenReturn(java.util.Optional.empty());
+
+        SectionPreset videoPreset = SectionPreset.forVideo(
+                "HD Video",
+                "1080p preset",
+                VideoSettings.builder().build(),
+                false);
+
+        // Act & Assert
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class,
+                () -> controller.applyPresetToFiles(List.of("video1", "stale-id"), videoPreset));
+        assertTrue(thrown.getMessage().contains("not found"),
+                "message must identify the missing IDs: " + thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("stale-id"));
+        verify(fileManager, never()).updateFile(any());
     }
 
     @Test

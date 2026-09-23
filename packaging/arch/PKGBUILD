@@ -1,0 +1,32 @@
+# Maintainer: Open Media Converter Team <maintainer@openmediaconverter.org>
+pkgname=open-media-converter
+pkgver=__VERSION__
+pkgrel=1
+pkgdesc="Native Linux media and document converter with GTK 4 UI (bundled Java runtime)"
+arch=('x86_64')
+url="https://github.com/albilu/open-media-converter"
+license=('GPL-3.0-or-later')
+depends=(
+    'gtk4>=4.10'
+    'glib2>=2.66.0'
+    'gobject-introspection>=1.66.0'
+    'imagemagick'
+    'libreoffice-fresh'
+)
+optdepends=(
+    'ffmpeg: video/audio conversion (also embedded in the application jar)'
+    'pandoc: document conversion (also embedded in the application jar)'
+)
+source=("opt-open-media-converter.tar")
+noextract=()
+
+package() {
+    cp -a "${srcdir}/opt" "${pkgdir}/"
+    cp -a "${srcdir}/usr" "${pkgdir}/"
+    chmod 755 "${pkgdir}/usr/bin/open-media-converter"
+    install -Dm644 "${srcdir}/usr/share/licenses/open-media-converter/LICENSE" \
+        "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}
+
+# The source tarball is assembled by packaging/build-packages.sh from the
+# staged install tree (bundled jlink runtime + shaded jar).

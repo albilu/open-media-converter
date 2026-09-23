@@ -65,35 +65,34 @@
 
     <build>
         <plugins>
-             <!-- Maven Compiler Plugin for Java 23 (release/source/target
-                  are inherited from the parent properties) -->
-              <plugin>
-                  <groupId>org.apache.maven.plugins</groupId>
-                  <artifactId>maven-compiler-plugin</artifactId>
-                  <version>3.13.0</version>
-                   <configuration>
-                       <showWarnings>true</showWarnings>
-                       <showDeprecation>true</showDeprecation>
-                   </configuration>
-              </plugin>
+              <!-- Maven Compiler Plugin for Java 23 (release/source/target
+                   are inherited from the parent properties; plugin versions
+                   managed by the parent) -->
+               <plugin>
+                   <groupId>org.apache.maven.plugins</groupId>
+                   <artifactId>maven-compiler-plugin</artifactId>
+                    <configuration>
+                        <showWarnings>true</showWarnings>
+                        <showDeprecation>true</showDeprecation>
+                    </configuration>
+               </plugin>
 
-            <!-- Maven Surefire Plugin for running tests -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.2.5</version>
-                <configuration>
-                    <argLine>-Dnet.bytebuddy.experimental=true</argLine>
-                </configuration>
-            </plugin>
+             <!-- Maven Surefire Plugin for running tests; @{argLine} lets the
+                  JaCoCo agent prepend itself -->
+             <plugin>
+                 <groupId>org.apache.maven.plugins</groupId>
+                 <artifactId>maven-surefire-plugin</artifactId>
+                 <configuration>
+                     <argLine>@{argLine} -Dnet.bytebuddy.experimental=true</argLine>
+                 </configuration>
+             </plugin>
 
-            <!-- Maven Shade Plugin for creating the fat JAR (replaces the
-                 former maven-assembly jar-with-dependencies build) -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-shade-plugin</artifactId>
-                <version>3.6.2</version>
-                <configuration>
+             <!-- Maven Shade Plugin for creating the fat JAR (replaces the
+                  former maven-assembly jar-with-dependencies build) -->
+             <plugin>
+                 <groupId>org.apache.maven.plugins</groupId>
+                 <artifactId>maven-shade-plugin</artifactId>
+                 <configuration>
                     <!-- Reproduces the assembly output layout: the fat jar is
                          written to target/open-media-converter-<version>.jar
                          while the plain module jar is left untouched (because
@@ -151,22 +150,36 @@
                 </executions>
             </plugin>
 
-            <!-- Maven Resources Plugin -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-resources-plugin</artifactId>
-                <version>3.3.1</version>
-                <configuration>
-                    <encoding>UTF-8</encoding>
-                </configuration>
-            </plugin>
+             <!-- Maven Resources Plugin -->
+             <plugin>
+                 <groupId>org.apache.maven.plugins</groupId>
+                 <artifactId>maven-resources-plugin</artifactId>
+                 <configuration>
+                     <encoding>UTF-8</encoding>
+                 </configuration>
+             </plugin>
 
-            <!-- Maven Exec Plugin for running the application -->
-            <plugin>
-                <groupId>org.codehaus.mojo</groupId>
-                <artifactId>exec-maven-plugin</artifactId>
-                <version>3.6.2</version>
-                <configuration>
+             <!-- JaCoCo coverage agent + report -->
+             <plugin>
+                 <groupId>org.jacoco</groupId>
+                 <artifactId>jacoco-maven-plugin</artifactId>
+                 <executions>
+                     <execution>
+                         <goals><goal>prepare-agent</goal></goals>
+                     </execution>
+                     <execution>
+                         <id>report</id>
+                         <phase>test</phase>
+                         <goals><goal>report</goal></goals>
+                     </execution>
+                 </executions>
+             </plugin>
+
+             <!-- Maven Exec Plugin for running the application -->
+             <plugin>
+                 <groupId>org.codehaus.mojo</groupId>
+                 <artifactId>exec-maven-plugin</artifactId>
+                 <configuration>
                     <mainClass>org.omc.ui.MainApplicationJavaGi</mainClass>
                 </configuration>
                 <executions>
@@ -210,11 +223,9 @@
                                 </goals>
                                 <configuration>
                                     <executable>bash</executable>
-                                    <workingDirectory>${project.basedir}</workingDirectory>
+                                    <workingDirectory>${project.basedir}/..</workingDirectory>
                                     <arguments>
-                                        <argument>scripts/build-packages.sh</argument>
-                                        <argument>--all</argument>
-                                        <argument>--skip-build</argument>
+                                        <argument>packaging/build-packages.sh</argument>
                                     </arguments>
                                 </configuration>
                             </execution>

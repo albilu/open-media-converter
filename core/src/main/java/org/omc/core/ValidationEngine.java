@@ -57,25 +57,12 @@ public class ValidationEngine {
      */
     public static final int MAX_PARALLEL_CONVERSIONS = 16;
 
-    // Video validation ranges
-    private static final int MIN_VIDEO_BITRATE = 100; // kbps
-    private static final int MAX_VIDEO_BITRATE = 100000; // kbps
-    private static final int MIN_FRAME_RATE = 1;
-    private static final int MAX_FRAME_RATE = 240;
-    private static final int MIN_CRF = 0;
-    private static final int MAX_CRF = 51;
+    // Media bounds live in the model classes (VideoSettings, AudioSettings,
+    // ImageSettings) as the single source of truth; JSON-deserialized settings
+    // bypass Builder validation, so the engine must enforce exactly the same
+    // bounds the model's isValid() enforces.
 
-    // Audio validation ranges
-    private static final int MIN_AUDIO_BITRATE = 8; // kbps
-    private static final int MAX_AUDIO_BITRATE = 1000; // kbps
-    private static final int MIN_SAMPLE_RATE = 8000; // Hz
-    private static final int MAX_SAMPLE_RATE = 192000; // Hz
-    private static final int MIN_AUDIO_CHANNELS = 1;
-    private static final int MAX_AUDIO_CHANNELS = 8;
-
-    // Image validation ranges
-    private static final int MIN_IMAGE_QUALITY = 0;
-    private static final int MAX_IMAGE_QUALITY = 100;
+    // Image dimension validation ranges
     private static final int MIN_IMAGE_DIMENSION = 1;
     private static final int MAX_IMAGE_DIMENSION = 65535;
 
@@ -346,22 +333,23 @@ public class ValidationEngine {
         List<String> warnings = new ArrayList<>();
 
         // Validate bitrate
-        if (settings.bitrate() < MIN_VIDEO_BITRATE || settings.bitrate() > MAX_VIDEO_BITRATE) {
+        if (settings.bitrate() < VideoSettings.MIN_BITRATE || settings.bitrate() > VideoSettings.MAX_BITRATE) {
             errors.add(String.format("Video bitrate must be between %d and %d kbps (got: %d)",
-                    MIN_VIDEO_BITRATE, MAX_VIDEO_BITRATE, settings.bitrate()));
+                    VideoSettings.MIN_BITRATE, VideoSettings.MAX_BITRATE, settings.bitrate()));
         }
 
         // Validate frame rate (-1 means use original, which is valid)
         if (settings.frameRate() != -1
-                && (settings.frameRate() < MIN_FRAME_RATE || settings.frameRate() > MAX_FRAME_RATE)) {
+                && (settings.frameRate() < VideoSettings.MIN_FRAME_RATE
+                        || settings.frameRate() > VideoSettings.MAX_FRAME_RATE)) {
             errors.add(String.format("Frame rate must be -1 (original) or between %d and %d fps (got: %d)",
-                    MIN_FRAME_RATE, MAX_FRAME_RATE, settings.frameRate()));
+                    VideoSettings.MIN_FRAME_RATE, VideoSettings.MAX_FRAME_RATE, settings.frameRate()));
         }
 
         // Validate CRF
-        if (settings.crf() < MIN_CRF || settings.crf() > MAX_CRF) {
+        if (settings.crf() < VideoSettings.MIN_CRF || settings.crf() > VideoSettings.MAX_CRF) {
             errors.add(String.format("CRF must be between %d and %d (got: %d)",
-                    MIN_CRF, MAX_CRF, settings.crf()));
+                    VideoSettings.MIN_CRF, VideoSettings.MAX_CRF, settings.crf()));
         }
 
         // Validate resolution
@@ -404,28 +392,21 @@ public class ValidationEngine {
         // Skip encoding parameter validation for copy codec
         if (!"copy".equalsIgnoreCase(settings.codec())) {
             // Validate bitrate
-            if (settings.bitrate() < MIN_AUDIO_BITRATE || settings.bitrate() > MAX_AUDIO_BITRATE) {
+            if (settings.bitrate() < AudioSettings.MIN_BITRATE || settings.bitrate() > AudioSettings.MAX_BITRATE) {
                 errors.add(String.format("Audio bitrate must be between %d and %d kbps (got: %d)",
-                        MIN_AUDIO_BITRATE, MAX_AUDIO_BITRATE, settings.bitrate()));
+                        AudioSettings.MIN_BITRATE, AudioSettings.MAX_BITRATE, settings.bitrate()));
             }
 
             // Validate sample rate (-1 means use original, which is valid)
-            if (settings.sampleRate() != -1
-                    && (settings.sampleRate() < MIN_SAMPLE_RATE || settings.sampleRate() > MAX_SAMPLE_RATE)) {
-                errors.add(String.format("Sample rate must be -1 (original) or between %d and %d Hz (got: %d)",
-                        MIN_SAMPLE_RATE, MAX_SAMPLE_RATE, settings.sampleRate()));
+            if (!AudioSettings.isValidSampleRate(settings.sampleRate())) {
+                errors.add(String.format("Sample rate must be -1 (original) or a standard rate (got: %d)",
+                        settings.sampleRate()));
             }
 
             // Validate channels (-1 means use original, which is valid)
-            if (settings.channels() != -1
-                    && (settings.channels() < MIN_AUDIO_CHANNELS || settings.channels() > MAX_AUDIO_CHANNELS)) {
-                errors.add(String.format("Audio channels must be -1 (original) or between %d and %d (got: %d)",
-                        MIN_AUDIO_CHANNELS, MAX_AUDIO_CHANNELS, settings.channels()));
-            }
-
-            // Warn about low bitrate
-            if (settings.bitrate() < 64) {
-                warnings.add("Low audio bitrate (< 64 kbps) may result in poor quality");
+            if (!AudioSettings.isValidChannels(settings.channels())) {
+                errors.add(String.format("Audio channels must be -1 (original), 1, 2, or 6 (got: %d)",
+                        settings.channels()));
             }
         }
 
@@ -441,10 +422,11 @@ public class ValidationEngine {
         List<String> errors = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
 
-        // Validate quality
-        if (settings.quality() < MIN_IMAGE_QUALITY || settings.quality() > MAX_IMAGE_QUALITY) {
-            errors.add(String.format("Image quality must be between %d and %d (got: %d)",
-                    MIN_IMAGE_QUALITY, MAX_IMAGE_QUALITY, settings.quality()));
+        // Validate quality (-1 means lossless, which is valid)
+        if (!ImageSettings.isValidQuality(settings.quality())) {
+            errors.add(String.format("Image quality must be %d (lossless) or between %d and %d (got: %d)",
+                    ImageSettings.LOSSLESS_QUALITY, ImageSettings.MIN_QUALITY, ImageSettings.MAX_QUALITY,
+                    settings.quality()));
         }
 
         // Validate resolution
@@ -460,8 +442,8 @@ public class ValidationEngine {
             }
         }
 
-        // Warn about low quality
-        if (settings.quality() < 50) {
+        // Warn about low quality (lossless is not low quality)
+        if (settings.quality() != ImageSettings.LOSSLESS_QUALITY && settings.quality() < 50) {
             warnings.add("Low image quality (< 50) may result in visible artifacts");
         }
 
@@ -701,12 +683,15 @@ public class ValidationEngine {
                 return ValidationResult.failure(error);
             }
 
-            // Warn if space is tight (less than 2x required)
+            // Warn if space is tight (less than 2x required); the message
+            // must use the same saturated value as the comparison - the raw
+            // totalRequired * 2 overflows to a negative GB figure near
+            // saturation
             if (availableSpace < saturatedDouble(totalRequired)) {
                 String warning = String.format(
                         "Disk space is tight: %.2f GB available, %.2f GB recommended",
                         availableSpace / (1024.0 * 1024.0 * 1024.0),
-                        (totalRequired * 2) / (1024.0 * 1024.0 * 1024.0));
+                        saturatedDouble(totalRequired) / (1024.0 * 1024.0 * 1024.0));
                 return ValidationResult.successWithWarnings(List.of(warning));
             }
 

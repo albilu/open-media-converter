@@ -5,7 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.reflect.Field;
+
 import org.junit.jupiter.api.Test;
+import org.omc.model.FileFormat;
 
 /**
  * Contract tests for the exception hierarchy (P2 audit fixes):
@@ -120,6 +123,54 @@ class ExceptionContractTest {
                 "/usr/bin/ffmpeg", 1, null);
 
         assertNull(exception.getToolOutput());
+    }
+
+    @Test
+    void conversionException_withNullErrorCode_detailedMessageDoesNotThrow() {
+        ConversionException exception = new ConversionException(
+                "boom", null, "/tmp/in.mp4", "/tmp/out.avi", FileFormat.MP4, FileFormat.AVI);
+
+        // The error code is optional (see base class): must not NPE, and the
+        // conversion context must survive
+        String detailed = exception.getDetailedMessage();
+        assertTrue(detailed.contains("boom"), "detailed message must keep the message");
+        assertTrue(detailed.contains("/tmp/in.mp4"), "detailed message must keep the input path");
+        assertTrue(detailed.contains("/tmp/out.avi"), "detailed message must keep the output path");
+    }
+
+    @Test
+    void toolExecutionException_withNullErrorCode_detailedMessageDoesNotThrow() {
+        ToolExecutionException exception = new ToolExecutionException(
+                "ffmpeg failed", null, "ffmpeg", "/usr/bin/ffmpeg", 1, "some output");
+
+        String detailed = exception.getDetailedMessage();
+        assertTrue(detailed.contains("ffmpeg failed"), "detailed message must keep the message");
+        assertTrue(detailed.contains("Tool: ffmpeg"), "detailed message must keep the tool context");
+    }
+
+    @Test
+    void stateIOException_withNullErrorCode_detailedMessageDoesNotThrow() {
+        StateIOException exception = new StateIOException("cannot persist", null, "/tmp/state.json", true);
+
+        String detailed = exception.getDetailedMessage();
+        assertTrue(detailed.contains("Loading"), "detailed message must keep the operation");
+        assertTrue(detailed.contains("cannot persist"), "detailed message must keep the message");
+        assertTrue(detailed.contains("/tmp/state.json"), "detailed message must keep the state file");
+    }
+
+    @Test
+    void invalidSettingsException_withNullErrorCode_detailedMessageDoesNotThrow() throws Exception {
+        InvalidSettingsException exception = new InvalidSettingsException("bad setting", "bitrate", -1);
+
+        // Every constructor hardcodes INVALID_SETTINGS, so null the inherited
+        // field reflectively to exercise the optional-errorCode contract
+        Field errorCodeField = MediaConverterException.class.getDeclaredField("errorCode");
+        errorCodeField.setAccessible(true);
+        errorCodeField.set(exception, null);
+
+        String detailed = exception.getDetailedMessage();
+        assertTrue(detailed.contains("bad setting"), "detailed message must keep the message");
+        assertTrue(detailed.contains("bitrate"), "detailed message must keep the setting name");
     }
 
     private static int countOccurrences(String haystack, String needle) {

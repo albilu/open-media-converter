@@ -109,124 +109,38 @@ class ProgressViewTest {
     }
 
     @Test
-    void updateFileProgress_withValidInputs_shouldStoreProgress() {
+    void updateFileProgress_withValidInputs_shouldNotTouchWidgets() {
         // When
         progressView.updateFileProgress("file1", sampleConversionProgress);
 
-        // Then
-        ConversionProgress retrieved = progressView.getFileProgress("file1");
-        assertEquals(sampleConversionProgress, retrieved);
+        // Then: per-file tracking is internal only, widgets are driven by
+        // updateOverallProgress
+        verifyNoInteractions(progressBar, statusLabel, timeRemainingLabel, conversionSpeedLabel);
     }
 
     @Test
     void updateFileProgress_withNullFileId_shouldDoNothing() {
-        // When
-        progressView.updateFileProgress(null, sampleConversionProgress);
-
-        // Then
-        assertNull(progressView.getFileProgress("file1"));
+        // When / Then: no throw, no widget interaction
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                () -> progressView.updateFileProgress(null, sampleConversionProgress));
+        verifyNoInteractions(progressBar, statusLabel, timeRemainingLabel, conversionSpeedLabel);
     }
 
     @Test
     void updateFileProgress_withNullProgress_shouldDoNothing() {
-        // When
-        progressView.updateFileProgress("file1", null);
-
-        // Then
-        assertNull(progressView.getFileProgress("file1"));
+        // When / Then: no throw, no widget interaction
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                () -> progressView.updateFileProgress("file1", null));
+        verifyNoInteractions(progressBar, statusLabel, timeRemainingLabel, conversionSpeedLabel);
     }
 
     @Test
-    void clearFileProgress_shouldClearMap() {
+    void clearFileProgress_shouldNotTouchWidgets() {
         // Given
         progressView.updateFileProgress("file1", sampleConversionProgress);
 
-        // When
-        progressView.clearFileProgress();
-
-        // Then
-        assertNull(progressView.getFileProgress("file1"));
-    }
-
-    @Test
-    void getFileProgress_withNonExistentFileId_shouldReturnNull() {
-        // When
-        ConversionProgress result = progressView.getFileProgress("nonexistent");
-
-        // Then
-        assertNull(result);
-    }
-
-    @Test
-    void updateProgress_withValidInputs_shouldUpdateUI() {
-        // Given
-        int currentFile = 2;
-        int totalFiles = 5;
-        double overallProgress = 0.4;
-        long timeRemainingSeconds = 120;
-        String speed = "1.5 MB/s";
-
-        // When
-        progressView.updateProgress(currentFile, totalFiles, overallProgress, timeRemainingSeconds, speed);
-
-        // Then
-        verify(progressBar).setFraction(overallProgress);
-        verify(progressBar).setText("40%");
-        verify(statusLabel).setLabel("Converting 2 of 5 files...");
-        verify(timeRemainingLabel).setLabel("Time remaining: 2m 0s");
-        verify(conversionSpeedLabel).setLabel("Speed: 1.5 MB/s");
-    }
-
-    @Test
-    void updateProgress_withZeroProgress_shouldUpdateUI() {
-        // When
-        progressView.updateProgress(1, 5, 0.0, 0, null);
-
-        // Then
-        verify(progressBar).setFraction(0.0);
-        verify(progressBar).setText("0%");
-        verify(statusLabel).setLabel("Converting 1 of 5 files...");
-        verify(timeRemainingLabel).setLabel("Time remaining: 0s");
-        verify(conversionSpeedLabel).setLabel("Speed: --");
-    }
-
-    @Test
-    void updateProgress_withFullProgress_shouldUpdateUI() {
-        // When
-        progressView.updateProgress(5, 5, 1.0, 0, "2.0 MB/s");
-
-        // Then
-        verify(progressBar).setFraction(1.0);
-        verify(progressBar).setText("100%");
-        verify(statusLabel).setLabel("Converting 5 of 5 files...");
-        verify(timeRemainingLabel).setLabel("Time remaining: 0s");
-        verify(conversionSpeedLabel).setLabel("Speed: 2.0 MB/s");
-    }
-
-    @Test
-    void updateProgress_withNegativeTimeRemaining_shouldShowDash() {
-        // When
-        progressView.updateProgress(1, 1, 0.5, -10, "fast");
-
-        // Then
-        verify(timeRemainingLabel).setLabel("Time remaining: --");
-    }
-
-    @Test
-    void updateProgress_withLargeTimeRemaining_shouldFormatHours() {
-        // When
-        progressView.updateProgress(1, 1, 0.5, 7265, "slow"); // 2h 1m 5s
-
-        // Then
-        verify(timeRemainingLabel).setLabel("Time remaining: 2h 1m");
-    }
-
-    @Test
-    void updateProgress_withNullSpeed_shouldShowDash() {
-        // When
-        progressView.updateProgress(1, 1, 0.5, 60, null);
-
-        // Then
-        verify(conversionSpeedLabel).setLabel("Speed: --");
+        // When / Then: no throw, no widget interaction
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> progressView.clearFileProgress());
+        verifyNoInteractions(progressBar, statusLabel, timeRemainingLabel, conversionSpeedLabel);
     }
 }

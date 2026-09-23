@@ -144,7 +144,10 @@ public final class SessionState {
                 : null;
 
         List<ConversionFile> validFiles = pendingFiles.stream()
-                .filter(f -> f != null && f.path() != null && f.path().toFile().exists())
+                .filter(f -> f != null && f.path() != null
+                        && (java.nio.file.Files.isRegularFile(f.path())
+                                || (f.status() == ConversionStatus.COMPLETED
+                                        && f.outputPath().filter(java.nio.file.Files::isRegularFile).isPresent())))
                 .toList();
 
         return new SessionState(validRecent, validInputDir, validOutputDir, validFiles, lastUsedPreset);

@@ -31,6 +31,12 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  */
 public final class ImageSettings {
 
+    // Validation bounds: single source of truth, shared by isValid(), the
+    // Builder, and ValidationEngine
+    public static final int LOSSLESS_QUALITY = -1;
+    public static final int MIN_QUALITY = 0;
+    public static final int MAX_QUALITY = 100;
+
     private final int quality; // 0-100 for JPEG/WebP, -1 for lossless
     private final Resolution resolution; // null for original
     private final boolean maintainAspectRatio;
@@ -180,10 +186,20 @@ public final class ImageSettings {
      * 
      * @return true if settings are valid
      */
+    /**
+     * Validates a quality value: -1 (lossless) or 0-100.
+     *
+     * @param quality the quality value
+     * @return true if the quality is valid
+     */
+    public static boolean isValidQuality(int quality) {
+        return quality == LOSSLESS_QUALITY || (quality >= MIN_QUALITY && quality <= MAX_QUALITY);
+    }
+
     @JsonIgnore
     public boolean isValid() {
         // Quality validation (0-100 or -1 for lossless)
-        if (quality != -1 && (quality < 0 || quality > 100)) {
+        if (!isValidQuality(quality)) {
             return false;
         }
 
@@ -228,8 +244,9 @@ public final class ImageSettings {
         private FileFormat outputFormat = FileFormat.PNG;
 
         private void validate() {
-            if (quality != -1 && (quality < 0 || quality > 100)) {
-                throw new IllegalArgumentException("Quality must be -1 or between 0 and 100");
+            if (!ImageSettings.isValidQuality(quality)) {
+                throw new IllegalArgumentException(
+                        "Quality must be " + LOSSLESS_QUALITY + " or between " + MIN_QUALITY + " and " + MAX_QUALITY);
             }
             if (compressionLevel < 0 || compressionLevel > 9) {
                 throw new IllegalArgumentException("Compression level must be between 0 and 9");

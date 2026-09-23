@@ -47,7 +47,7 @@ The first build downloads pinned FFmpeg and Pandoc archives for Linux x86_64 or
 aarch64, verifies their SHA-256 checksums, and includes the executables and license
 information in the application JAR. Later offline builds can reuse
 `omc-gtk/.tool-cache/`. Versions and sources are recorded in
-[`omc-gtk/packaging/tools.json`](omc-gtk/packaging/tools.json) and
+[`omc-gtk/scripts/tools.json`](omc-gtk/scripts/tools.json) and
 [`BINARY_LICENSES.md`](BINARY_LICENSES.md).
 
 For a smaller build that uses installed converters:
@@ -68,7 +68,8 @@ make dev
 make run
 ```
 
-See `omc-gtk/scripts/` and `omc-gtk/packaging/` for packaging helpers (AppImage / DEB).
+See `packaging/` for the distribution package builder (`.deb`, `.rpm`,
+`.pkg.tar.zst`, `.AppImage`); `make package` runs it in Docker.
 
 ## Usage overview
 

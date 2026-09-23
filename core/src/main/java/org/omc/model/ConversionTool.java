@@ -8,7 +8,7 @@ package org.omc.model;
  */
 public enum ConversionTool {
     /**
-     * FFmpeg - handles video, audio, and image conversions.
+     * FFmpeg - handles video and audio conversions.
      */
     FFMPEG,
 

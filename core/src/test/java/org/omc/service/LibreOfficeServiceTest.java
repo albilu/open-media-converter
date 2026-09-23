@@ -550,6 +550,53 @@ class LibreOfficeServiceTest {
         }
     }
 
+    /**
+     * A soffice that exits 0 but leaves a grandchild holding the output pipe
+     * open must not hang the post-exit outputReader join: the join is bounded
+     * and the reader interrupted, so the conversion completes promptly.
+     */
+    @Test
+    @Timeout(value = 30)
+    void testConvertDocument_GrandchildHoldsPipeOpen_CompletesPromptly() throws Exception {
+        String os = System.getProperty("os.name").toLowerCase();
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                os.contains("nix") || os.contains("nux") || os.contains("mac"),
+                "Requires POSIX executable scripts");
+
+        Path sofficeStub = tempDir.resolve("soffice-grandchild");
+        // The backgrounded sleep inherits the output pipe; the printf and
+        // short foreground sleep make the hand-off deterministic so the
+        // reader is guaranteed to see the pipe held open after exit.
+        Files.writeString(sofficeStub, "#!/bin/sh\n"
+                + "sleep 15 &\n"
+                + "printf 'starting\\n'\n"
+                + "sleep 0.3\n"
+                + "outdir=\nprev=\ninput=\n"
+                + "for a in \"$@\"; do\n"
+                + "  if [ \"$prev\" = \"--outdir\" ]; then outdir=\"$a\"; fi\n"
+                + "  prev=\"$a\"\n"
+                + "  input=\"$a\"\n"
+                + "done\n"
+                + "base=$(basename \"$input\")\n"
+                + "base=${base%.*}\n"
+                + "printf 'stub-pdf' > \"$outdir/$base.pdf\"\n"
+                + "exit 0\n");
+        Files.setPosixFilePermissions(sofficeStub, PosixFilePermissions.fromString("rwxr-xr-x"));
+        LibreOfficeService stubService = new LibreOfficeService(sofficeStub);
+
+        Path input = tempDir.resolve("input.html");
+        Files.writeString(input, "<html><body>Test Document</body></html>");
+        Path output = tempDir.resolve("output.pdf");
+
+        long startNanos = System.nanoTime();
+        ConversionResult result = stubService.convertDocument(input, output, defaultSettings, noOpCallback);
+        long elapsedMillis = (System.nanoTime() - startNanos) / 1_000_000;
+
+        assertTrue(result.success(), "stub exits 0 so conversion must succeed");
+        assertTrue(elapsedMillis < 10_000,
+                "post-exit reader join must be bounded, took " + elapsedMillis + "ms");
+    }
+
     // ========================================
     // Helper Methods for Integration Tests
     // ========================================

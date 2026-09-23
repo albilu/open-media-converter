@@ -7,9 +7,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.gnome.glib.GLib;
+import org.gnome.glib.SourceFunc;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.mockStatic;
 
 /**
  * Unit tests for {@link IdleCoalescer}.
@@ -154,6 +163,78 @@ class IdleCoalescerTest {
 
         assertEquals(List.of(1, 2), ran, "Tasks must still run when the scheduler refuses");
         assertFalse(coalescer.hasPendingWork());
+    }
+
+    @Test
+    void defaultScheduler_schedulesAtDefaultIdlePriority() {
+        // Progress-driven flushes are non-urgent: they must be scheduled at
+        // G_PRIORITY_DEFAULT_IDLE so bursts cannot starve input events.
+        AtomicInteger priority = new AtomicInteger(-1);
+        try (MockedStatic<GLib> glib = mockStatic(GLib.class)) {
+            glib.when(() -> GLib.idleAdd(anyInt(), any(SourceFunc.class))).thenAnswer(invocation -> {
+                priority.set(invocation.getArgument(0));
+                return 1;
+            });
+
+            IdleCoalescer coalescer = new IdleCoalescer();
+            coalescer.submit("k", () -> { });
+
+            assertEquals(GLib.PRIORITY_DEFAULT_IDLE, priority.get(),
+                    "idle flush must be scheduled at GLib.PRIORITY_DEFAULT_IDLE, not 0 (G_PRIORITY_DEFAULT)");
+        }
+    }
+
+    @Test
+    void submitFromWithinRunningTask_isQueuedForNextFlush() {
+        CapturingScheduler scheduler = new CapturingScheduler();
+        IdleCoalescer coalescer = new IdleCoalescer(scheduler);
+
+        coalescer.submit("outer", () -> {
+            ran.add(1);
+            coalescer.submit("inner", () -> ran.add(2));
+        });
+
+        scheduler.runMainLoop();
+        assertEquals(List.of(1), ran, "first flush must run only the outer task");
+
+        scheduler.runMainLoop();
+        assertEquals(List.of(1, 2), ran, "the re-submitted task must run on the next flush");
+    }
+
+    @Test
+    void submittersAreNotBlockedWhileFlushedTaskRuns() throws InterruptedException {
+        CapturingScheduler scheduler = new CapturingScheduler();
+        IdleCoalescer coalescer = new IdleCoalescer(scheduler);
+
+        CountDownLatch taskStarted = new CountDownLatch(1);
+        CountDownLatch releaseTask = new CountDownLatch(1);
+        coalescer.submit("long", () -> {
+            taskStarted.countDown();
+            try {
+                releaseTask.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+
+        Thread flushThread = new Thread(scheduler::runMainLoop);
+        flushThread.start();
+        assertTrue(taskStarted.await(5, TimeUnit.SECONDS), "flush must start running the task");
+
+        AtomicBoolean submitted = new AtomicBoolean(false);
+        Thread submitter = new Thread(() -> {
+            coalescer.submit("other", () -> { });
+            submitted.set(true);
+        });
+        submitter.start();
+        submitter.join(2000);
+        try {
+            assertTrue(submitted.get(),
+                    "submit() from an engine thread must not block while a flushed task still runs");
+        } finally {
+            releaseTask.countDown();
+            flushThread.join(5000);
+        }
     }
 
     @Test

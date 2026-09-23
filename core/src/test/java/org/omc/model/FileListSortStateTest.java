@@ -323,6 +323,47 @@ class FileListSortStateTest {
         assertEquals("no-settings.mp4", sorted.get(2).fileName()); // "Not Set" (always at end)
     }
 
+    @Test
+    @DisplayName("createComparator(settings) resolves OUTPUT_FORMAT from global sections")
+    void testCreateComparatorWithGlobalSettingsResolvesSections() {
+        FileListSortState state = FileListSortState.byOutputFormat(FileListSortState.SortDirection.ASCENDING);
+        ConversionSettings globalSettings = ConversionSettings.builder()
+                .outputFormat(FileFormat.MKV)
+                .imageSettings(ImageSettings.builder().outputFormat(FileFormat.JPEG).build())
+                .build();
+        Comparator<ConversionFile> comparator = state.createComparator(globalSettings);
+
+        ConversionFile videoFile = createTestFileWithFormat("b-video.mp4", FileFormat.MP4);
+        ConversionFile imageFile = createTestFileWithFormat("a-image.png", FileFormat.PNG);
+
+        List<ConversionFile> sorted = new ArrayList<>(List.of(videoFile, imageFile));
+        sorted.sort(comparator);
+
+        // "JPEG" sorts before "MKV" alphabetically
+        assertEquals("a-image.png", sorted.get(0).fileName());
+        assertEquals("b-video.mp4", sorted.get(1).fileName());
+    }
+
+    @Test
+    @DisplayName("createComparator(settings) keeps preset names ahead of global formats")
+    void testCreateComparatorWithGlobalSettingsPrefersPresetNames() {
+        FileListSortState state = FileListSortState.byOutputFormat(FileListSortState.SortDirection.ASCENDING);
+        ConversionSettings globalSettings = ConversionSettings.builder()
+                .outputFormat(FileFormat.MKV)
+                .build();
+        Comparator<ConversionFile> comparator = state.createComparator(globalSettings);
+
+        ConversionFile withPreset = createTestFileWithPreset("with-preset.mp4", "AAA Preset");
+        ConversionFile plain = createTestFileWithFormat("plain.mp4", FileFormat.MP4);
+
+        List<ConversionFile> sorted = new ArrayList<>(List.of(plain, withPreset));
+        sorted.sort(comparator);
+
+        // "AAA Preset" sorts before "MKV"
+        assertEquals("with-preset.mp4", sorted.get(0).fileName());
+        assertEquals("plain.mp4", sorted.get(1).fileName());
+    }
+
     // ========== JSON Serialization Tests ==========
 
     @Test

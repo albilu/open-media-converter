@@ -17,7 +17,8 @@ Global settings overview
 
 Bundled binaries vs system tools
 
-- Bundled binaries live under `resources/bin/` in the package.
+- The package bundles **FFmpeg**, **FFprobe** and **Pandoc** under `resources/bin/`.
+- **ImageMagick** and **LibreOffice are not bundled**; install them on the system for image and office-document conversions.
 - The app prefers bundled binaries when present.
 - Switch to system-installed tools in **Settings → Tool Binaries**.
 

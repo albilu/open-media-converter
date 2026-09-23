@@ -186,15 +186,6 @@ class FormatDetectionResultTest {
             assertFalse(FormatDetectionResult.fromBoth(FileFormat.ODT).isLowConfidence());
         }
 
-        @Test
-        @DisplayName("Boundary test: confidence exactly 0.90 should be high confidence")
-        void boundary090_shouldBeHighConfidence() {
-            // This is an edge case; since factory methods don't produce 0.90, we test the
-            // method directly
-            // But since constructor is private, we can't create custom confidence.
-            // For now, assume factory methods cover the ranges.
-            // If needed, could use reflection to test, but skip for now.
-        }
     }
 
     @Nested
@@ -216,22 +207,6 @@ class FormatDetectionResultTest {
         }
     }
 
-    @Nested
-    @DisplayName("Constructor Validation")
-    class ConstructorValidationTest {
-
-        // Since constructor is private, we test via factory methods.
-        // Factory methods don't allow null format, as FileFormat is enum.
-        // But to test validation, perhaps no direct way, but assume it's covered by
-        // factory methods not throwing.
-
-        @Test
-        @DisplayName("Factory methods should not accept null format - but enum prevents null")
-        void factoryMethods_shouldHandleEnumNonNull() {
-            // FileFormat enum can't be null, so no test needed.
-            // If we had a way to pass null, it would throw, but we don't.
-        }
-    }
 
     @Nested
     @DisplayName("Edge Cases")

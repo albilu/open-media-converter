@@ -207,6 +207,11 @@ public class MainWindowJavaGi extends ApplicationWindow {
                 setTitlebar(titlebar);
             }
 
+            // Destroy the stripped builder window: its child and titlebar have
+            // been reparented into this window, so the empty shell must not
+            // linger for the whole session.
+            window.destroy();
+
             logger.debug("UI loaded successfully");
 
         } catch (Exception e) {
@@ -257,6 +262,10 @@ public class MainWindowJavaGi extends ApplicationWindow {
 
             // Status bar
             statusBarLabel = (Label) builder.getObject("statusBarLabel");
+
+            // Release the builder: every widget reference has been looked up,
+            // so retaining it only keeps the whole object graph alive.
+            builder = null;
 
             logger.debug("Widget references obtained successfully");
 
@@ -641,14 +650,14 @@ public class MainWindowJavaGi extends ApplicationWindow {
         } catch (IllegalArgumentException e) {
             logger.error("Failed to apply preset: {}", e.getMessage());
             // Defer error dialog to next idle cycle to ensure context menu dismisses first
-            GLib.idleAdd(0, () -> {
+            GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                 showErrorDialog("Apply Preset Error", e.getMessage());
                 return false;
             });
         } catch (Exception e) {
             logger.error("Unexpected error applying preset", e);
             // Defer error dialog to next idle cycle to ensure context menu dismisses first
-            GLib.idleAdd(0, () -> {
+            GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                 showErrorDialog("Apply Preset Error", "An unexpected error occurred: " + e.getMessage());
                 return false;
             });
@@ -671,7 +680,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
         } catch (Exception e) {
             logger.error("Error clearing custom settings", e);
             // Defer error dialog to next idle cycle to ensure context menu dismisses first
-            GLib.idleAdd(0, () -> {
+            GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                 showErrorDialog("Clear Settings Error", "Failed to clear custom settings: " + e.getMessage());
                 return false;
             });
@@ -775,14 +784,14 @@ public class MainWindowJavaGi extends ApplicationWindow {
             final boolean succeeded = success;
             final String errorMessage = failureMessage;
             if (errorMessage != null) {
-                GLib.idleAdd(0, () -> {
+                GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                     if (!shutdownInProgress) showErrorDialog("Add Files", errorMessage);
                     return false;
                 });
             }
             // Mirror the success path's cleanup for every outcome so the
             // status bar never stays stuck on "Reading files…".
-            GLib.idleAdd(0, () -> {
+            GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                 if (!shutdownInProgress) {
                     updateFileList();
                     showStatus(admissionStatusMessage(addedCount, succeeded));
@@ -839,7 +848,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
                 } catch (Exception e) {
                     logger.error("Failed to update settings in controller", e);
                     // Defer error dialog to next idle cycle to ensure settings dialog closes first
-                    GLib.idleAdd(0, () -> {
+                    GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                         showErrorDialog("Settings Error", "Failed to save settings: " + e.getMessage());
                         return false;
                     });
@@ -931,9 +940,6 @@ public class MainWindowJavaGi extends ApplicationWindow {
             return;
         }
 
-        List<ConversionFile> batchFiles = controller.getFileList();
-        List<String> fileIds = batchFiles.stream().map(ConversionFile::id).toList();
-
         // Show progress view and disable convert button
         showProgressView();
         convertButton.setSensitive(false);
@@ -941,7 +947,10 @@ public class MainWindowJavaGi extends ApplicationWindow {
         showPauseButton();
 
         try {
-            controller.handleStartConversion();
+            List<String> fileIds = controller.handleStartConversion();
+            // Use exactly the jobs admitted by the controller, excluding completed rows.
+            batchState.beginBatch(fileIds);
+            batchState.markStarted();
         } catch (RuntimeException e) {
             // Start rejected (validation failure or already in progress via
             // IllegalStateException) or failed (the controller wraps
@@ -958,8 +967,6 @@ public class MainWindowJavaGi extends ApplicationWindow {
 
         // Batch counters are initialized only after a successful start, so a
         // rejected start cannot disturb any (running or previous) batch state.
-        batchState.beginBatch(fileIds);
-        batchState.markStarted();
         logger.info("Starting conversion batch with {} files", batchState.totalFiles());
         showStatus("Conversion Started");
     }
@@ -1039,7 +1046,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
                 Thread.currentThread().interrupt();
                 logger.warn("Interrupted while waiting for file admission", e);
             } finally {
-                GLib.idleAdd(0, () -> { close(); return false; });
+                GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> { close(); return false; });
             }
         }, "shutdown-thread").start();
     }
@@ -1094,7 +1101,9 @@ public class MainWindowJavaGi extends ApplicationWindow {
      * Thread-safe: Can be called from background threads.
      */
     public void updateFileList() {
-        GLib.idleAdd(0, () -> {
+        if (shutdownInProgress) return;
+        GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
+            if (shutdownInProgress) return false;
             List<ConversionFile> files = controller.getFileList();
             fileListView.setFiles(files);
 
@@ -1118,30 +1127,15 @@ public class MainWindowJavaGi extends ApplicationWindow {
     }
 
     /**
-     * Updates the status of a single file in the list.
-     * Thread-safe: Can be called from background threads.
-     *
-     * <p>Status changes are terminal events: they are submitted forced to the
-     * idle coalescer so they are never dropped or superseded by progress
-     * updates.</p>
-     *
-     * @param fileId the file ID
-     * @param file   the updated file information
-     */
-    public void updateFileStatus(String fileId, ConversionFile file) {
-        uiUpdateCoalescer.submitForced("file-status:" + fileId, () -> {
-            fileListView.updateFile(fileId, file);
-        });
-    }
-
-    /**
      * Shows a status message in the status bar.
      * Thread-safe: Can be called from background threads.
      * 
      * @param message the message to display
      */
     public void showStatus(String message) {
-        GLib.idleAdd(0, () -> {
+        if (shutdownInProgress) return;
+        GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
+            if (shutdownInProgress) return false;
             statusBarLabel.setLabel(message);
             logger.debug("Status: {}", message);
             return false;
@@ -1152,7 +1146,9 @@ public class MainWindowJavaGi extends ApplicationWindow {
      * Shows the progress view.
      */
     public void showProgressView() {
-        GLib.idleAdd(0, () -> {
+        if (shutdownInProgress) return;
+        GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
+            if (shutdownInProgress) return false;
             progressView.show();
 
             // Disable file management buttons during conversion
@@ -1175,7 +1171,9 @@ public class MainWindowJavaGi extends ApplicationWindow {
      * Hides the progress view.
      */
     public void hideProgressView() {
-        GLib.idleAdd(0, () -> {
+        if (shutdownInProgress) return;
+        GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
+            if (shutdownInProgress) return false;
             progressView.hide();
 
             // Re-enable file management buttons
@@ -1193,25 +1191,6 @@ public class MainWindowJavaGi extends ApplicationWindow {
             resumeButton.setSensitive(false);
             cancelButton.setSensitive(false);
 
-            return false;
-        });
-    }
-
-    /**
-     * Updates the progress display.
-     * Thread-safe: Can be called from background threads.
-     * 
-     * @param currentFile          the current file being converted (1-based)
-     * @param totalFiles           the total number of files
-     * @param overallProgress      the overall progress (0.0 to 1.0)
-     * @param timeRemainingSeconds estimated time remaining in seconds
-     * @param speed                conversion speed (e.g., "2.5 MB/s")
-     */
-    public void updateProgress(int currentFile, int totalFiles, double overallProgress,
-            long timeRemainingSeconds, String speed) {
-        GLib.idleAdd(0, () -> {
-            progressView.updateProgress(currentFile, totalFiles, overallProgress,
-                    timeRemainingSeconds, speed);
             return false;
         });
     }
@@ -1631,11 +1610,28 @@ public class MainWindowJavaGi extends ApplicationWindow {
      */
     private void showCompletionNotification(String message) {
         try {
-            // Use notify-send command to show desktop notification
-            Process process = Runtime.getRuntime()
-                    .exec(new String[] { "notify-send", "Open Media Converter", message,
-                            "--icon=open-media-converter" });
+            // Use notify-send command to show desktop notification.
+            // DISCARD so the child never blocks on a full stdout/stderr pipe.
+            ProcessBuilder pb = new ProcessBuilder("notify-send", "Open Media Converter", message,
+                    "--icon=open-media-converter");
+            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+            Process process = pb.start();
             logger.info("Desktop notification sent via notify-send: {}", message);
+            // notify-send exits right after handing off to the notification
+            // daemon; reap it (bounded, on a daemon thread) so it never
+            // lingers as a zombie.
+            Thread reaper = new Thread(() -> {
+                try {
+                    if (!process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                        process.destroyForcibly();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }, "notify-send-reaper");
+            reaper.setDaemon(true);
+            reaper.start();
         } catch (Exception e) {
             logger.error("Failed to show desktop notification", e);
         }
@@ -1645,7 +1641,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
      * Shows the pause button and hides the resume button.
      */
     private void showPauseButton() {
-        GLib.idleAdd(0, () -> {
+        GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
             pauseButton.setVisible(true);
             resumeButton.setVisible(false);
             return false;
@@ -1656,7 +1652,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
      * Shows the resume button and hides the pause button.
      */
     private void showResumeButton() {
-        GLib.idleAdd(0, () -> {
+        GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
             pauseButton.setVisible(false);
             resumeButton.setVisible(true);
             return false;
@@ -1772,7 +1768,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
      */
     @SuppressWarnings("deprecation")
     private void showFileChooserDialog(java.util.function.Consumer<List<String>> callback) {
-        GLib.idleAdd(0, () -> {
+        GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
             try {
                 // Use no-arg constructor to avoid varargs FFI crash
                 // The varargs constructor FileChooserDialog(title, parent, action, btn1, resp1,
@@ -1794,7 +1790,17 @@ public class MainWindowJavaGi extends ApplicationWindow {
                 addFileFilters(dialog);
                 dialog.show();
 
+                // A window-manager close (titlebar X) destroys the dialog
+                // without emitting "response"; the close-request handler below
+                // guarantees the callback still fires exactly once with the
+                // cancellation value.
+                java.util.concurrent.atomic.AtomicBoolean responded = new java.util.concurrent.atomic.AtomicBoolean(
+                        false);
+
                 dialog.onResponse(responseId -> {
+                    if (!responded.compareAndSet(false, true)) {
+                        return;
+                    }
                     List<String> selectedPaths = new java.util.ArrayList<>();
                     if (responseId == org.gnome.gtk.ResponseType.ACCEPT.getValue()) {
                         var files = dialog.getFiles();
@@ -1812,6 +1818,14 @@ public class MainWindowJavaGi extends ApplicationWindow {
                     }
                     dialog.destroy();
                     callback.accept(selectedPaths);
+                });
+
+                dialog.onCloseRequest(() -> {
+                    if (responded.compareAndSet(false, true)) {
+                        callback.accept(List.of());
+                    }
+                    dialog.destroy();
+                    return true;
                 });
 
             } catch (Exception e) {
@@ -1832,7 +1846,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
      */
     @SuppressWarnings("deprecation")
     private void showFolderChooserDialog(java.util.function.Consumer<String> callback) {
-        GLib.idleAdd(0, () -> {
+        GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
             try {
                 // Use no-arg constructor to avoid varargs FFI crash
                 org.gnome.gtk.FileChooserDialog dialog = new org.gnome.gtk.FileChooserDialog();
@@ -1849,7 +1863,17 @@ public class MainWindowJavaGi extends ApplicationWindow {
 
                 dialog.show();
 
+                // A window-manager close (titlebar X) destroys the dialog
+                // without emitting "response"; the close-request handler below
+                // guarantees the callback still fires exactly once with the
+                // cancellation value.
+                java.util.concurrent.atomic.AtomicBoolean responded = new java.util.concurrent.atomic.AtomicBoolean(
+                        false);
+
                 dialog.onResponse(responseId -> {
+                    if (!responded.compareAndSet(false, true)) {
+                        return;
+                    }
                     String selectedPath = null;
                     if (responseId == org.gnome.gtk.ResponseType.ACCEPT.getValue()) {
                         var file = dialog.getFile();
@@ -1859,6 +1883,14 @@ public class MainWindowJavaGi extends ApplicationWindow {
                     }
                     dialog.destroy();
                     callback.accept(selectedPath);
+                });
+
+                dialog.onCloseRequest(() -> {
+                    if (responded.compareAndSet(false, true)) {
+                        callback.accept(null);
+                    }
+                    dialog.destroy();
+                    return true;
                 });
 
             } catch (Exception e) {
@@ -1879,7 +1911,7 @@ public class MainWindowJavaGi extends ApplicationWindow {
      */
     @SuppressWarnings("deprecation")
     private void showConfirmDialog(String title, String message, java.util.function.Consumer<Boolean> callback) {
-        GLib.idleAdd(0, () -> {
+        GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
             try {
                 org.gnome.gtk.MessageDialog dialog = new org.gnome.gtk.MessageDialog(
                         this,
@@ -1891,10 +1923,28 @@ public class MainWindowJavaGi extends ApplicationWindow {
                 dialog.setTitle(title);
                 dialog.show();
 
+                // A window-manager close (titlebar X) destroys the dialog
+                // without emitting "response"; the close-request handler below
+                // guarantees the callback still fires exactly once with the
+                // cancellation value.
+                java.util.concurrent.atomic.AtomicBoolean responded = new java.util.concurrent.atomic.AtomicBoolean(
+                        false);
+
                 dialog.onResponse(responseId -> {
+                    if (!responded.compareAndSet(false, true)) {
+                        return;
+                    }
                     boolean confirmed = (responseId == org.gnome.gtk.ResponseType.YES.getValue());
                     dialog.destroy();
                     callback.accept(confirmed);
+                });
+
+                dialog.onCloseRequest(() -> {
+                    if (responded.compareAndSet(false, true)) {
+                        callback.accept(false);
+                    }
+                    dialog.destroy();
+                    return true;
                 });
             } catch (Exception e) {
                 logger.error("Error showing confirm dialog", e);

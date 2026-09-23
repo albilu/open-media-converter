@@ -3,13 +3,13 @@ package org.omc.core;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.Comparator;
 import java.util.Objects;
 import java.util.stream.Stream;
 
 import org.omc.exception.ErrorCode;
 import org.omc.exception.StateIOException;
+import org.omc.util.PathUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -24,9 +24,6 @@ public class ConfigurationManager {
 
     // Base directory names
     private static final String APP_NAME = "open-media-converter";
-    private static final String CONFIG_DIR_NAME = ".config";
-    private static final String DATA_DIR_NAME = ".local/share";
-    private static final String CACHE_DIR_NAME = ".cache";
 
     // Subdirectory names
     private static final String LOGS_SUBDIR = "logs";
@@ -79,33 +76,33 @@ public class ConfigurationManager {
     }
 
     /**
-     * Gets the default configuration directory (~/.config/open-media-converter).
+     * Gets the default configuration directory (XDG config home based,
+     * ~/.config/open-media-converter by default).
      *
      * @return The default config directory path
      */
     private static Path getDefaultConfigDirectory() {
-        String home = System.getProperty("user.home");
-        return Paths.get(home, CONFIG_DIR_NAME, APP_NAME);
+        return PathUtils.xdgConfigHome().resolve(APP_NAME);
     }
 
     /**
-     * Gets the default data directory (~/.local/share/open-media-converter).
+     * Gets the default data directory (XDG data home based,
+     * ~/.local/share/open-media-converter by default).
      *
      * @return The default data directory path
      */
     private static Path getDefaultDataDirectory() {
-        String home = System.getProperty("user.home");
-        return Paths.get(home, DATA_DIR_NAME, APP_NAME);
+        return PathUtils.xdgDataHome().resolve(APP_NAME);
     }
 
     /**
-     * Gets the default cache directory (~/.cache/open-media-converter).
+     * Gets the default cache directory (XDG cache home based,
+     * ~/.cache/open-media-converter by default).
      *
      * @return The default cache directory path
      */
     private static Path getDefaultCacheDirectory() {
-        String home = System.getProperty("user.home");
-        return Paths.get(home, CACHE_DIR_NAME, APP_NAME);
+        return PathUtils.xdgCacheHome().resolve(APP_NAME);
     }
 
     /**

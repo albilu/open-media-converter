@@ -49,6 +49,53 @@ class FileManagerTest {
         fileManager = new FileManager(fileHandler, validationEngine);
     }
 
+    // ===== restoreFiles hash warm-up =====
+
+    @Test
+    void restoreFiles_populatesHashIndex_soLaterContentDuplicatesAreRejected() throws Exception {
+        // Given: a file restored from a previous session
+        Path restoredPath = Files.write(tempDir.resolve("restored.mp4"), "identical-content".getBytes());
+        ConversionFile restored = ConversionFile.create(restoredPath, FileFormat.MP4, 1000L);
+        fileManager.restoreFiles(List.of(restored));
+        assertEquals(1, fileManager.getFileCount());
+
+        // Wait for the asynchronous hash warm-up to index the restored file
+        // (condition-based polling, no fixed sleep)
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!fileManager.isContentHashIndexed(restoredPath) && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertTrue(fileManager.isContentHashIndexed(restoredPath),
+                "restored file must eventually be indexed for content-duplicate detection");
+
+        // When: a different path with identical content is added
+        Path duplicatePath = Files.write(tempDir.resolve("duplicate.mp4"), "identical-content".getBytes());
+        when(validationEngine.validateFile(duplicatePath)).thenReturn(ValidationResult.success());
+        List<ConversionFile> added = fileManager.addFiles(List.of(duplicatePath));
+
+        // Then: it is rejected as a content duplicate
+        assertTrue(added.isEmpty(), "content-identical duplicate must be rejected");
+        assertEquals(1, fileManager.getFileCount());
+    }
+
+    // ===== UNKNOWN-format admission policy =====
+
+    @Test
+    void addFiles_rejectsUnknownFormats_consistentWithFolderScan() throws Exception {
+        // Given: a file whose format cannot be detected (unsupported);
+        // folder scans already filter such files, direct adds must too
+        Path unknownFile = Files.write(tempDir.resolve("mystery.xyz123"), "data".getBytes());
+        when(validationEngine.validateFile(unknownFile)).thenReturn(ValidationResult.success());
+        when(fileHandler.detectFormat(unknownFile)).thenReturn(FileFormat.UNKNOWN);
+
+        // When
+        List<ConversionFile> added = fileManager.addFiles(List.of(unknownFile));
+
+        // Then: unconvertible files never enter the queue
+        assertTrue(added.isEmpty(), "UNKNOWN-format files must be rejected at admission");
+        assertEquals(0, fileManager.getFileCount());
+    }
+
     // 1. Constructor and initialization
     @Test
     void constructor_ShouldInitializeWithDependencies() throws Exception {

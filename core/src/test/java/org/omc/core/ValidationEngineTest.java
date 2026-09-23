@@ -1016,6 +1016,41 @@ class ValidationEngineTest {
         assertTrue(result.getWarnings().stream().anyMatch(w -> w.contains("Disk space is tight")));
     }
 
+    /**
+     * Defect: the "disk space is tight" warning computed the recommended GB
+     * figure as raw {@code totalRequired * 2} while the comparison used the
+     * saturated value, so a near-saturation requirement printed a negative
+     * (overflowed) GB figure. The message must use the same saturated value
+     * as the comparison.
+     */
+    @Test
+    void validateDiskSpace_withSaturatingRequirement_warningMessageDoesNotOverflow() throws Exception {
+        Path dir = Files.createDirectory(tempDir.resolve("output"));
+        long bufferBytes = 500L * 1024 * 1024;
+        // totalRequired = requiredBytes + buffer exceeds Long.MAX_VALUE / 2
+        // without saturating, so the raw totalRequired * 2 in the warning
+        // message overflows to a negative GB figure
+        long requiredBytes = Long.MAX_VALUE / 2;
+        long totalRequired = requiredBytes + bufferBytes;
+        long availableBytes = totalRequired; // passes the failure check, still "tight"
+
+        when(fileHandler.getAvailableSpace(dir)).thenReturn(availableBytes);
+
+        ValidationResult result = validationEngine.validateDiskSpace(dir, requiredBytes);
+
+        assertTrue(result.isSuccess());
+        String warning = result.getWarnings().stream()
+                .filter(w -> w.contains("Disk space is tight"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("expected a 'Disk space is tight' warning"));
+        double expectedRecommendedGb = ValidationEngine.saturatedDouble(totalRequired)
+                / (1024.0 * 1024.0 * 1024.0);
+        assertTrue(warning.contains(String.format("%.2f", expectedRecommendedGb)),
+                "recommended GB must use the saturated value, but was: " + warning);
+        assertFalse(warning.contains("-"),
+                "warning must not print a negative (overflowed) GB figure: " + warning);
+    }
+
     @Test
     void validateDiskSpace_withAmpleSpace_returnsSuccess() throws Exception {
         Path dir = Files.createDirectory(tempDir.resolve("output"));

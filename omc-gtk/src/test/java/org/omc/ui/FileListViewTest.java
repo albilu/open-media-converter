@@ -488,4 +488,28 @@ class FileListViewTest {
 
         assertEquals("Not Set", invokeResolveOutputFormat(file1));
     }
+
+    @Test
+    void nullCachedSettings_returnsNotSetWithoutLoggingNpe() throws Exception {
+        when(controller.getCurrentSettings()).thenThrow(new IllegalStateException("not initialized"));
+        fileListView.setFiles(java.util.List.of(file1));
+
+        ch.qos.logback.classic.Logger fileListLogger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                .getLogger(FileListView.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender = new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        fileListLogger.addAppender(appender);
+        try {
+            assertEquals("Not Set", invokeResolveOutputFormat(file1));
+        } finally {
+            fileListLogger.detachAppender(appender);
+        }
+
+        boolean npeLogged = appender.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getThrowableProxy)
+                .filter(java.util.Objects::nonNull)
+                .anyMatch(proxy -> NullPointerException.class.getName().equals(proxy.getClassName()));
+        assertFalse(npeLogged,
+                "null cached settings must be handled by an explicit null check, not by catching an NPE");
+    }
 }

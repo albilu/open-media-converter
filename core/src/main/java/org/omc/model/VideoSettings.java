@@ -31,6 +31,15 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  */
 public final class VideoSettings {
 
+    // Validation bounds: single source of truth, shared by isValid(), the
+    // Builder, and ValidationEngine
+    public static final int MIN_BITRATE = 500; // kbps
+    public static final int MAX_BITRATE = 50000; // kbps
+    public static final int MIN_FRAME_RATE = 1;
+    public static final int MAX_FRAME_RATE = 120;
+    public static final int MIN_CRF = 0;
+    public static final int MAX_CRF = 51;
+
     private final String codec;
     private final int bitrate; // in kbps
     private final Resolution resolution;
@@ -188,17 +197,17 @@ public final class VideoSettings {
         }
 
         // Bitrate validation
-        if (bitrate < 500 || bitrate > 50000) {
+        if (bitrate < MIN_BITRATE || bitrate > MAX_BITRATE) {
             return false;
         }
 
         // Frame rate validation (-1 for original, or 1-120 fps)
-        if (frameRate != -1 && (frameRate < 1 || frameRate > 120)) {
+        if (frameRate != -1 && (frameRate < MIN_FRAME_RATE || frameRate > MAX_FRAME_RATE)) {
             return false;
         }
 
         // CRF validation (0-51)
-        if (crf < 0 || crf > 51) {
+        if (crf < MIN_CRF || crf > MAX_CRF) {
             return false;
         }
 
@@ -381,14 +390,16 @@ public final class VideoSettings {
             if (outputFormat == null || !outputFormat.supportsCategory(FormatCategory.VIDEO)) {
                 throw new IllegalArgumentException("Output format must be VIDEO category");
             }
-            if (bitrate < 500 || bitrate > 50000) {
-                throw new IllegalArgumentException("Bitrate must be between 500 and 50000 kbps");
+            if (bitrate < MIN_BITRATE || bitrate > MAX_BITRATE) {
+                throw new IllegalArgumentException(
+                        "Bitrate must be between " + MIN_BITRATE + " and " + MAX_BITRATE + " kbps");
             }
-            if (frameRate != -1 && (frameRate < 1 || frameRate > 120)) {
-                throw new IllegalArgumentException("Frame rate must be -1 or between 1 and 120");
+            if (frameRate != -1 && (frameRate < MIN_FRAME_RATE || frameRate > MAX_FRAME_RATE)) {
+                throw new IllegalArgumentException(
+                        "Frame rate must be -1 or between " + MIN_FRAME_RATE + " and " + MAX_FRAME_RATE);
             }
-            if (crf < 0 || crf > 51) {
-                throw new IllegalArgumentException("CRF must be between 0 and 51");
+            if (crf < MIN_CRF || crf > MAX_CRF) {
+                throw new IllegalArgumentException("CRF must be between " + MIN_CRF + " and " + MAX_CRF);
             }
             if (preset != null && !VideoSettings.isValidPreset(preset)) {
                 throw new IllegalArgumentException("Invalid preset: " + preset);

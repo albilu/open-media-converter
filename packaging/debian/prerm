@@ -1,0 +1,5 @@
+#!/bin/bash
+# Pre-removal script for open-media-converter
+set -e
+echo "[omc] removing open-media-converter"
+exit 0

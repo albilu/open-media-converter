@@ -130,6 +130,39 @@ class ConversionSafetyTest {
         assertEquals(1, progress.getBatchProgress().failedFiles());
     }
 
+    /**
+     * Defect: when Files.delete(staged) threw after a successful hard-link
+     * publish, the conversion was reported FAILED although the destination
+     * was complete (and a no-overwrite retry then failed with "already
+     * exists"). A staged-cleanup failure after a successful publish must be
+     * a success-with-warning, not an error.
+     */
+    @Test
+    void stagedCleanupFailureAfterSuccessfulPublish_StillSucceeds() throws Exception {
+        Path stageDir = Files.createDirectory(root.resolve("stage"));
+        Path destinationDir = Files.createDirectory(root.resolve("destination"));
+        Path temporary = Files.writeString(stageDir.resolve("staged.tmp"), "converted");
+        Path destination = destinationDir.resolve("out.png");
+
+        // Deleting the staged file fails while its parent directory is not
+        // writable; skipped where permissions are not enforced (e.g. root)
+        org.junit.jupiter.api.Assumptions.assumeTrue(stageDir.toFile().setWritable(false),
+                "test requires a filesystem honoring directory permissions");
+        try {
+            org.junit.jupiter.api.Assumptions.assumeFalse(Files.isWritable(stageDir),
+                    "directory permissions are not enforced for this user");
+
+            assertDoesNotThrow(() -> OutputPublisher.publish(temporary, destination, false),
+                    "Publish must succeed even when staged cleanup fails after a successful publish");
+            assertEquals("converted", Files.readString(destination),
+                    "Destination must be complete despite the staged-cleanup failure");
+            assertTrue(Files.exists(temporary),
+                    "Staged file must remain (the cleanup really failed) or the test is vacuous");
+        } finally {
+            stageDir.toFile().setWritable(true);
+        }
+    }
+
     @Test
     @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named = "omc.realTools", matches = "true")
     void publishesAcrossFilesystemsWithoutLosingOutput() throws Exception {

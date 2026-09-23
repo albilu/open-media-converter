@@ -103,6 +103,8 @@ public class SettingsDialogJavaGi {
      */
     private static final int[] VIDEO_FRAME_RATE_OPTIONS = { 24, 25, 30, 50, 60, 120 };
 
+    private FileFormat[] availableDocumentFormats = FileFormat.getFormatsByCategory(FormatCategory.DOCUMENT);
+
     /**
      * Returns the dropdown labels for the video resolution dropdown, derived
      * from {@link #VIDEO_RESOLUTION_OPTIONS}: "Original", one label per preset
@@ -232,7 +234,7 @@ public class SettingsDialogJavaGi {
 
     private void updateDocumentControls() {
         int index = documentFormatDropdown.getSelected();
-        FileFormat[] formats = FileFormat.getFormatsByCategory(FormatCategory.DOCUMENT);
+        FileFormat[] formats = availableDocumentFormats;
         if (index < 0 || index >= formats.length) return;
         FileFormat format = formats[index];
         // Availability-aware check routed through the controller instead of a
@@ -496,10 +498,8 @@ public class SettingsDialogJavaGi {
             populateDocPresets();
         }
 
-        // Load settings into UI
-        if (settings != null) {
-            setSettings(settings);
-        }
+        // Load settings into UI (settings was normalized non-null above)
+        setSettings(settings);
 
         long elapsedTime = System.currentTimeMillis() - startTime;
         logger.info("SettingsDialogJavaGi initialization complete in {}ms (target: <200ms, REQ-5.2)", elapsedTime);
@@ -605,6 +605,9 @@ public class SettingsDialogJavaGi {
         // Image tab widgets
         imageFormatDropdown = (DropDown) builder.getObject("imageFormatDropdown");
         imageQualityScale = (Scale) builder.getObject("imageQualityScale");
+        imageQualityScale.setRange(ImageSettings.LOSSLESS_QUALITY, 100);
+        imageQualityScale.setFormatValueFunc((scale, value) -> value < 0 ? "Lossless"
+                : value == 0 ? "Default" : Integer.toString((int) value));
         imageWidthSpinButton = (SpinButton) builder.getObject("imageWidthSpinButton");
         imageHeightSpinButton = (SpinButton) builder.getObject("imageHeightSpinButton");
         maintainAspectRatioCheckbox = (CheckButton) builder.getObject("maintainAspectRatioCheckbox");
@@ -772,8 +775,23 @@ public class SettingsDialogJavaGi {
     private void connectChangeHandlers() {
         // Connect to all widgets to set hasUnsavedChanges
 
-        // Output tab
-        // Note: DropDown change tracking not implemented due to java-gi API limitations
+        // Settings-bearing DropDowns: track selection changes via the
+        // "selected" notify signal. Programmatic setSelected() during
+        // setSettings() is covered by that method's trailing flag reset.
+        trackDropDownChanges(videoFormatDropdown);
+        trackDropDownChanges(videoCodecDropdown);
+        trackDropDownChanges(videoAspectRatioDropdown);
+        trackDropDownChanges(videoFrameRateDropdown);
+        trackDropDownChanges(videoPresetDropdown);
+        trackDropDownChanges(audioFormatDropdown);
+        trackDropDownChanges(audioCodecDropdown);
+        trackDropDownChanges(audioSampleRateDropdown);
+        trackDropDownChanges(audioChannelsDropdown);
+        trackDropDownChanges(imageFormatDropdown);
+        trackDropDownChanges(resizeModeDropdown);
+        trackDropDownChanges(imageRotationDropdown);
+        trackDropDownChanges(imageFlipDropdown);
+        trackDropDownChanges(documentFormatDropdown);
 
         if (overwriteExistingCheckbox != null) {
             overwriteExistingCheckbox.onToggled(() -> hasUnsavedChanges = true);
@@ -857,6 +875,17 @@ public class SettingsDialogJavaGi {
     }
 
     /**
+     * Marks unsaved changes when a settings-bearing DropDown's selection
+     * changes. Safe to combine with existing "selected" handlers (GObject
+     * supports multiple notify connections).
+     */
+    private void trackDropDownChanges(DropDown dropDown) {
+        if (dropDown != null) {
+            dropDown.onNotify("selected", param -> hasUnsavedChanges = true);
+        }
+    }
+
+    /**
      * Handles the Cancel button click.
      */
     private void handleCancel() {
@@ -880,18 +909,18 @@ public class SettingsDialogJavaGi {
                 if (response == ResponseType.YES.getValue()) {
                     // User clicked "Discard" - close both dialogs
                     // Close confirmation dialog first to avoid modal stacking issues
-                    confirmDialog.close();
+                    confirmDialog.destroy();
 
                     // Defer closing the settings dialog to avoid deadlock
                     // This ensures the confirmation dialog completes its event cycle first
-                    GLib.idleAdd(0, () -> {
+                    GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                         closeDialog();
                         return false;
                     });
                 } else if (response == ResponseType.CANCEL.getValue()) {
                     // User clicked "Cancel" - close only the confirmation dialog
                     // Settings dialog should remain open
-                    confirmDialog.close();
+                    confirmDialog.destroy();
                 }
             });
 
@@ -972,7 +1001,7 @@ public class SettingsDialogJavaGi {
                 org.gnome.gio.File selectedFile = fileChooser.getFile();
                 if (selectedFile != null) {
                     final String path = selectedFile.getPath();
-                    GLib.idleAdd(0, () -> {
+                    GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                         if (outputDirectoryEntry != null) {
                             outputDirectoryEntry.setText(path);
                             hasUnsavedChanges = true;
@@ -1005,7 +1034,7 @@ public class SettingsDialogJavaGi {
                 org.gnome.gio.File selectedFile = fileChooser.getFile();
                 if (selectedFile != null) {
                     final String path = selectedFile.getPath();
-                    GLib.idleAdd(0, () -> {
+                    GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                         if (templateFileEntry != null) {
                             templateFileEntry.setText(path);
                             hasUnsavedChanges = true;
@@ -1301,7 +1330,7 @@ public class SettingsDialogJavaGi {
                     confirmDialog.close();
 
                     // Update UI and show success message after dialog closes
-                    GLib.idleAdd(0, () -> {
+                    GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                         refreshPresetCache(); // Refresh cache after delete (REQ-5.2)
                         populateVideoPresets();
                         showInfo("Preset deleted successfully");
@@ -1310,7 +1339,7 @@ public class SettingsDialogJavaGi {
                 } catch (Exception e) {
                     logger.error("Failed to delete preset", e);
                     confirmDialog.close();
-                    GLib.idleAdd(0, () -> {
+                    GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                         showError("Failed to delete preset: " + e.getMessage());
                         return false;
                     });
@@ -1511,7 +1540,7 @@ public class SettingsDialogJavaGi {
                     confirmDialog.close();
 
                     // Update UI and show success message after dialog closes
-                    GLib.idleAdd(0, () -> {
+                    GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                         refreshPresetCache(); // REQ-5.2: Refresh cache after modification
                         populateAudioPresets();
                         showInfo("Preset deleted successfully");
@@ -1520,7 +1549,7 @@ public class SettingsDialogJavaGi {
                 } catch (Exception e) {
                     logger.error("Failed to delete preset", e);
                     confirmDialog.close();
-                    GLib.idleAdd(0, () -> {
+                    GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                         showError("Failed to delete preset: " + e.getMessage());
                         return false;
                     });
@@ -1717,7 +1746,7 @@ public class SettingsDialogJavaGi {
                     confirmDialog.close();
 
                     // Update UI and show success message after dialog closes
-                    GLib.idleAdd(0, () -> {
+                    GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                         refreshPresetCache(); // REQ-5.2: Refresh cache after modification
                         populateImagePresets();
                         showInfo("Preset deleted successfully");
@@ -1726,7 +1755,7 @@ public class SettingsDialogJavaGi {
                 } catch (Exception e) {
                     logger.error("Failed to delete preset", e);
                     confirmDialog.close();
-                    GLib.idleAdd(0, () -> {
+                    GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                         showError("Failed to delete preset: " + e.getMessage());
                         return false;
                     });
@@ -1923,7 +1952,7 @@ public class SettingsDialogJavaGi {
                     confirmDialog.close();
 
                     // Update UI and show success message after dialog closes
-                    GLib.idleAdd(0, () -> {
+                    GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                         refreshPresetCache(); // REQ-5.2: Refresh cache after modification
                         populateDocPresets();
                         showInfo("Preset deleted successfully");
@@ -1932,7 +1961,7 @@ public class SettingsDialogJavaGi {
                 } catch (Exception e) {
                     logger.error("Failed to delete preset", e);
                     confirmDialog.close();
-                    GLib.idleAdd(0, () -> {
+                    GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                         showError("Failed to delete preset: " + e.getMessage());
                         return false;
                     });
@@ -1967,7 +1996,7 @@ public class SettingsDialogJavaGi {
 
         errorDialog.addButton("OK", ResponseType.OK.getValue());
         errorDialog.onResponse((response) -> {
-            errorDialog.close();
+            errorDialog.destroy();
         });
         errorDialog.show();
     }
@@ -1988,7 +2017,7 @@ public class SettingsDialogJavaGi {
 
         infoDialog.addButton("OK", ResponseType.OK.getValue());
         infoDialog.onResponse((response) -> {
-            infoDialog.close();
+            infoDialog.destroy();
         });
         infoDialog.show();
     }
@@ -2395,11 +2424,24 @@ public class SettingsDialogJavaGi {
      * formats only.
      */
     private void populateDocumentFormatDropdown() {
+        if (workflowController != null) {
+            try {
+                FileFormat[] supported = java.util.Arrays.stream(FileFormat.getFormatsByCategory(FormatCategory.DOCUMENT))
+                        .filter(output -> java.util.Arrays.stream(FileFormat.getFormatsByCategory(FormatCategory.DOCUMENT))
+                                .anyMatch(input -> workflowController.canConvertDocuments(input, output)))
+                        .toArray(FileFormat[]::new);
+                // If no converter exists, the entire section is disabled. Keep
+                // its saved values displayable rather than erasing the section.
+                if (supported.length > 0) availableDocumentFormats = supported;
+            } catch (IllegalStateException e) {
+                logger.debug("Document capabilities are not initialized yet", e);
+            }
+        }
         if (documentFormatDropdown == null)
             return;
 
         // Get all document formats
-        FileFormat[] documentFormats = FileFormat.getFormatsByCategory(FormatCategory.DOCUMENT);
+        FileFormat[] documentFormats = availableDocumentFormats;
 
         // Create array of display names
         String[] formatNames = new String[documentFormats.length];
@@ -2639,7 +2681,7 @@ public class SettingsDialogJavaGi {
 
         // Set output format dropdown (Requirement REQ-2.5)
         if (documentFormatDropdown != null && documentSettings.outputFormat() != null) {
-            FileFormat[] documentFormats = FileFormat.getFormatsByCategory(FormatCategory.DOCUMENT);
+            FileFormat[] documentFormats = availableDocumentFormats;
             for (int i = 0; i < documentFormats.length; i++) {
                 if (documentFormats[i] == documentSettings.outputFormat()) {
                     documentFormatDropdown.setSelected(i);
@@ -2734,7 +2776,7 @@ public class SettingsDialogJavaGi {
                         int width = Integer.parseInt(videoWidthEntry.getText());
                         int height = Integer.parseInt(videoHeightEntry.getText());
                         resolution = new Resolution(width, height);
-                    } catch (Exception e) {
+                    } catch (IllegalArgumentException e) {
                         logger.warn("Invalid custom resolution: {}", e.getMessage());
                     }
                 }
@@ -2942,7 +2984,7 @@ public class SettingsDialogJavaGi {
         if (documentFormatDropdown != null) {
             int formatIndex = documentFormatDropdown.getSelected();
             if (formatIndex >= 0) {
-                FileFormat[] documentFormats = FileFormat.getFormatsByCategory(FormatCategory.DOCUMENT);
+                FileFormat[] documentFormats = availableDocumentFormats;
                 if (formatIndex < documentFormats.length) {
                     builder.outputFormat(documentFormats[formatIndex]);
                 }
@@ -3094,7 +3136,14 @@ public class SettingsDialogJavaGi {
      */
     public void closeDialog() {
         logger.debug("Closing settings dialog");
-        dialog.hide();
+        // Destroy the window and release the references: a new dialog instance
+        // is built per Settings click, so a merely hidden dialog would leak.
+        Dialog current = dialog;
+        dialog = null;
+        builder = null;
+        if (current != null) {
+            current.destroy();
+        }
     }
 
     /**
@@ -3132,20 +3181,19 @@ public class SettingsDialogJavaGi {
             return "Parallel conversions must be between 1 and 16";
         }
 
-        // Validate format-specific settings
-        FormatCategory category = settings.outputFormat().getCategory();
-
+        // Validate format-specific settings: every dialog tab is editable, so
+        // all non-null sections must validate regardless of the primary format
         // Validate video settings
-        if (category == FormatCategory.VIDEO && settings.videoSettings() != null) {
+        if (settings.videoSettings() != null) {
             VideoSettings video = settings.videoSettings();
 
-            // Validate bitrate (500-50000 kbps)
-            if (video.bitrate() < 500 || video.bitrate() > 50000) {
+            // Validate bitrate
+            if (video.bitrate() < VideoSettings.MIN_BITRATE || video.bitrate() > VideoSettings.MAX_BITRATE) {
                 return "Video bitrate must be between 500 and 50,000 kbps";
             }
 
-            // Validate CRF (0-51)
-            if (video.crf() < 0 || video.crf() > 51) {
+            // Validate CRF
+            if (video.crf() < VideoSettings.MIN_CRF || video.crf() > VideoSettings.MAX_CRF) {
                 return "Video CRF must be between 0 and 51";
             }
 
@@ -3161,11 +3209,11 @@ public class SettingsDialogJavaGi {
         }
 
         // Validate audio settings
-        if (category == FormatCategory.AUDIO && settings.audioSettings() != null) {
+        if (settings.audioSettings() != null) {
             AudioSettings audio = settings.audioSettings();
 
-            // Validate bitrate (64-320 kbps for audio)
-            if (audio.bitrate() < 64 || audio.bitrate() > 320) {
+            // Validate bitrate
+            if (audio.bitrate() < AudioSettings.MIN_BITRATE || audio.bitrate() > AudioSettings.MAX_BITRATE) {
                 return "Audio bitrate must be between 64 and 320 kbps";
             }
 
@@ -3176,12 +3224,12 @@ public class SettingsDialogJavaGi {
         }
 
         // Validate image settings
-        if (category == FormatCategory.IMAGE && settings.imageSettings() != null) {
+        if (settings.imageSettings() != null) {
             ImageSettings image = settings.imageSettings();
 
-            // Validate quality (0-100)
-            if (image.quality() < 0 || image.quality() > 100) {
-                return "Image quality must be between 0 and 100";
+            // Validate quality (0-100, or -1 for lossless)
+            if (!ImageSettings.isValidQuality(image.quality())) {
+                return "Image quality must be -1 (lossless) or between 0 and 100";
             }
 
             // Validate compression level (0-9)
@@ -3201,7 +3249,7 @@ public class SettingsDialogJavaGi {
         }
 
         // Validate document settings
-        if (category == FormatCategory.DOCUMENT && settings.documentSettings() != null) {
+        if (settings.documentSettings() != null) {
             DocumentSettings document = settings.documentSettings();
 
             // Validate template path if set
@@ -3248,7 +3296,7 @@ public class SettingsDialogJavaGi {
         errorDialog.addButton("OK", ResponseType.OK.getValue());
         errorDialog.onResponse((response) -> {
             // User clicked "OK" - close the error dialog
-            errorDialog.close();
+            errorDialog.destroy();
         });
 
         errorDialog.show();

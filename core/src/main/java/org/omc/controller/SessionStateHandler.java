@@ -104,14 +104,21 @@ class SessionStateHandler {
      * Requirement REQ-005.1, REQ-005.2, REQ-005.3: Persist application state
      * Requirement REQ-FL-4.5: Preserve file list sort state during shutdown
      *
+     * <p>
+     * Conversion settings are deliberately not written into the application
+     * state: they persist via {@link SettingsManager}, and the stale copy in
+     * state.json was never read back (the
+     * {@link ApplicationState#conversionSettings()} field is only retained for
+     * reading pre-existing state files).
+     * </p>
+     *
      * @param recentFilePaths    recently opened file paths
      * @param lastInputDirectory last browsed input directory (nullable)
      * @param lastOutputDirectory last browsed output directory (nullable)
-     * @param currentSettings    current conversion settings snapshot
      * @param lastUsedPreset     name of the last applied preset (nullable)
      */
     void saveApplicationState(List<Path> recentFilePaths, Path lastInputDirectory,
-            Path lastOutputDirectory, ConversionSettings currentSettings, String lastUsedPreset) {
+            Path lastOutputDirectory, String lastUsedPreset) {
         try {
             // Build session state from current file list
             List<ConversionFile> pendingFiles = fileManager.getFiles();
@@ -131,7 +138,7 @@ class SessionStateHandler {
             stateManager.updateState(currentState -> new ApplicationState(
                     windowState,
                     sessionState,
-                    currentSettings,
+                    null,
                     currentState.fileListSortState(),
                     ApplicationState.CURRENT_STATE_VERSION,
                     System.currentTimeMillis()));

@@ -131,7 +131,11 @@ public class ToolExecutionException extends MediaConverterException {
     @Override
     public String getDetailedMessage() {
         StringBuilder sb = new StringBuilder();
-        sb.append(String.format("[%s] %s", getErrorCode().getCode(), getMessage()));
+        // The error code is optional (see base class): stay null-safe
+        if (getErrorCode() != null) {
+            sb.append(String.format("[%s] ", getErrorCode().getCode()));
+        }
+        sb.append(getMessage());
 
         if (toolName != null) {
             sb.append(String.format("\n  Tool: %s", toolName));

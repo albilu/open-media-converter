@@ -12,10 +12,13 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.after;
@@ -37,6 +40,7 @@ import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -47,6 +51,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 
 import org.junit.jupiter.api.AfterEach;
@@ -75,7 +80,6 @@ import org.omc.exception.ErrorCode;
 import org.omc.exception.FileOperationException;
 import org.omc.exception.ToolExecutionException;
 import org.omc.service.FileHandler;
-import org.slf4j.Logger;
 import org.slf4j.Logger;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -474,21 +478,14 @@ class ConversionEngineTest {
         // Event handler registration tests
 
         @Test
-        void testOnProgressUpdate_RegistersHandler() {
-                // When
-                conversionEngine.onProgressUpdate(progressHandler);
-
-                // Then
-                // Handler should be registered (verified through completion handler test)
-        }
-
-        @Test
-        void testOnConversionComplete_RegistersHandler() {
+        void testOnConversionComplete_RegistersHandler() throws Exception {
                 // When
                 conversionEngine.onConversionComplete(completionHandler);
+                CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(testFile, testSettings);
+                future.get(5, TimeUnit.SECONDS);
 
-                // Then
-                // Handler should be registered (verified through completion handler test)
+                // Then: the registered handler observes the completion
+                verify(completionHandler, timeout(5000)).accept(eq(testFile.id()), any(ConversionResult.class));
         }
 
         @Test
@@ -659,7 +656,13 @@ class ConversionEngineTest {
                                         ConversionFile file = ConversionFile.create(
                                                         Paths.get("/tmp/test" + threadIndex + ".mp4"),
                                                         FileFormat.MP4, 1000L);
-                                        conversionEngine.convertSingle(file, testSettings);
+                                        try {
+                                                conversionEngine.convertSingle(file, testSettings);
+                                        } catch (IllegalStateException e) {
+                                                // Contract: a single submission is rejected while
+                                                // another conversion is active - rejection must be
+                                                // thread-safe too
+                                        }
                                         Thread.sleep(10); // Small delay
                                         conversionEngine.getActiveConversionCount();
                                 } catch (Exception e) {
@@ -1938,10 +1941,11 @@ class ConversionEngineTest {
                 ConversionFile file1 = ConversionFile.create(Paths.get("/tmp/test1.mp4"), FileFormat.MP4, 1024L);
                 ConversionFile file2 = ConversionFile.create(Paths.get("/tmp/test2.mp4"), FileFormat.MP4, 2048L);
 
-                // Act
+                // Act - sequential submissions: a single conversion is admitted
+                // only once the previous one is no longer active
                 CompletableFuture<ConversionResult> future1 = conversionEngine.convertSingle(file1, testSettings);
-                CompletableFuture<ConversionResult> future2 = conversionEngine.convertSingle(file2, testSettings);
                 future1.get(5, TimeUnit.SECONDS);
+                CompletableFuture<ConversionResult> future2 = conversionEngine.convertSingle(file2, testSettings);
                 future2.get(5, TimeUnit.SECONDS);
 
                 // Wait for whenComplete to store results (race condition mitigation)
@@ -3333,6 +3337,879 @@ class ConversionEngineTest {
                 } finally {
                         releaseTool.countDown();
                 }
+        }
+
+        // ==================== Batch admission atomicity tests ====================
+
+        /**
+         * Defect: two concurrent convertBatch calls could both pass the
+         * activeConversions.isEmpty() check while the first was still
+         * submitting (no conversions registered yet), so both batches ran
+         * concurrently. Batch admission must be atomic: the second call is
+         * rejected until the first batch has fully drained.
+         */
+        @Test
+        @Timeout(30)
+        void convertBatch_ConcurrentSubmission_OnlyOneBatchIsAdmitted() throws Exception {
+                Path outputDir = Files.createTempDirectory("omm-admission-out");
+                Path file1Path = Files.createTempFile("omm-admission-1", ".mp4");
+                Path file2Path = Files.createTempFile("omm-admission-2", ".mp4");
+                CountDownLatch firstStartBatchEntered = new CountDownLatch(1);
+                CountDownLatch releaseStartBatch = new CountDownLatch(1);
+                AtomicInteger startBatchCalls = new AtomicInteger();
+                try {
+                        ConversionFile file1 = ConversionFile.create(file1Path, FileFormat.MP4,
+                                        Files.size(file1Path));
+                        ConversionFile file2 = ConversionFile.create(file2Path, FileFormat.MP4,
+                                        Files.size(file2Path));
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .build();
+
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        // Block the FIRST batch inside startBatch: it has passed the
+                        // admission guard but has not registered any conversion yet
+                        doAnswer(invocation -> {
+                                if (startBatchCalls.getAndIncrement() == 0) {
+                                        firstStartBatchEntered.countDown();
+                                        releaseStartBatch.await(10, TimeUnit.SECONDS);
+                                }
+                                return null;
+                        }).when(progressEngine).startBatch(anyList(), anyMap());
+
+                        CompletableFuture<BatchConversionResult> firstFuture = CompletableFuture
+                                        .supplyAsync(() -> conversionEngine.convertBatch(List.of(file1), settings))
+                                        .thenCompose(batch -> batch);
+                        assertTrue(firstStartBatchEntered.await(5, TimeUnit.SECONDS),
+                                        "First batch should be inside submission");
+
+                        // A concurrent batch must be rejected even though the first
+                        // batch has not registered any conversion yet
+                        assertThrows(IllegalStateException.class,
+                                        () -> conversionEngine.convertBatch(List.of(file2), settings));
+
+                        releaseStartBatch.countDown();
+                        BatchConversionResult firstResult = firstFuture.get(15, TimeUnit.SECONDS);
+                        assertEquals(1, firstResult.totalCount());
+                        assertEquals(1, firstResult.successCount());
+                } finally {
+                        releaseStartBatch.countDown();
+                        deleteRecursively(outputDir);
+                        Files.deleteIfExists(file1Path);
+                        Files.deleteIfExists(file2Path);
+                }
+        }
+
+        /**
+         * Defect: a cancelConversion() landing between convertBatch's
+         * admission check and its cancel-flag reset was silently erased. The
+         * admission and the cancel-flag lifecycle are now atomic with
+         * cancelConversion(), so a cancel requested while a new batch is
+         * being admitted must cancel that batch.
+         */
+        @Test
+        @Timeout(30)
+        void cancelRequestedDuringNewBatchAdmission_CancelsTheNewBatch() throws Exception {
+                Path outputDir = Files.createTempDirectory("omm-admit-cancel-out");
+                Path fileAPath = Files.createTempFile("omm-admit-cancel-a", ".mp4");
+                Path fileBPath = Files.createTempFile("omm-admit-cancel-b", ".mp4");
+                CountDownLatch toolAStarted = new CountDownLatch(1);
+                CountDownLatch releaseToolA = new CountDownLatch(1);
+                CountDownLatch releaseToolB = new CountDownLatch(1);
+                try {
+                        ConversionFile fileA = ConversionFile.create(fileAPath, FileFormat.MP4,
+                                        Files.size(fileAPath));
+                        ConversionFile fileB = ConversionFile.create(fileBPath, FileFormat.MP4,
+                                        Files.size(fileBPath));
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .build();
+
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        when(toolManager.executeTool(any(ConversionTool.class), eq(fileAPath),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> {
+                                                toolAStarted.countDown();
+                                                releaseToolA.await(10, TimeUnit.SECONDS);
+                                                Path tempPath = invocation.getArgument(2);
+                                                Files.createDirectories(tempPath.getParent());
+                                                Files.write(tempPath, "content".getBytes());
+                                                return ConversionResult.success(fileA.id(), tempPath, null,
+                                                                Duration.ofSeconds(1), 1000L, 800L,
+                                                                ConversionTool.FFMPEG);
+                                        });
+                        // Lenient: the second cancel can land before the admitted
+                        // batch's task reaches the tool, so this stub is unused in
+                        // that interleaving
+                        lenient().when(toolManager.executeTool(any(ConversionTool.class), eq(fileBPath),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> {
+                                                releaseToolB.await(10, TimeUnit.SECONDS);
+                                                Path tempPath = invocation.getArgument(2);
+                                                Files.createDirectories(tempPath.getParent());
+                                                Files.write(tempPath, "content".getBytes());
+                                                return ConversionResult.success(fileB.id(), tempPath, null,
+                                                                Duration.ofSeconds(1), 1000L, 800L,
+                                                                ConversionTool.FFMPEG);
+                                        });
+
+                        // Given - a conversion still executing inside the tool when cancelled
+                        conversionEngine.convertSingle(fileA, settings);
+                        assertTrue(toolAStarted.await(5, TimeUnit.SECONDS), "First conversion should reach the tool");
+                        conversionEngine.cancelConversion();
+
+                        // When - a new batch is submitted; it waits for the cancelled run to drain
+                        CompletableFuture<BatchConversionResult> batchFuture = CompletableFuture
+                                        .supplyAsync(() -> conversionEngine.convertBatch(List.of(fileB), settings))
+                                        .thenCompose(batch -> batch);
+                        Thread.sleep(500); // let the batch reach the drain wait
+
+                        // And - another cancel is requested while the batch is still being admitted
+                        CompletableFuture<Void> secondCancel = CompletableFuture
+                                        .runAsync(conversionEngine::cancelConversion);
+                        Thread.sleep(500); // the cancel must queue behind the admission, not be lost
+
+                        releaseToolA.countDown(); // release the cancelled run so admission can finish
+                        secondCancel.get(15, TimeUnit.SECONDS);
+                        releaseToolB.countDown(); // release the admitted batch's wedged task
+
+                        // Then - the second cancel must not be erased: the admitted batch is cancelled
+                        BatchConversionResult batchResult = batchFuture.get(15, TimeUnit.SECONDS);
+                        assertEquals(1, batchResult.results().size());
+                        assertTrue(batchResult.results().get(0).isCancelled(),
+                                        "A cancel requested during batch admission must cancel the admitted batch, "
+                                                        + "but was: " + batchResult.results().get(0));
+                } finally {
+                        releaseToolA.countDown();
+                        releaseToolB.countDown();
+                        deleteRecursively(outputDir);
+                        Files.deleteIfExists(fileAPath);
+                        Files.deleteIfExists(fileBPath);
+                }
+        }
+
+        // ==================== Wedged-cancel escalation test ====================
+
+        /**
+         * Defect: the cancel flag was cleared only after in-flight tasks
+         * drained (2s timeout); a task that never dies (e.g. wedged in an
+         * uninterruptible tool wait) made every later convertBatch throw
+         * IllegalStateException forever. After the drain timeout the
+         * admission must escalate: abandon the wedged run and accept new work.
+         */
+        @Test
+        @Timeout(60)
+        void convertBatch_AfterWedgedCancelledRun_EscalatesAndAcceptsNewWork() throws Exception {
+                Path outputDir = Files.createTempDirectory("omm-wedged-out");
+                Path wedgedPath = Files.createTempFile("omm-wedged-1", ".mp4");
+                Path newPath = Files.createTempFile("omm-wedged-2", ".mp4");
+                CountDownLatch toolStarted = new CountDownLatch(1);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                try {
+                        ConversionFile wedgedFile = ConversionFile.create(wedgedPath, FileFormat.MP4,
+                                        Files.size(wedgedPath));
+                        ConversionFile newFile = ConversionFile.create(newPath, FileFormat.MP4,
+                                        Files.size(newPath));
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .build();
+
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        // The wedged conversion ignores interrupts (uninterruptible tool wait)
+                        when(toolManager.executeTool(any(ConversionTool.class), eq(wedgedPath),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> ignoreInterruptsUntilReleased(
+                                                        invocation, toolStarted, releaseTool, wedgedFile.id()));
+                        lenient().when(toolManager.executeTool(any(ConversionTool.class), eq(newPath),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> {
+                                                Path tempPath = invocation.getArgument(2);
+                                                Files.createDirectories(tempPath.getParent());
+                                                Files.write(tempPath, "content".getBytes());
+                                                return ConversionResult.success(newFile.id(), tempPath, null,
+                                                                Duration.ofSeconds(1), 1000L, 800L,
+                                                                ConversionTool.FFMPEG);
+                                        });
+
+                        // Given - a conversion wedged in the tool that was then cancelled
+                        conversionEngine.convertSingle(wedgedFile, settings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS), "Wedged conversion should reach the tool");
+                        conversionEngine.cancelConversion();
+
+                        // When - a new batch is submitted; the drain wait times out
+                        // (~2s) because the wedged task never dies
+                        BatchConversionResult batchResult = conversionEngine.convertBatch(List.of(newFile), settings)
+                                        .get(30, TimeUnit.SECONDS);
+
+                        // Then - the engine escalated and accepted the new work
+                        assertEquals(1, batchResult.successCount(),
+                                        "Engine must accept new work after abandoning a wedged cancelled run, "
+                                                        + "but was: " + batchResult.results());
+                } finally {
+                        releaseTool.countDown();
+                        deleteRecursively(outputDir);
+                        Files.deleteIfExists(wedgedPath);
+                        Files.deleteIfExists(newPath);
+                }
+        }
+
+        // ==================== Forced-shutdown future completion test ====================
+
+        /**
+         * Defect: shutdownNow() discarded queued tasks whose
+         * CompletableFutures then never completed, hanging callers blocked on
+         * the batch future. The forced-shutdown branch must cancel every
+         * incomplete tracked future so callers are released.
+         */
+        @Test
+        @Timeout(90)
+        void forcedShutdown_CompletesPendingBatchFutures() throws Exception {
+                // Single worker plus 1s shutdown grace, so the forced-shutdown
+                // branch is reached quickly while task 1 is wedged in the tool
+                ConversionEngine engine = new ConversionEngine(toolManager, validationEngine, progressEngine,
+                                fileHandler, 1, 1L);
+                Path outputDir = Files.createTempDirectory("omm-forced-out");
+                Path file1Path = Files.createTempFile("omm-forced-1", ".mp4");
+                Path file2Path = Files.createTempFile("omm-forced-2", ".mp4");
+                CountDownLatch toolStarted = new CountDownLatch(1);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                try {
+                        ConversionFile file1 = ConversionFile.create(file1Path, FileFormat.MP4,
+                                        Files.size(file1Path));
+                        ConversionFile file2 = ConversionFile.create(file2Path, FileFormat.MP4,
+                                        Files.size(file2Path));
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .build();
+
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> ignoreInterruptsUntilReleased(
+                                                        invocation, toolStarted, releaseTool, file1.id()));
+
+                        CompletableFuture<BatchConversionResult> batchFuture = engine.convertBatch(
+                                        Arrays.asList(file1, file2), settings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS),
+                                        "First task should occupy the only worker");
+
+                        // When - the graceful wait expires and shutdown is forced,
+                        // dropping the queued second task
+                        engine.shutdown();
+
+                        // Then - the batch future must complete (with cancelled
+                        // results) instead of hanging forever
+                        BatchConversionResult batchResult = batchFuture.get(30, TimeUnit.SECONDS);
+                        assertEquals(2, batchResult.results().size());
+                        assertTrue(batchResult.results().stream().allMatch(ConversionResult::isCancelled),
+                                        "Forced shutdown must cancel pending conversions, but was: "
+                                                        + batchResult.results());
+                        assertTrue(engine.isShuttingDown());
+                } finally {
+                        releaseTool.countDown();
+                        deleteRecursively(outputDir);
+                        Files.deleteIfExists(file1Path);
+                        Files.deleteIfExists(file2Path);
+                }
+        }
+
+        // ==================== Cancellation classification tests ====================
+
+        /**
+         * Defect: a CancellationException surfacing from the tool layer hit
+         * executeWithRetry's generic catch and was misclassified FAILED
+         * instead of CANCELLED.
+         */
+        @Test
+        @Timeout(30)
+        void toolThrowingCancellationException_MustYieldCancelled() throws Exception {
+                setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                any(ProgressCallback.class),
+                                any(String.class), any(ProcessRegistry.class)))
+                                .thenThrow(new CancellationException("conversion aborted"));
+
+                CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(testFile, testSettings);
+                ConversionResult result = future.get(10, TimeUnit.SECONDS);
+
+                assertTrue(result.isCancelled(),
+                                "CancellationException from the tool must be classified CANCELLED, but was: "
+                                                + result);
+        }
+
+        /**
+         * Defect: a CancellationException surfacing inside performConversion
+         * (before tool routing) hit the generic catch-all and was
+         * misclassified FAILED instead of being rethrown for the cancellation
+         * gate.
+         */
+        @Test
+        @Timeout(30)
+        void cancellationExceptionBeforeToolSelection_MustYieldCancelled() throws Exception {
+                when(validationEngine.validateConversionRequest(any(ConversionFile.class),
+                                any(ConversionSettings.class)))
+                                .thenReturn(ValidationResult.success());
+                when(toolManager.selectTool(any(FileFormat.class), any(FileFormat.class)))
+                                .thenThrow(new CancellationException("cancelled mid-conversion"));
+
+                CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(testFile, testSettings);
+                ConversionResult result = future.get(10, TimeUnit.SECONDS);
+
+                assertTrue(result.isCancelled(),
+                                "CancellationException inside performConversion must be classified CANCELLED, "
+                                                + "but was: " + result);
+        }
+
+        // ==================== Placeholder tool attribution tests ====================
+
+        /**
+         * Defect: results produced before tool routing (e.g. validation
+         * failures) were hardcoded to ConversionTool.FFMPEG. An image
+         * validation failure must be attributed to ImageMagick.
+         */
+        @Test
+        @Timeout(30)
+        void validationFailure_ForImageFile_ReportsImageMagickTool() throws Exception {
+                ConversionFile imageFile = ConversionFile.create(Paths.get("/tmp/omm-test-image.png"),
+                                FileFormat.PNG, 1000L);
+                ConversionSettings imageSettings = ConversionSettings.builder()
+                                .outputDirectory(Paths.get("/tmp/output"))
+                                .imageSettings(ImageSettings.builder().quality(80)
+                                                .outputFormat(FileFormat.JPEG).build())
+                                .build();
+                when(validationEngine.validateConversionRequest(any(ConversionFile.class),
+                                any(ConversionSettings.class)))
+                                .thenReturn(ValidationResult.failure("unsupported image conversion"));
+
+                ConversionResult result = conversionEngine.convertSingle(imageFile, imageSettings)
+                                .get(10, TimeUnit.SECONDS);
+
+                assertFalse(result.success());
+                assertEquals(ConversionTool.IMAGEMAGICK, result.toolUsed(),
+                                "Image validation failure must not be attributed to FFmpeg");
+        }
+
+        /**
+         * Document routing depends on the format pair and cannot be derived
+         * before routing, so a document validation failure must report no
+         * tool rather than a wrong FFmpeg attribution.
+         */
+        @Test
+        @Timeout(30)
+        void validationFailure_ForDocumentFile_ReportsNoTool() throws Exception {
+                ConversionFile documentFile = ConversionFile.create(Paths.get("/tmp/omm-test-doc.docx"),
+                                FileFormat.DOCX, 1000L);
+                ConversionSettings settings = ConversionSettings.builder()
+                                .outputDirectory(Paths.get("/tmp/output"))
+                                .build();
+                when(validationEngine.validateConversionRequest(any(ConversionFile.class),
+                                any(ConversionSettings.class)))
+                                .thenReturn(ValidationResult.failure("unsupported document conversion"));
+
+                ConversionResult result = conversionEngine.convertSingle(documentFile, settings)
+                                .get(10, TimeUnit.SECONDS);
+
+                assertFalse(result.success());
+                assertNull(result.toolUsed(),
+                                "Document validation failure must not be attributed to FFmpeg");
+        }
+
+        /**
+         * Defect: the batch aggregation recorded cancelled futures with a
+         * hardcoded ConversionTool.FFMPEG. A cancelled image conversion must
+         * be attributed to ImageMagick.
+         */
+        @Test
+        @Timeout(30)
+        void cancelDuringBatch_ForImageFile_ReportsImageMagickTool() throws Exception {
+                ConversionFile imageFile = ConversionFile.create(Paths.get("/tmp/omm-test-cancel.png"),
+                                FileFormat.PNG, 1000L);
+                ConversionSettings settings = ConversionSettings.builder()
+                                .outputDirectory(Paths.get("/tmp/output"))
+                                .imageSettings(ImageSettings.builder().quality(80)
+                                                .outputFormat(FileFormat.JPEG).build())
+                                .build();
+
+                conversionEngine.pauseConversion();
+                CompletableFuture<BatchConversionResult> batchFuture = conversionEngine.convertBatch(
+                                List.of(imageFile), settings);
+                waitForActiveConversions(1);
+
+                conversionEngine.cancelConversion();
+
+                BatchConversionResult batchResult = batchFuture.get(10, TimeUnit.SECONDS);
+                assertEquals(1, batchResult.results().size());
+                ConversionResult result = batchResult.results().get(0);
+                assertTrue(result.isCancelled());
+                assertEquals(ConversionTool.IMAGEMAGICK, result.toolUsed(),
+                                "Cancelled image conversion must not be attributed to FFmpeg");
+        }
+
+        // ==================== convertSingle active-run guard tests ====================
+
+        /**
+         * Defect: convertSingle had no active-batch guard, so a standalone
+         * submission could interleave with a running batch whose batch-wide
+         * progress tracking spans the engine. convertSingle must be rejected
+         * with IllegalStateException while conversions are active, and the
+         * running batch must be undisturbed.
+         */
+        @Test
+        @Timeout(30)
+        void convertSingle_WhileBatchActive_IsRejectedAndBatchUndisturbed() throws Exception {
+                CountDownLatch toolStarted = new CountDownLatch(1);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                Path outputDir = Files.createTempDirectory("omm-single-guard-out");
+                Path batchFilePath = Files.createTempFile("omm-single-guard-batch", ".mp4");
+                try {
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        ConversionFile batchFile = ConversionFile.create(batchFilePath, FileFormat.MP4,
+                                        Files.size(batchFilePath));
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> {
+                                                toolStarted.countDown();
+                                                releaseTool.await(10, TimeUnit.SECONDS);
+                                                Path tempPath = invocation.getArgument(2);
+                                                Files.write(tempPath, "content".getBytes());
+                                                return ConversionResult.success(batchFile.id(), tempPath, null,
+                                                                Duration.ofSeconds(1), 1000L, 800L,
+                                                                ConversionTool.FFMPEG);
+                                        });
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .build();
+
+                        // Given - a batch running (blocked inside the tool)
+                        CompletableFuture<BatchConversionResult> batchFuture = conversionEngine.convertBatch(
+                                        List.of(batchFile), settings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS),
+                                        "Batch conversion should reach the tool");
+
+                        // When/Then - a standalone submission is rejected while the batch runs
+                        IllegalStateException rejected = assertThrows(IllegalStateException.class,
+                                        () -> conversionEngine.convertSingle(testFile, settings));
+                        assertTrue(rejected.getMessage().contains("already running"),
+                                        "Rejection should explain the conflict, but was: "
+                                                        + rejected.getMessage());
+
+                        // And - the batch is undisturbed: it completes successfully once released
+                        releaseTool.countDown();
+                        BatchConversionResult batchResult = batchFuture.get(10, TimeUnit.SECONDS);
+                        assertEquals(1, batchResult.successCount(),
+                                        "Batch must be undisturbed by the rejected submission, but was: "
+                                                        + batchResult.results());
+
+                        // And - once the batch has drained, a standalone submission is admitted again
+                        ConversionResult single = conversionEngine.convertSingle(testFile, settings)
+                                        .get(10, TimeUnit.SECONDS);
+                        assertTrue(single.success(),
+                                        "convertSingle must be admitted again after the batch drained: "
+                                                        + single.errorMessage().orElse("unknown"));
+                } finally {
+                        releaseTool.countDown();
+                        deleteRecursively(outputDir);
+                        Files.deleteIfExists(batchFilePath);
+                }
+        }
+
+        // ==================== Submission registration-gap test ====================
+
+        /**
+         * Defect: the conversion future entered activeConversions only after
+         * supplyAsync returned, so a cancelConversion() landing in the gap
+         * between task submission and registration missed it for the direct
+         * cancel. The future must be registered before the task is submitted,
+         * so a cancel in the gap still cancels it directly and the skipped
+         * task never runs its body.
+         */
+        @Test
+        @Timeout(30)
+        void cancelConversion_DuringSubmissionGap_CancelsTheFuture() throws Exception {
+                setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+
+                // Wrap the executor so the task submission blocks until released:
+                // the conversion is then mid-submission (task handed to the
+                // executor, future not yet returned) when the cancel lands - the
+                // exact registration gap, reproduced deterministically.
+                CountDownLatch submissionReachedExecutor = new CountDownLatch(1);
+                CountDownLatch releaseSubmission = new CountDownLatch(1);
+                ExecutorService realExecutor = getExecutorService();
+                replaceExecutorService(new ForwardingExecutorService(realExecutor) {
+                        @Override
+                        public void execute(Runnable command) {
+                                submissionReachedExecutor.countDown();
+                                try {
+                                        if (!releaseSubmission.await(10, TimeUnit.SECONDS)) {
+                                                throw new IllegalStateException("test latch timed out");
+                                        }
+                                } catch (InterruptedException e) {
+                                        Thread.currentThread().interrupt();
+                                        throw new IllegalStateException(
+                                                        "interrupted while holding the submission");
+                                }
+                                super.execute(command);
+                        }
+                });
+
+                try {
+                        CompletableFuture<CompletableFuture<ConversionResult>> submitted = new CompletableFuture<>();
+                        Thread submitter = new Thread(() -> {
+                                try {
+                                        submitted.complete(conversionEngine.convertSingle(testFile, testSettings));
+                                } catch (RuntimeException e) {
+                                        submitted.completeExceptionally(e);
+                                }
+                        }, "test-submitter");
+                        submitter.start();
+
+                        assertTrue(submissionReachedExecutor.await(5, TimeUnit.SECONDS),
+                                        "Submission should be stuck inside the executor");
+
+                        // Cancel while the submission is stuck in the gap
+                        conversionEngine.cancelConversion();
+
+                        // Let the submission proceed; a directly cancelled future
+                        // skips the task body entirely
+                        releaseSubmission.countDown();
+
+                        CompletableFuture<ConversionResult> future = submitted.get(10, TimeUnit.SECONDS);
+                        assertTrue(future.isCancelled(),
+                                        "A cancel landing in the submission gap must cancel the future directly");
+                        assertThrows(CancellationException.class, () -> future.get(1, TimeUnit.SECONDS));
+                        verify(toolManager, never()).executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class));
+                        submitter.join(5000);
+                } finally {
+                        releaseSubmission.countDown();
+                }
+        }
+
+        // ==================== Disk auto-pause drain tests ====================
+
+        /**
+         * Defect: the disk-space monitor returned early when no conversions
+         * were active, so an engine auto-paused as the last task drained
+         * stayed paused until the next submission. The monitor must keep
+         * watching while a disk-caused pause is outstanding and lift it once
+         * space recovers, even when idle.
+         */
+        @Test
+        @Timeout(30)
+        void diskAutoPause_ClearsAfterQueueDrainsAndSpaceRecovers() throws Exception {
+                CountDownLatch toolStarted = new CountDownLatch(1);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                Path outputDir = Files.createTempDirectory("omm-disk-drain-out");
+                try {
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> blockedToolExecution(toolStarted, releaseTool));
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .build();
+
+                        CompletableFuture<ConversionResult> conversion = conversionEngine.convertSingle(testFile,
+                                        settings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS),
+                                        "Conversion should reach the tool");
+
+                        // Given - low disk space auto-pauses the engine while the last task runs
+                        when(fileHandler.getAvailableSpace(any(Path.class))).thenReturn(10L * 1024 * 1024);
+                        invokeDiskSpaceCheck();
+                        assertTrue(conversionEngine.isPaused(), "Engine must auto-pause on low disk space");
+
+                        // When - the last task drains, leaving the engine idle but disk-paused
+                        releaseTool.countDown();
+                        conversion.get(10, TimeUnit.SECONDS);
+                        assertEquals(0, conversionEngine.getActiveConversionCount(),
+                                        "Conversion should have drained before the idle monitor tick");
+
+                        // And - disk space recovers while the engine is idle
+                        when(fileHandler.getAvailableSpace(any(Path.class)))
+                                        .thenReturn(10L * 1024 * 1024 * 1024);
+                        invokeDiskSpaceCheck();
+
+                        // Then - the disk-caused pause must clear even with nothing running
+                        assertFalse(conversionEngine.isPaused(),
+                                        "Disk auto-pause must clear once the queue drained and space recovered");
+                } finally {
+                        releaseTool.countDown();
+                        deleteRecursively(outputDir);
+                }
+        }
+
+        /**
+         * Guard for the disk-pause drain fix: an explicit user pause must
+         * survive the queue draining and a monitor tick - only disk-caused
+         * pauses are cleared when idle.
+         */
+        @Test
+        @Timeout(30)
+        void userPause_SurvivesQueueDrainAndMonitorTick() throws Exception {
+                CountDownLatch toolStarted = new CountDownLatch(1);
+                CountDownLatch releaseTool = new CountDownLatch(1);
+                Path outputDir = Files.createTempDirectory("omm-userpause-drain-out");
+                try {
+                        setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenAnswer(invocation -> blockedToolExecution(toolStarted, releaseTool));
+                        ConversionSettings settings = ConversionSettings.builder()
+                                        .outputFormat(FileFormat.AVI)
+                                        .outputDirectory(outputDir)
+                                        .build();
+
+                        CompletableFuture<ConversionResult> conversion = conversionEngine.convertSingle(testFile,
+                                        settings);
+                        assertTrue(toolStarted.await(5, TimeUnit.SECONDS),
+                                        "Conversion should reach the tool");
+
+                        // Given - an explicit user pause while the last task runs
+                        conversionEngine.pauseConversion();
+                        assertTrue(conversionEngine.isPaused());
+
+                        // When - the queue drains and the monitor ticks with ample space
+                        // (lenient: the idle monitor tick returns before querying space)
+                        releaseTool.countDown();
+                        conversion.get(10, TimeUnit.SECONDS);
+                        assertEquals(0, conversionEngine.getActiveConversionCount(),
+                                        "Conversion should have drained before the idle monitor tick");
+                        lenient().when(fileHandler.getAvailableSpace(any(Path.class)))
+                                        .thenReturn(10L * 1024 * 1024 * 1024);
+                        invokeDiskSpaceCheck();
+
+                        // Then - the user pause must survive
+                        assertTrue(conversionEngine.isPaused(),
+                                        "An explicit user pause must survive the queue draining");
+                } finally {
+                        releaseTool.countDown();
+                        deleteRecursively(outputDir);
+                }
+        }
+
+        // ==================== Transient-retry exit-code extraction tests ====================
+
+        /**
+         * Defect: transient-retry detection matched the exact substring
+         * "exit code 255", so a service message worded differently (but
+         * carrying the same numeric exit code) was not retried. The numeric
+         * exit code must be extracted, not substring-matched.
+         */
+        @Test
+        @Timeout(30)
+        void testConvertSingle_TransientErrorRewordedMessage_RetriesOnce() throws Exception {
+                Path tempOutputDir = Files.createTempDirectory("omm-test-retry-reworded");
+                try {
+                        when(validationEngine.validateConversionRequest(any(ConversionFile.class),
+                                        any(ConversionSettings.class)))
+                                        .thenReturn(ValidationResult.success());
+                        when(toolManager.selectTool(any(FileFormat.class), any(FileFormat.class)))
+                                        .thenReturn(ConversionTool.FFMPEG);
+                        when(validationEngine.validateToolAvailability(any(ConversionTool.class)))
+                                        .thenReturn(ValidationResult.success());
+                        when(validationEngine.validateOutputDirectory(any(Path.class)))
+                                        .thenReturn(ValidationResult.success());
+                        when(validationEngine.validateDiskSpace(any(Path.class), anyLong()))
+                                        .thenReturn(ValidationResult.success());
+
+                        doNothing().when(progressEngine).startTracking(anyString(), anyLong());
+                        doNothing().when(progressEngine).completeTracking(anyString(),
+                                        any(ConversionResult.class));
+
+                        // First attempt fails transiently; the exit code is worded
+                        // differently ("exit code: 255") but still carries the number
+                        ConversionResult transientFailure = ConversionResult.failure(testFile.id(),
+                                        "temporary network error (exit code: 255)", null,
+                                        Duration.ofSeconds(1),
+                                        testFile.size(),
+                                        ConversionTool.FFMPEG);
+
+                        Path expectedOutputPath = tempOutputDir.resolve("test.avi");
+                        ConversionResult successResult = ConversionResult.success(testFile.id(),
+                                        expectedOutputPath,
+                                        null,
+                                        Duration.ofSeconds(2), testFile.size(), 800L, ConversionTool.FFMPEG);
+
+                        when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                        any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class)))
+                                        .thenReturn(transientFailure) // First attempt
+                                        .thenAnswer(invocation -> { // Second attempt (retry)
+                                                Path tempPath = invocation.getArgument(2);
+                                                Files.createDirectories(tempPath.getParent());
+                                                Files.write(tempPath, "test content".getBytes());
+                                                return successResult;
+                                        });
+
+                        // When
+                        ConversionResult result = conversionEngine.convertSingle(testFile, testSettings)
+                                        .get(10, TimeUnit.SECONDS);
+
+                        // Then
+                        assertTrue(result.success(),
+                                        "A reworded exit-code-255 message must still trigger the transient retry");
+                        verify(toolManager, times(2)).executeTool(
+                                        any(ConversionTool.class), any(Path.class), any(Path.class),
+                                        any(FileFormat.class), any(ConversionSettings.class),
+                                        any(ProgressCallback.class),
+                                        any(String.class), any(ProcessRegistry.class));
+                } finally {
+                        Files.deleteIfExists(tempOutputDir.resolve("test.avi"));
+                        Files.deleteIfExists(tempOutputDir);
+                }
+        }
+
+        /**
+         * Companion guard: a lookalike number ("exit code 2550") must not be
+         * classified transient - only the exact numeric exit code 255 is
+         * retried.
+         */
+        @Test
+        @Timeout(30)
+        void testConvertSingle_LookalikeExitCode_DoesNotRetry() throws Exception {
+                when(validationEngine.validateConversionRequest(any(ConversionFile.class),
+                                any(ConversionSettings.class)))
+                                .thenReturn(ValidationResult.success());
+                when(toolManager.selectTool(any(FileFormat.class), any(FileFormat.class)))
+                                .thenReturn(ConversionTool.FFMPEG);
+                when(validationEngine.validateToolAvailability(any(ConversionTool.class)))
+                                .thenReturn(ValidationResult.success());
+                when(validationEngine.validateOutputDirectory(any(Path.class)))
+                                .thenReturn(ValidationResult.success());
+                when(validationEngine.validateDiskSpace(any(Path.class), anyLong()))
+                                .thenReturn(ValidationResult.success());
+
+                doNothing().when(progressEngine).startTracking(anyString(), anyLong());
+                doNothing().when(progressEngine).completeTracking(anyString(), any(ConversionResult.class));
+
+                ConversionResult lookalikeFailure = ConversionResult.failure(testFile.id(),
+                                "FFmpeg conversion failed (exit code 2550): output exhausted", null,
+                                Duration.ofSeconds(1),
+                                testFile.size(),
+                                ConversionTool.FFMPEG);
+
+                when(toolManager.executeTool(any(ConversionTool.class), any(Path.class),
+                                any(Path.class), any(FileFormat.class), any(ConversionSettings.class),
+                                any(ProgressCallback.class),
+                                any(String.class), any(ProcessRegistry.class)))
+                                .thenReturn(lookalikeFailure);
+
+                // When
+                ConversionResult result = conversionEngine.convertSingle(testFile, testSettings)
+                                .get(10, TimeUnit.SECONDS);
+
+                // Then
+                assertFalse(result.success());
+                verify(toolManager, times(1)).executeTool(
+                                any(ConversionTool.class), any(Path.class), any(Path.class),
+                                any(FileFormat.class), any(ConversionSettings.class),
+                                any(ProgressCallback.class),
+                                any(String.class), any(ProcessRegistry.class));
+        }
+
+        /**
+         * ExecutorService that forwards everything to a delegate; tests
+         * subclass it to intercept {@link #execute(Runnable)}.
+         */
+        private static class ForwardingExecutorService extends AbstractExecutorService {
+                private final ExecutorService delegate;
+
+                ForwardingExecutorService(ExecutorService delegate) {
+                        this.delegate = delegate;
+                }
+
+                @Override
+                public void execute(Runnable command) {
+                        delegate.execute(command);
+                }
+
+                @Override
+                public void shutdown() {
+                        delegate.shutdown();
+                }
+
+                @Override
+                public List<Runnable> shutdownNow() {
+                        return delegate.shutdownNow();
+                }
+
+                @Override
+                public boolean isShutdown() {
+                        return delegate.isShutdown();
+                }
+
+                @Override
+                public boolean isTerminated() {
+                        return delegate.isTerminated();
+                }
+
+                @Override
+                public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+                        return delegate.awaitTermination(timeout, unit);
+                }
+        }
+
+        private ExecutorService getExecutorService() throws Exception {
+                Field field = ConversionEngine.class.getDeclaredField("executorService");
+                field.setAccessible(true);
+                return (ExecutorService) field.get(conversionEngine);
+        }
+
+        private void replaceExecutorService(ExecutorService replacement) throws Exception {
+                Field field = ConversionEngine.class.getDeclaredField("executorService");
+                field.setAccessible(true);
+                field.set(conversionEngine, replacement);
+        }
+
+        /**
+         * Tool answer that signals start, then waits for release while
+         * deliberately ignoring interrupts, simulating a tool wedged in an
+         * uninterruptible wait. Bounded so the worker always dies eventually.
+         */
+        private ConversionResult ignoreInterruptsUntilReleased(org.mockito.invocation.InvocationOnMock invocation,
+                        CountDownLatch toolStarted, CountDownLatch releaseTool, String fileId) throws Exception {
+                toolStarted.countDown();
+                long deadline = System.currentTimeMillis() + 20000;
+                boolean released = false;
+                while (!released && System.currentTimeMillis() < deadline) {
+                        try {
+                                released = releaseTool.await(250, TimeUnit.MILLISECONDS);
+                        } catch (InterruptedException e) {
+                                // Wedged tool simulation: interrupts are ignored
+                        }
+                }
+                Path tempPath = invocation.getArgument(2);
+                Files.createDirectories(tempPath.getParent());
+                Files.write(tempPath, "content".getBytes());
+                return ConversionResult.success(fileId, tempPath, null, Duration.ofSeconds(1), 1000L, 800L,
+                                ConversionTool.FFMPEG);
         }
 
         /**

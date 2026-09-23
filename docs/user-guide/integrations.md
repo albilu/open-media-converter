@@ -15,7 +15,8 @@ External tools
 
 Bundled binaries
 
-- Packaged builds may include binaries under `resources/bin/`.
+- Packaged builds bundle **FFmpeg**, **FFprobe** and **Pandoc** under `resources/bin/`.
+- **ImageMagick** and **LibreOffice are not bundled**; they must be installed on the system for image and office-document conversions.
 - The app uses bundled binaries first, then falls back to system tools.
 
 Opening files and folders

@@ -175,11 +175,16 @@ public class ToolManager {
     private ConversionTool selectDocumentTool(FileFormat inputFormat, FileFormat outputFormat)
             throws ToolExecutionException {
         // Prefer native office layout when Pandoc cannot read or write this pair.
-        if (PandocService.canConvert(inputFormat, outputFormat) && pandocService != null) {
+        if (pandocService != null && pandocService.supportsConversion(inputFormat, outputFormat)) {
             return ConversionTool.PANDOC;
         }
         if (LibreOfficeService.canConvert(inputFormat, outputFormat) && libreOfficeService != null) {
             return ConversionTool.LIBREOFFICE;
+        }
+        if (outputFormat == FileFormat.PDF && pandocService != null
+                && PandocService.canConvert(inputFormat, outputFormat)) {
+            throw new ToolExecutionException("Install LibreOffice to render documents as PDF, or choose another output format.",
+                    ErrorCode.TOOL_NOT_FOUND, "LibreOffice PDF renderer is unavailable");
         }
         // Never fall back to an UNAVAILABLE service: returning a tool whose
         // service is null only moves the failure downstream as an NPE.
@@ -206,7 +211,7 @@ public class ToolManager {
      * @return true if Pandoc or LibreOffice is installed and supports the pair
      */
     public boolean canConvertDocuments(FileFormat input, FileFormat output) {
-        if (PandocService.canConvert(input, output) && pandocService != null) {
+        if (pandocService != null && pandocService.supportsConversion(input, output)) {
             return true;
         }
         return LibreOfficeService.canConvert(input, output) && libreOfficeService != null;

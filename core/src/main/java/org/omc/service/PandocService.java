@@ -52,6 +52,14 @@ public class PandocService {
      */
     static long PROCESS_TIMEOUT_MILLIS = java.util.concurrent.TimeUnit.HOURS.toMillis(1);
 
+    /**
+     * How long the main thread waits for the output reader to drain after the
+     * process has ended before using whatever was captured. The reader is a
+     * daemon and pipe reads are not interruptible, so this join is a brief
+     * courtesy, not a correctness requirement.
+     */
+    private static final long READER_JOIN_MILLIS = java.util.concurrent.TimeUnit.SECONDS.toMillis(2);
+
     private final Path pandocPath;
     private final LibreOfficeService pdfRenderer;
 
@@ -88,6 +96,16 @@ public class PandocService {
         this.pandocPath = Objects.requireNonNull(pandocPath, "pandocPath must not be null");
         this.pdfRenderer = pdfRenderer;
         logger.debug("PandocService initialized with path: {}", pandocPath);
+    }
+
+    /**
+     * Checks format support and all runtime dependencies for this service.
+     * @param input source format
+     * @param output destination format
+     * @return whether this instance can execute the complete conversion pipeline
+     */
+    public boolean supportsConversion(FileFormat input, FileFormat output) {
+        return canConvert(input, output) && (output != FileFormat.PDF || pdfRenderer != null);
     }
 
     /**
@@ -173,9 +191,32 @@ public class PandocService {
         }
 
         Path formattingFilter = null;
+        Path literalInput = null;
+        Path extractedResources = null;
+        boolean successful = false;
         try {
+            Path preparedInput = inputPath.toAbsolutePath();
+            if (detectFormat(inputPath) == FileFormat.TXT) {
+                // A preformatted HTML block is a literal text reader for Pandoc:
+                // markup punctuation and whitespace remain text in every writer.
+                literalInput = Files.createTempFile("omc-literal-", ".html");
+                String text = Files.readString(inputPath).replace("&", "&amp;")
+                        .replace("<", "&lt;").replace(">", "&gt;");
+                Files.writeString(literalInput, "<!doctype html><meta charset=\"utf-8\"><pre>" + text + "</pre>");
+                preparedInput = literalInput;
+            }
             // Build Pandoc command
-            List<String> command = buildCommand(inputPath, outputPath, settings);
+            List<String> command = buildCommand(preparedInput, outputPath.toAbsolutePath(), settings);
+            command.add("--fail-if-warnings");
+            command.add("--metadata=pagetitle:" + inputPath.getFileName());
+            FileFormat outputFormat = detectFormat(outputPath);
+            if (java.util.Set.of(FileFormat.MARKDOWN, FileFormat.RST, FileFormat.ORG,
+                    FileFormat.TEX, FileFormat.LATEX).contains(outputFormat)) {
+                Path directory = outputPath.toAbsolutePath().getParent();
+                Files.createDirectories(directory);
+                extractedResources = Files.createTempDirectory(directory, "omc-resources-");
+                command.add("--extract-media=" + extractedResources.getFileName());
+            }
             if (!settings.preserveFormatting()) {
                 formattingFilter = Files.createTempFile("omc-formatting-", ".lua");
                 try (var filter = getClass().getResourceAsStream("/pandoc/plain-formatting.lua")) {
@@ -189,6 +230,7 @@ public class PandocService {
 
             // Execute conversion process
             ProcessBuilder processBuilder = new ProcessBuilder(command);
+            processBuilder.directory(outputPath.toAbsolutePath().getParent().toFile());
             processBuilder.redirectErrorStream(true);
 
             Process process = processBuilder.start();
@@ -287,7 +329,13 @@ public class PandocService {
             // Wait for progress thread to complete its final 100% update before proceeding
             // This ensures the completion status is set AFTER all progress updates
             progressThread.join(1000); // Wait up to 1 second for progress thread
-            outputReader.join();
+            // Bounded join: a grandchild inheriting the pipe would otherwise
+            // block this join forever (pipe reads are not interruptible, but
+            // the reader is a daemon so interrupting is best-effort).
+            outputReader.join(READER_JOIN_MILLIS);
+            if (outputReader.isAlive()) {
+                outputReader.interrupt();
+            }
 
             Duration conversionTime = Duration.between(startTime, Instant.now());
 
@@ -313,6 +361,7 @@ public class PandocService {
             // Get output file size
             DocumentOutputOptions.apply(outputPath, detectFormat(outputPath), settings);
             long outputSize = Files.size(outputPath);
+            successful = true;
 
             logger.info("Pandoc conversion successful: {} -> {} in {}ms ({} bytes -> {} bytes)",
                     inputPath.getFileName(), outputPath.getFileName(), conversionTime.toMillis(), inputSize,
@@ -359,6 +408,15 @@ public class PandocService {
                     "Process interrupted",
                     e);
         } finally {
+            if (literalInput != null) {
+                try { Files.deleteIfExists(literalInput); }
+                catch (IOException e) { logger.warn("Could not remove literal document input", e); }
+            }
+            if (extractedResources != null && !successful) {
+                try (var paths = Files.walk(extractedResources)) {
+                    for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
+                } catch (IOException e) { logger.warn("Could not remove incomplete document resources", e); }
+            }
             if (formattingFilter != null) {
                 try { Files.deleteIfExists(formattingFilter); }
                 catch (IOException e) { logger.warn("Could not remove document filter", e); }
@@ -379,8 +437,8 @@ public class PandocService {
      * @param output   path to output file
      * @param settings document settings
      * @return list of command arguments
-     * @throws IllegalArgumentException if PDF is requested; use convertDocument
-     *                                  for the PDF rendering workflow
+     * @throws IllegalArgumentException if PDF output or TXT input is requested;
+     *                                  use convertDocument for these preparation workflows
      */
     public List<String> buildCommand(Path input, Path output, DocumentSettings settings) {
         Objects.requireNonNull(input, "input must not be null");
@@ -409,11 +467,14 @@ public class PandocService {
         if (outputFormat == FileFormat.PDF) {
             throw new IllegalArgumentException("PDF output uses convertDocument with a LibreOffice renderer.");
         }
+        if (inputFormat == FileFormat.TXT) {
+            throw new IllegalArgumentException("TXT input uses convertDocument for literal text preparation.");
+        }
 
         // Explicitly set input format if known
         if (inputFormat != FileFormat.UNKNOWN) {
             command.add("-f");
-            command.add(inputFormat == FileFormat.TXT ? "markdown_strict" : mapFormatToPandoc(inputFormat));
+            command.add(mapFormatToPandoc(inputFormat));
         }
 
         // Explicitly set output format if known
@@ -435,7 +496,7 @@ public class PandocService {
         // itself; strict isRegularFile/isReadable checks broke that contract.
         if (settings.templatePath() != null && Files.exists(settings.templatePath())) {
             command.add((outputFormat == FileFormat.DOCX || outputFormat == FileFormat.ODT
-                    ? "--reference-doc=" : "--template=") + settings.templatePath());
+                    ? "--reference-doc=" : "--template=") + settings.templatePath().toAbsolutePath());
         }
 
         // Standalone document (includes headers, etc.)

@@ -197,6 +197,17 @@ public final class ConversionSettings {
     }
 
     /**
+     * Returns these settings with a replacement Document section.
+     * @param settings complete document settings
+     * @return a copy preserving every other section and global preference
+     */
+    public ConversionSettings withDocumentSettings(DocumentSettings settings) {
+        return new ConversionSettings(outputDirectory, overwriteExisting, createSubdirectory,
+                parallelConversions, deleteOriginalFile, videoSettings, audioSettings, imageSettings,
+                Objects.requireNonNull(settings, "document settings cannot be null"));
+    }
+
+    /**
      * Returns the output format for the specified category.
      * 
      * <p>
@@ -338,6 +349,53 @@ public final class ConversionSettings {
         return true;
     }
 
+    /**
+     * Validates these settings without touching the filesystem beyond simple
+     * null checks.
+     *
+     * <p>
+     * Checks everything {@link #isValid()} checks <em>except</em> transient
+     * filesystem state: the output directory only has to be configured (not
+     * currently existing/writable) and the document section is validated via
+     * {@link DocumentSettings#isStructurallyValid()} (template existence is
+     * not required). Output directories and templates may live on removable
+     * or offline storage, so their temporary absence must not decide whether
+     * persisted settings data is structurally sound.
+     * </p>
+     *
+     * @return true if the settings are structurally valid
+     */
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    public boolean isStructurallyValid() {
+        if (outputDirectory == null) {
+            return false;
+        }
+
+        if (parallelConversions < 1 || parallelConversions > 16) {
+            return false;
+        }
+
+        if (videoSettings == null && audioSettings == null &&
+                imageSettings == null && documentSettings == null) {
+            return false;
+        }
+
+        if (videoSettings != null && !videoSettings.isValid()) {
+            return false;
+        }
+        if (audioSettings != null && !audioSettings.isValid()) {
+            return false;
+        }
+        if (imageSettings != null && !imageSettings.isValid()) {
+            return false;
+        }
+        if (documentSettings != null && !documentSettings.isStructurallyValid()) {
+            return false;
+        }
+
+        return true;
+    }
+
     public static Builder builder() {
         return new Builder();
     }
@@ -455,11 +513,14 @@ public final class ConversionSettings {
 
         /**
          * Sets the output format for the appropriate category.
-         * 
-         * @param outputFormat the output format
+         *
+         * @param outputFormat the output format (must not be null or UNKNOWN)
          * @return this builder
+         * @throws NullPointerException     if outputFormat is null
+         * @throws IllegalArgumentException if outputFormat is UNKNOWN
          */
         public Builder outputFormat(FileFormat outputFormat) {
+            java.util.Objects.requireNonNull(outputFormat, "outputFormat cannot be null");
             FormatCategory category = outputFormat.getCategory();
             switch (category) {
                 case VIDEO -> {
@@ -490,6 +551,8 @@ public final class ConversionSettings {
                         documentSettings = documentSettings.withOutputFormat(outputFormat);
                     }
                 }
+                case UNKNOWN -> throw new IllegalArgumentException(
+                        "Cannot set an UNKNOWN output format");
             }
             return this;
         }

@@ -138,6 +138,160 @@ class SettingsDialogJavaGiTest {
         }
     }
 
+    // ========== Dialog Lifecycle Tests ==========
+
+    /**
+     * closeDialog must destroy the dialog (not just hide it) and release the
+     * dialog/builder references so a new SettingsDialogJavaGi per Settings
+     * click does not leak hidden GtkDialogs.
+     */
+    @Test
+    void closeDialogDestroysAndReleasesDialogAndBuilder() throws Exception {
+        SettingsDialogJavaGi settingsDialog = mock(SettingsDialogJavaGi.class, CALLS_REAL_METHODS);
+        org.gnome.gtk.Dialog gtkDialog = mock(org.gnome.gtk.Dialog.class);
+        org.gnome.gtk.GtkBuilder gtkBuilder = mock(org.gnome.gtk.GtkBuilder.class);
+
+        java.lang.reflect.Field dialogField = SettingsDialogJavaGi.class.getDeclaredField("dialog");
+        dialogField.setAccessible(true);
+        dialogField.set(settingsDialog, gtkDialog);
+        java.lang.reflect.Field builderField = SettingsDialogJavaGi.class.getDeclaredField("builder");
+        builderField.setAccessible(true);
+        builderField.set(settingsDialog, gtkBuilder);
+
+        settingsDialog.closeDialog();
+
+        verify(gtkDialog).destroy();
+        verify(gtkDialog, never()).hide();
+        assertNull(dialogField.get(settingsDialog), "dialog reference must be released after close");
+        assertNull(builderField.get(settingsDialog), "builder reference must be released after close");
+
+        // A second close must be a no-op (no NPE, no double-close).
+        settingsDialog.closeDialog();
+        verify(gtkDialog, times(1)).destroy();
+    }
+
+    // ========== Unsaved-changes tracking tests ==========
+
+    @Test
+    void connectChangeHandlers_tracksDropDownSelections() throws Exception {
+        String[] dropDownFields = {
+                "videoFormatDropdown", "videoCodecDropdown", "videoAspectRatioDropdown",
+                "videoFrameRateDropdown", "videoPresetDropdown", "audioFormatDropdown",
+                "audioCodecDropdown", "audioSampleRateDropdown", "audioChannelsDropdown",
+                "imageFormatDropdown", "resizeModeDropdown", "imageRotationDropdown",
+                "imageFlipDropdown", "documentFormatDropdown"
+        };
+        for (String fieldName : dropDownFields) {
+            SettingsDialogJavaGi settingsDialog = mock(SettingsDialogJavaGi.class, CALLS_REAL_METHODS);
+            setDialogField(settingsDialog, "hasUnsavedChanges", false);
+            org.gnome.gtk.DropDown dropDown = mock(org.gnome.gtk.DropDown.class);
+            setDialogField(settingsDialog, fieldName, dropDown);
+
+            java.lang.reflect.Method connect = SettingsDialogJavaGi.class
+                    .getDeclaredMethod("connectChangeHandlers");
+            connect.setAccessible(true);
+            connect.invoke(settingsDialog);
+
+            org.mockito.ArgumentCaptor<org.gnome.gobject.GObject.NotifyCallback> captor = org.mockito.ArgumentCaptor
+                    .forClass(org.gnome.gobject.GObject.NotifyCallback.class);
+            verify(dropDown, atLeastOnce()).onNotify(eq("selected"), captor.capture());
+            captor.getValue().run(null);
+            assertTrue((Boolean) getDialogField(settingsDialog, "hasUnsavedChanges"),
+                    fieldName + " selection must mark unsaved changes");
+        }
+    }
+
+    private static void setDialogField(Object target, String name, Object value) throws Exception {
+        java.lang.reflect.Field field = SettingsDialogJavaGi.class.getDeclaredField(name);
+        field.setAccessible(true);
+        field.set(target, value);
+    }
+
+    // ========== readVideoSettings custom-resolution parsing tests ==========
+
+    private SettingsDialogJavaGi dialogWithCustomResolution(Object widthEntryValue, String heightText)
+            throws Exception {
+        SettingsDialogJavaGi settingsDialog = mock(SettingsDialogJavaGi.class, CALLS_REAL_METHODS);
+
+        org.gnome.gtk.DropDown codecDropdown = mock(org.gnome.gtk.DropDown.class);
+        when(codecDropdown.getSelected()).thenReturn(0);
+        setDialogField(settingsDialog, "videoCodecDropdown", codecDropdown);
+
+        java.lang.reflect.Field customIndexField = SettingsDialogJavaGi.class
+                .getDeclaredField("RESOLUTION_INDEX_CUSTOM");
+        customIndexField.setAccessible(true);
+        org.gnome.gtk.DropDown resolutionDropdown = mock(org.gnome.gtk.DropDown.class);
+        when(resolutionDropdown.getSelected()).thenReturn(customIndexField.getInt(null));
+        setDialogField(settingsDialog, "videoResolutionDropdown", resolutionDropdown);
+
+        org.gnome.gtk.Entry widthEntry = mock(org.gnome.gtk.Entry.class);
+        if (widthEntryValue instanceof String text) {
+            when(widthEntry.getText()).thenReturn(text);
+        } else {
+            when(widthEntry.getText()).thenThrow((RuntimeException) widthEntryValue);
+        }
+        setDialogField(settingsDialog, "videoWidthEntry", widthEntry);
+        org.gnome.gtk.Entry heightEntry = mock(org.gnome.gtk.Entry.class);
+        when(heightEntry.getText()).thenReturn(heightText);
+        setDialogField(settingsDialog, "videoHeightEntry", heightEntry);
+        return settingsDialog;
+    }
+
+    private VideoSettings invokeReadVideoSettings(SettingsDialogJavaGi settingsDialog) throws Exception {
+        java.lang.reflect.Method method = SettingsDialogJavaGi.class.getDeclaredMethod("readVideoSettings");
+        method.setAccessible(true);
+        return (VideoSettings) method.invoke(settingsDialog);
+    }
+
+    @Test
+    void readVideoSettings_invalidCustomResolution_keepsResolutionUnset() throws Exception {
+        SettingsDialogJavaGi settingsDialog = dialogWithCustomResolution("abc", "1080");
+
+        VideoSettings settings = invokeReadVideoSettings(settingsDialog);
+
+        assertNotNull(settings);
+        assertNull(settings.resolution(), "non-numeric custom resolution must be ignored");
+    }
+
+    @Test
+    void readVideoSettings_nonPositiveCustomResolution_keepsResolutionUnset() throws Exception {
+        SettingsDialogJavaGi settingsDialog = dialogWithCustomResolution("0", "-1");
+
+        VideoSettings settings = invokeReadVideoSettings(settingsDialog);
+
+        assertNotNull(settings);
+        assertNull(settings.resolution(), "non-positive custom resolution must be ignored");
+    }
+
+    @Test
+    void readVideoSettings_validCustomResolution_setsResolution() throws Exception {
+        SettingsDialogJavaGi settingsDialog = dialogWithCustomResolution("640", "480");
+
+        VideoSettings settings = invokeReadVideoSettings(settingsDialog);
+
+        assertNotNull(settings);
+        assertEquals(new Resolution(640, 480), settings.resolution());
+    }
+
+    @Test
+    void readVideoSettings_unexpectedRuntimeException_propagates() throws Exception {
+        SettingsDialogJavaGi settingsDialog = dialogWithCustomResolution(
+                new IllegalStateException("widget disposed"), "1080");
+
+        java.lang.reflect.Method method = SettingsDialogJavaGi.class.getDeclaredMethod("readVideoSettings");
+        method.setAccessible(true);
+        java.lang.reflect.InvocationTargetException ex = assertThrows(
+                java.lang.reflect.InvocationTargetException.class, () -> method.invoke(settingsDialog));
+        assertInstanceOf(IllegalStateException.class, ex.getCause(),
+                "only invalid-number input may be swallowed; unexpected failures must propagate");
+    }
+
+    private static Object getDialogField(Object target, String name) throws Exception {
+        java.lang.reflect.Field field = SettingsDialogJavaGi.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(target);
+    }
+
     // ========== Validation Tests (Original) ==========
 
     @Test
@@ -203,6 +357,48 @@ class SettingsDialogJavaGiTest {
         method.setAccessible(true);
         String result = (String) method.invoke(null, invalidSettings);
         assertTrue(result.contains("Parallel conversions must be between 1 and 16"));
+    }
+
+    @Test
+    void testValidateSettings_WithInvalidAudioSectionUnderVideoPrimary_ShouldReturnError() throws Exception {
+        // An out-of-range audio section must be rejected even when the
+        // primary format is VIDEO: all dialog tabs are editable, so all
+        // sections must validate (JSON bypasses the section builders)
+        org.omc.model.AudioSettings invalidAudio = org.omc.util.JsonUtils.getObjectMapper().readValue(
+                "{\"codec\":\"libmp3lame\",\"bitrate\":500,\"sampleRate\":44100,\"channels\":2,\"quality\":5,\"outputFormat\":\"MP3\"}",
+                org.omc.model.AudioSettings.class);
+        ConversionSettings settings = ConversionSettings.builder()
+                .outputFormat(FileFormat.MP4)
+                .outputDirectory(testOutputDir)
+                .audioSettings(invalidAudio)
+                .build();
+
+        java.lang.reflect.Method method = SettingsDialogJavaGi.class.getDeclaredMethod("validateSettings",
+                ConversionSettings.class);
+        method.setAccessible(true);
+        String result = (String) method.invoke(null, settings);
+        assertNotNull(result, "invalid audio section must be rejected under a VIDEO primary format");
+        assertTrue(result.contains("Audio bitrate"));
+    }
+
+    @Test
+    void testValidateSettings_WithLosslessImageQuality_ShouldReturnNull() throws Exception {
+        // Image quality -1 (lossless) is a legitimate model value and must
+        // not be rejected by dialog validation
+        org.omc.model.ImageSettings losslessImage = org.omc.util.JsonUtils.getObjectMapper().readValue(
+                "{\"quality\":-1,\"outputFormat\":\"PNG\"}",
+                org.omc.model.ImageSettings.class);
+        ConversionSettings settings = ConversionSettings.builder()
+                .outputFormat(FileFormat.PNG)
+                .outputDirectory(testOutputDir)
+                .imageSettings(losslessImage)
+                .build();
+
+        java.lang.reflect.Method method = SettingsDialogJavaGi.class.getDeclaredMethod("validateSettings",
+                ConversionSettings.class);
+        method.setAccessible(true);
+        String result = (String) method.invoke(null, settings);
+        assertNull(result, "lossless image quality must be accepted, got: " + result);
     }
 
     @Test

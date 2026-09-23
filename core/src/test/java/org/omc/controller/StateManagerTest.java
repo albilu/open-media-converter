@@ -790,7 +790,7 @@ class StateManagerTest {
                     int expectedRecentCount = i + 1;
                     List<Path> recentFilePaths = phantomRecentPaths(expectedRecentCount);
                     startIteration.await();
-                    handler.saveApplicationState(recentFilePaths, null, null, null, null);
+                    handler.saveApplicationState(recentFilePaths, null, null, null);
                     iterationDone.await();
                     if (stateManager.getCurrentState().sessionState().recentFilePaths().size()
                             != expectedRecentCount) {

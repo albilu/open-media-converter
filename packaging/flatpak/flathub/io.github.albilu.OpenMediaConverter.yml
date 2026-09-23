@@ -1,0 +1,141 @@
+# Flathub submission manifest for Open Media Converter.
+#
+# Differences from the bundle manifest (packaging/flatpak/):
+#   - builds the shaded jar from the upstream git source (Flathub policy),
+#   - builds offline: Maven dependencies must be vendored into
+#     maven-sources.json (see SUBMISSION.md), and the embedded ffmpeg/pandoc
+#     archives are pre-seeded into omc-gtk/.tool-cache from tools.json pins,
+#   - LibreOffice is not bundled; ImageMagick is built from source.
+#
+# Per release: update the git `tag`/`commit`, regenerate maven-sources.json,
+# and keep the two tool archives in sync with omc-gtk/scripts/tools.json.
+app-id: io.github.albilu.OpenMediaConverter
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.openjdk25
+  - org.freedesktop.Sdk.Extension.maven
+command: open-media-converter
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  # Media conversion needs broad read/write access to user files
+  - --filesystem=home
+  - --talk-name=org.freedesktop.Notifications
+  # The GTK application id predates the flatpak app-id
+  - --own-name=org.omc.OpenMediaConverter
+build-options:
+  append-path: /usr/lib/sdk/openjdk25/bin:/usr/lib/sdk/maven/bin
+  env:
+    MAVEN_OPTS: -Dmaven.repo.local=/app/build/m2
+modules:
+  - name: imagemagick
+    buildsystem: autotools
+    config-opts:
+      - --without-x
+      - --without-perl
+      - --without-magick-plus-plus
+      - --disable-docs
+      # Install the legacy "convert" name the app looks up first
+      - --enable-legacy-support
+    sources:
+      - type: archive
+        url: https://download.imagemagick.org/archive/releases/ImageMagick-7.1.2-31.tar.xz
+        sha256: 894e3dfc3312151bba15ed1838e8066302940972d100a1727dfac5d16dd769e1
+
+  - name: open-media-converter
+    buildsystem: simple
+    sources:
+      - type: git
+        url: https://github.com/albilu/open-media-converter.git
+        # Release tag and its commit sha, updated per release
+        tag: v0.1.0
+        commit: 0000000000000000000000000000000000000000
+      # Vendored Maven dependencies; generated per SUBMISSION.md
+      - maven-sources.json
+      # Embedded tool archives, pre-seeding omc-gtk/.tool-cache so
+      # prepare-tools.py succeeds in the offline build (pins and checksums
+      # must match omc-gtk/scripts/tools.json)
+      - type: file
+        url: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n8.1.2-50-g1a748fe2cd-linux64-gpl-8.1.tar.xz
+        sha256: c733b4b2951e5957e15505f788b2c65a7a41b6da4b289e295852cc38079b4d2b
+        dest: omc-gtk/.tool-cache
+        dest-filename: c733b4b2951e5957e15505f788b2c65a7a41b6da4b289e295852cc38079b4d2b.archive
+      - type: file
+        url: https://github.com/jgm/pandoc/releases/download/3.10.2/pandoc-3.10.2-linux-amd64.tar.gz
+        sha256: c7edd535941c48be6a362081a748272837de81ae11777202d9c341d3d8261c9a
+        dest: omc-gtk/.tool-cache
+        dest-filename: c7edd535941c48be6a362081a748272837de81ae11777202d9c341d3d8261c9a.archive
+    build-commands:
+      # Offline Maven build (dependency repo vendored by maven-sources.json)
+      - mvn -o -q -pl omc-gtk -am package -DskipTests -Djacoco.skip=true
+      # Bundled jlink runtime (same module set as packaging/build-packages.sh)
+      - |
+        jlink --add-modules java.base,java.desktop,java.sql,java.logging,java.net.http,jdk.crypto.ec,jdk.zipfs,jdk.unsupported,jdk.localedata,java.naming,java.management \
+          --strip-debug --no-header-files --no-man-pages --compress zip-6 \
+          --output runtime
+      - install -Dm644 omc-gtk/target/open-media-converter-*.jar
+        /app/open-media-converter/omc.jar
+      - mkdir -p /app/open-media-converter && cp -a runtime
+        /app/open-media-converter/runtime
+      # Launcher: always the bundled runtime inside the sandbox
+      - |
+        mkdir -p /app/bin
+        printf '%s\n' '#!/bin/sh' \
+          'exec /app/open-media-converter/runtime/bin/java --enable-native-access=ALL-UNNAMED -jar /app/open-media-converter/omc.jar "$@"' \
+          > /app/bin/open-media-converter
+        chmod 755 /app/bin/open-media-converter
+      # Desktop entry renamed to the app-id
+      - |
+        mkdir -p /app/share/applications
+        sed -e 's|^Exec=/usr/bin/open-media-converter|Exec=open-media-converter|' \
+            -e 's|^TryExec=.*|TryExec=open-media-converter|' \
+            -e 's|^Icon=.*|Icon=io.github.albilu.OpenMediaConverter|' \
+            packaging/resources/open-media-converter.desktop \
+            > /app/share/applications/io.github.albilu.OpenMediaConverter.desktop
+        chmod 644 /app/share/applications/io.github.albilu.OpenMediaConverter.desktop
+      # AppStream metainfo renamed to the app-id
+      - |
+        mkdir -p /app/share/metainfo
+        sed -e 's|<id>org.omc.open-media-converter</id>|<id>io.github.albilu.OpenMediaConverter</id>|' \
+            -e 's|<launchable type="desktop-id">open-media-converter.desktop</launchable>|<launchable type="desktop-id">io.github.albilu.OpenMediaConverter.desktop</launchable>|' \
+            -e 's|<icon type="stock">open-media-converter</icon>|<icon type="stock">io.github.albilu.OpenMediaConverter</icon>|' \
+            packaging/resources/open-media-converter.metainfo.xml \
+            > /app/share/metainfo/io.github.albilu.OpenMediaConverter.metainfo.xml
+        chmod 644 /app/share/metainfo/io.github.albilu.OpenMediaConverter.metainfo.xml
+      # Hicolor icons renamed to the app-id: PNGs rasterized with the
+      # ImageMagick built above (the repo ships SVGs only, AppStream compose
+      # requires raster icons)
+      - |
+        for size in 16 24 32 48 64 128 256 512; do
+          dest="/app/share/icons/hicolor/${size}x${size}/apps"
+          mkdir -p "$dest"
+          magick -background none "omc-gtk/src/main/resources/icons/hicolor/scalable/apps/open-media-converter.svg" \
+            -resize "${size}x${size}" "$dest/io.github.albilu.OpenMediaConverter.png"
+        done
+        for d in omc-gtk/src/main/resources/icons/hicolor/*/apps; do
+          size="$(basename "$(dirname "$d")")"
+          dest="/app/share/icons/hicolor/$size/apps"
+          mkdir -p "$dest"
+          for f in "$d"/open-media-converter.svg; do
+            [ -f "$f" ] || continue
+            install -m644 "$f" "$dest/io.github.albilu.OpenMediaConverter.svg"
+          done
+        done
+      # Minimal hicolor index.theme so the theme is valid for GLib lookups
+      - |
+        {
+          echo "[Icon Theme]"; echo "Name=Hicolor"; echo "Comment=Fallback icon theme"; echo "Hidden=true"
+          echo "Directories=16x16/apps,24x24/apps,32x32/apps,48x48/apps,64x64/apps,128x128/apps,256x256/apps,512x512/apps,scalable/apps"
+          for size in 16 24 32 48 64 128 256 512; do
+            echo ""; echo "[${size}x${size}/apps]"; echo "Size=${size}"; echo "Type=Fixed"
+          done
+          echo ""; echo "[scalable/apps]"; echo "Size=16"; echo "MinSize=16"; echo "MaxSize=512"; echo "Type=Scalable"
+        } > /app/share/icons/hicolor/index.theme
+      # Man page and license
+      - install -Dm644 packaging/resources/open-media-converter.1
+        /app/share/man/man1/open-media-converter.1
+      - install -Dm644 LICENSE
+        /app/share/licenses/io.github.albilu.OpenMediaConverter/LICENSE

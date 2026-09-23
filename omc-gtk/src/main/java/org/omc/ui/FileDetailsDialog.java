@@ -61,7 +61,6 @@ public class FileDetailsDialog {
     private Window dialog;
     /** File whose details the live dialog shows (audit: window-storm reuse). */
     private volatile String displayedFileId;
-    private Button copyButton;
 
     // Global conversion settings used for output-format resolution (may be
     // null when constructed without settings; resolution then uses the same
@@ -120,14 +119,14 @@ public class FileDetailsDialog {
         // stacking duplicate windows on repeated double-clicks (audit fix).
         Window existing = dialog;
         if (existing != null && existing.isVisible() && file.id().equals(displayedFileId)) {
-            GLib.idleAdd(0, () -> {
+            GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
                 existing.present();
                 return false;
             });
             return;
         }
 
-        GLib.idleAdd(0, () -> {
+        GLib.idleAdd(GLib.PRIORITY_DEFAULT_IDLE, () -> {
             try {
                 buildDialog(file, result);
                 dialog.present();
@@ -148,13 +147,21 @@ public class FileDetailsDialog {
      * @param result The conversion result (nullable)
      */
     private void buildDialog(ConversionFile file, ConversionResult result) {
-        dialog = new Window();
+        // Only one details window per dialog instance is live at a time:
+        // close the previous file's window before building the new one.
+        Window previous = dialog;
+        if (previous != null) {
+            previous.close();
+        }
+
+        Window newDialog = new Window();
+        dialog = newDialog;
         displayedFileId = file.id();
-        dialog.setTitle(file.fileName() + " - Conversion Details");
-        dialog.setTransientFor(parentWindow);
-        dialog.setModal(false);
-        dialog.setDefaultSize(700, 500);
-        dialog.setResizable(true);
+        newDialog.setTitle(file.fileName() + " - Conversion Details");
+        newDialog.setTransientFor(parentWindow);
+        newDialog.setModal(false);
+        newDialog.setDefaultSize(700, 500);
+        newDialog.setResizable(true);
 
         // Main layout container
         Box mainBox = new Box(Orientation.VERTICAL, 12);
@@ -174,9 +181,9 @@ public class FileDetailsDialog {
         mainBox.append(contentSection);
 
         // Footer with action buttons
-        mainBox.append(buildFooterSection(result));
+        mainBox.append(buildFooterSection(result, newDialog));
 
-        dialog.setChild(mainBox);
+        newDialog.setChild(mainBox);
     }
 
     /**
@@ -584,7 +591,7 @@ public class FileDetailsDialog {
      * @param result The conversion result (for clipboard copy)
      * @return Widget containing footer buttons
      */
-    private Widget buildFooterSection(ConversionResult result) {
+    private Widget buildFooterSection(ConversionResult result, Window dialogWindow) {
         Box buttonBox = new Box(Orientation.HORIZONTAL, 6);
         buttonBox.setHalign(Align.END);
         buttonBox.setMarginTop(12);
@@ -592,21 +599,19 @@ public class FileDetailsDialog {
         // Copy to Clipboard button (enabled only if tool output exists)
         boolean hasOutput = result != null && result.toolOutput().isPresent();
         if (hasOutput) {
-            copyButton = Button.withLabel("_Copy to Clipboard");
+            Button copyButton = Button.withLabel("_Copy to Clipboard");
             copyButton.setUseUnderline(true);
             copyButton.onClicked(() -> {
-                copyToolOutputToClipboard(result);
+                copyToolOutputToClipboard(result, dialogWindow, copyButton);
             });
             buttonBox.append(copyButton);
-            this.copyButton = copyButton;
         }
 
-        // Close button
+        // Close button: closes exactly the window this footer was built for,
+        // not whichever window the mutable dialog field currently references.
         Button closeButton = Button.withLabel("_Close");
         closeButton.setUseUnderline(true);
-        closeButton.onClicked(() -> {
-            dialog.close();
-        });
+        closeButton.onClicked(dialogWindow::close);
         buttonBox.append(closeButton);
 
         return buttonBox;
@@ -615,10 +620,13 @@ public class FileDetailsDialog {
     /**
      * Copies tool output to system clipboard and shows confirmation.
      * Requirement REQ-FL-2.1: Copy to clipboard functionality.
-     * 
-     * @param result The conversion result with tool output
+     *
+     * @param result       The conversion result with tool output
+     * @param dialogWindow The window this action belongs to (captured at build
+     *                     time, not the mutable dialog field)
+     * @param copyButton   The button that triggered the copy
      */
-    private void copyToolOutputToClipboard(ConversionResult result) {
+    private void copyToolOutputToClipboard(ConversionResult result, Window dialogWindow, Button copyButton) {
         if (result == null || result.toolOutput().isEmpty()) {
             logger.warn("Cannot copy to clipboard: no tool output available");
             return;
@@ -626,13 +634,13 @@ public class FileDetailsDialog {
 
         try {
             String toolOutput = result.toolOutput().get();
-            org.gnome.gdk.Clipboard clipboard = dialog.getClipboard();
+            org.gnome.gdk.Clipboard clipboard = dialogWindow.getClipboard();
             clipboard.setText(toolOutput);
 
             logger.info("Tool output copied to clipboard ({} characters)", toolOutput.length());
 
             // Show brief confirmation (could use toast in GTK 4.10+)
-            showCopyConfirmation();
+            showCopyConfirmation(copyButton);
         } catch (Exception e) {
             logger.error("Failed to copy to clipboard", e);
             ErrorDialog.showError(parentWindow, "Copy Failed", "Failed to copy tool output to clipboard");
@@ -641,17 +649,17 @@ public class FileDetailsDialog {
 
     /**
      * Shows a brief confirmation that output was copied.
+     *
+     * @param copyButton The button to temporarily relabel
      */
-    private void showCopyConfirmation() {
-        if (copyButton != null) {
-            String originalLabel = copyButton.getLabel();
-            copyButton.setLabel("Copied!");
-            // Revert after 2 seconds
-            GLib.timeoutAdd(GLib.PRIORITY_DEFAULT, 2000, () -> {
-                copyButton.setLabel(originalLabel);
-                return false; // Don't repeat
-            });
-        }
+    private void showCopyConfirmation(Button copyButton) {
+        String originalLabel = copyButton.getLabel();
+        copyButton.setLabel("Copied!");
+        // Revert after 2 seconds
+        GLib.timeoutAdd(GLib.PRIORITY_DEFAULT, 2000, () -> {
+            copyButton.setLabel(originalLabel);
+            return false; // Don't repeat
+        });
         logger.debug("Tool output copied to clipboard");
     }
 

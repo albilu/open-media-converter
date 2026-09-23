@@ -1,7 +1,6 @@
 package org.omc.core;
 
 import java.nio.file.Path;
-import java.nio.file.Paths;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +17,7 @@ import org.omc.service.ImageMagickService;
 import org.omc.service.LibreOfficeService;
 import org.omc.service.PandocService;
 import org.omc.service.ToolDiscovery;
+import org.omc.util.PathUtils;
 
 /**
  * Factory class for creating and wiring application dependencies.
@@ -75,23 +75,23 @@ public class DependencyFactory {
     }
 
     /**
-     * Gets the default data directory (~/.local/share/open-media-converter).
+     * Gets the default data directory (XDG data home based,
+     * ~/.local/share/open-media-converter by default).
      *
      * @return The default data directory path
      */
     private static Path getDefaultDataDirectory() {
-        String home = System.getProperty("user.home");
-        return Paths.get(home, ".local", "share", "open-media-converter");
+        return PathUtils.xdgDataHome().resolve("open-media-converter");
     }
 
     /**
-     * Gets the default cache directory (~/.cache/open-media-converter).
+     * Gets the default cache directory (XDG cache home based,
+     * ~/.cache/open-media-converter by default).
      *
      * @return The default cache directory path
      */
     private static Path getDefaultCacheDirectory() {
-        String home = System.getProperty("user.home");
-        return Paths.get(home, ".cache", "open-media-converter");
+        return PathUtils.xdgCacheHome().resolve("open-media-converter");
     }
 
     /**
@@ -164,7 +164,7 @@ public class DependencyFactory {
 
         // ConfigurationManager - no dependencies
         Path configDir = customConfigDirectory != null ? customConfigDirectory
-                : Paths.get(System.getProperty("user.home"), ".config", "open-media-converter");
+                : PathUtils.xdgConfigHome().resolve("open-media-converter");
         Path dataDir = getDefaultDataDirectory();
         Path cacheDir = getDefaultCacheDirectory();
         configManager = new ConfigurationManager(configDir, dataDir, cacheDir);

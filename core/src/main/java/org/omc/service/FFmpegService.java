@@ -66,6 +66,13 @@ public class FFmpegService {
     static long FFPROBE_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(30);
 
     /**
+     * Maximum wall time for an FFmpeg conversion process before forced
+     * termination (1 hour, mirroring PandocService). Package-visible and
+     * non-final so tests can scale it down; not part of the public API.
+     */
+    static long PROCESS_TIMEOUT_MILLIS = TimeUnit.HOURS.toMillis(1);
+
+    /**
      * Target video formats whose containers cannot reliably hold audio codecs
      * that are common in other containers (e.g. MP4(AAC)→WebM fails with
      * "Could not find tag for codec aac"). For these targets the audio stream
@@ -165,7 +172,8 @@ public class FFmpegService {
             command.add("cuda");
         }
 
-        // Multi-threading for performance (REQ-PERF-1.1)
+        // Multi-threading for performance (REQ-PERF-1.1). Placed BEFORE -i,
+        // this sets decoder thread count; encoder threading stays FFmpeg-auto.
         command.add("-threads");
         command.add("0");
 
@@ -283,7 +291,8 @@ public class FFmpegService {
         command.add("-progress");
         command.add("pipe:1");
 
-        // Enable multi-threading (Requirement REQ-PERF-1.1)
+        // Enable multi-threading (Requirement REQ-PERF-1.1). Placed BEFORE -i,
+        // this sets decoder thread count; encoder threading stays FFmpeg-auto.
         command.add("-threads");
         command.add("0");
 
@@ -520,7 +529,7 @@ public class FFmpegService {
                 // Geometry-preserving scale so the subsequent pad filter
                 // letterboxes correctly; a stretch-to-exact-dimensions scale
                 // here would double-distort the picture.
-                filters.add(String.format("scale=%d:%d:force_original_aspect_ratio=decrease",
+                filters.add(String.format("scale=%d:%d:force_original_aspect_ratio=decrease:force_divisible_by=2",
                         toEven(res.getWidth()), toEven(res.getHeight())));
             } else {
                 // Resolution-only: intended stretch to exact dimensions.
@@ -665,22 +674,13 @@ public class FFmpegService {
 
         double currentRatio = (double) targetWidth / targetHeight;
 
-        if (Math.abs(currentRatio - targetRatio) < 0.01) {
-            // Already at target ratio
-            return "";
-        }
-
-        if (currentRatio < targetRatio) {
-            // Add pillarboxing (vertical black bars on left/right)
-            int newWidth = toEven((int) (targetHeight * targetRatio));
-            int xOffset = (newWidth - targetWidth) / 2;
-            return String.format("pad=%d:%d:%d:0:black", newWidth, targetHeight, xOffset);
-        } else {
-            // Add letterboxing (horizontal black bars on top/bottom)
-            int newHeight = toEven((int) (targetWidth / targetRatio));
-            int yOffset = (newHeight - targetHeight) / 2;
-            return String.format("pad=%d:%d:0:%d:black", targetWidth, newHeight, yOffset);
-        }
+        int canvasWidth = currentRatio < targetRatio
+                ? toEven((int) Math.ceil(targetHeight * targetRatio)) : targetWidth;
+        int canvasHeight = currentRatio > targetRatio
+                ? toEven((int) Math.ceil(targetWidth / targetRatio)) : targetHeight;
+        // The scale filter may have reduced either dimension. Always pad that
+        // actual frame, even when the requested canvas already has the target ratio.
+        return String.format("pad=%d:%d:(ow-iw)/2:(oh-ih)/2:black", canvasWidth, canvasHeight);
     }
 
     /**
@@ -808,6 +808,15 @@ public class FFmpegService {
      * join is a brief courtesy, not a correctness requirement.
      */
     private static final long FFPROBE_READER_JOIN_MILLIS = TimeUnit.SECONDS.toMillis(2);
+
+    /**
+     * How long the main thread waits for the conversion output reader to
+     * drain after the process has ended, mirroring
+     * {@link #FFPROBE_READER_JOIN_MILLIS}: the reader is a daemon and pipe
+     * reads are not interruptible, so this join is a brief courtesy, not a
+     * correctness requirement.
+     */
+    private static final long READER_JOIN_MILLIS = TimeUnit.SECONDS.toMillis(2);
 
     /**
      * Runs an ffprobe query with a bounded wall-clock wait.
@@ -1588,11 +1597,7 @@ public class FFmpegService {
 
         Process process = null;
         StringBuilder outputLog = new StringBuilder(4096); // Initial capacity for performance
-        boolean outputTruncated = false;
-
-        // Progress throttling: max 2 updates per second (500ms minimum interval)
-        long lastProgressUpdateMillis = 0;
-        final long PROGRESS_THROTTLE_MS = 500;
+        final boolean[] outputTruncated = { false };
 
         try {
             process = processBuilder.start();
@@ -1602,95 +1607,133 @@ public class FFmpegService {
                 processRegistry.registerProcess(fileId, process);
             }
 
-            // Read output stream with progress tracking
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                int lineCount = 0;
-                while ((line = reader.readLine()) != null) {
-                    lineCount++;
+            // Effectively-final aliases so the reader lambda can capture them.
+            final Process ffmpegProcess = process;
+            final long inputSizeFinal = inputSize;
+            final Duration totalDurationFinal = totalDuration;
 
-                    // Requirement: Task 5.18 - Enforce 1MB output size limit.
-                    // Checked on every line: length comparison is O(1) and a
-                    // single oversized line must also trigger truncation.
-                    if (!outputTruncated) {
-                        if (outputLog.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
-                            outputLog.append(TRUNCATION_MESSAGE);
-                            outputTruncated = true;
-                            logger.warn("Tool output exceeded 1MB limit, truncating further output");
-                        } else {
-                            outputLog.append(line).append("\n");
-                        }
-                    }
-                    // Continue reading even after truncation for progress tracking
+            // Read output stream with progress tracking on a daemon reader
+            // thread - a hung ffmpeg holding its pipe open with no output
+            // would block an inline readLine-to-EOF loop forever, so the
+            // bounded waitFor below would never fire (mirrors the
+            // runFfprobeBounded gobbler pattern).
+            Thread outputReader = org.omc.util.ThreadUtils.createThreadFactory("FFmpeg-Reader")
+                    .newThread(() -> {
+                // Progress throttling: max 2 updates per second (500ms minimum interval)
+                long lastProgressUpdateMillis = 0;
+                final long PROGRESS_THROTTLE_MS = 500;
 
-                    // Log first 50 lines at debug level to see what we're receiving
-                    if (lineCount <= 50) {
-                        logger.debug("FFmpeg output line {}: {}", lineCount, line);
-                    } else {
-                        logger.trace("FFmpeg output: {}", line);
-                    }
+                // -progress pipe:1 reports total_size/speed on their own
+                // lines, separate from the out_time/frame lines that yield a
+                // percentage; carry the last values seen forward so the next
+                // percentage-bearing update includes them. (Console-format
+                // lines already carry both inline, so this is a no-op there.)
+                long lastKnownBytes = 0;
+                double lastKnownSpeed = 0;
 
-                    // Parse progress if callback provided and (duration known OR frame count known)
-                    // Requirement REQ-004.3: Throttle progress updates to max 2 per second
-                    if (progressCallback != null && (totalDuration != null || totalFrames > 0)) {
-                        ProgressInfo progress = parseProgressLine(line);
-                        if (progress != null) {
-                            logger.debug("Parsed progress info from line '{}': time={}, bytes={}, frame={}",
-                                    line, progress.currentTime, progress.bytesProcessed, progress.currentFrame);
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(ffmpegProcess.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    int lineCount = 0;
+                    while ((line = reader.readLine()) != null) {
+                        lineCount++;
 
-                            double percentage = -1.0;
-
-                            // Try time-based progress first (preferred method)
-                            if (progress.currentTime != null && totalDuration != null) {
-                                percentage = (progress.currentTime.toMillis() / (double) totalDuration.toMillis())
-                                        * 100.0;
-                                logger.trace("Using time-based progress: {}%", String.format("%.1f", percentage));
-                            }
-                            // Fall back to frame-based progress if time is not available
-                            else if (progress.currentFrame >= 0 && totalFrames > 0) {
-                                percentage = (progress.currentFrame / (double) totalFrames) * 100.0;
-                                logger.debug("Using frame-based progress: frame {}/{} = {}%",
-                                        progress.currentFrame, totalFrames, String.format("%.1f", percentage));
-                            }
-
-                            // If we got a valid percentage, send the update
-                            if (percentage >= 0.0) {
-                                long currentTimeMillis = System.currentTimeMillis();
-                                if (currentTimeMillis - lastProgressUpdateMillis >= PROGRESS_THROTTLE_MS) {
-                                    percentage = Math.min(100.0, Math.max(0.0, percentage));
-
-                                    if (progress.currentTime != null && totalDuration != null) {
-                                        logger.debug("Progress update: {}% (time={}/{}, {} of {} seconds)",
-                                                String.format("%.1f", percentage),
-                                                progress.currentTime.getSeconds(),
-                                                totalDuration.getSeconds(),
-                                                progress.currentTime.toMillis(),
-                                                totalDuration.toMillis());
-                                    } else if (progress.currentFrame >= 0 && totalFrames > 0) {
-                                        logger.debug("Progress update: {}% (frame={}/{})",
-                                                String.format("%.1f", percentage),
-                                                progress.currentFrame,
-                                                totalFrames);
-                                    }
-
-                                    progressCallback.onProgress(percentage, progress.bytesProcessed, progress.speed);
-                                    lastProgressUpdateMillis = currentTimeMillis;
+                        // Requirement: Task 5.18 - Enforce 1MB output size limit.
+                        // Checked on every line: length comparison is O(1) and a
+                        // single oversized line must also trigger truncation.
+                        synchronized (outputLog) {
+                            if (!outputTruncated[0]) {
+                                if (outputLog.length() + line.length() + 1 > MAX_OUTPUT_SIZE) {
+                                    outputLog.append(TRUNCATION_MESSAGE);
+                                    outputTruncated[0] = true;
+                                    logger.warn("Tool output exceeded 1MB limit, truncating further output");
                                 } else {
-                                    logger.trace("Progress throttled ({}ms since last update)",
-                                            currentTimeMillis - lastProgressUpdateMillis);
+                                    outputLog.append(line).append("\n");
+                                }
+                            }
+                        }
+                        // Continue reading even after truncation for progress tracking
+
+                        // Log first 50 lines at debug level to see what we're receiving
+                        if (lineCount <= 50) {
+                            logger.debug("FFmpeg output line {}: {}", lineCount, line);
+                        } else {
+                            logger.trace("FFmpeg output: {}", line);
+                        }
+
+                        // Parse progress if callback provided and (duration known OR frame count known)
+                        // Requirement REQ-004.3: Throttle progress updates to max 2 per second
+                        if (progressCallback != null && (totalDurationFinal != null || totalFrames > 0)) {
+                            ProgressInfo progress = parseProgressLine(line);
+                            if (progress != null) {
+                                logger.debug("Parsed progress info from line '{}': time={}, bytes={}, frame={}",
+                                        line, progress.currentTime, progress.bytesProcessed, progress.currentFrame);
+
+                                if (progress.bytesProcessed > 0) {
+                                    lastKnownBytes = progress.bytesProcessed;
+                                }
+                                if (progress.speed > 0) {
+                                    lastKnownSpeed = progress.speed;
+                                }
+
+                                double percentage = -1.0;
+
+                                // Try time-based progress first (preferred method)
+                                if (progress.currentTime != null && totalDurationFinal != null) {
+                                    percentage = (progress.currentTime.toMillis()
+                                            / (double) totalDurationFinal.toMillis())
+                                            * 100.0;
+                                    logger.trace("Using time-based progress: {}%", String.format("%.1f", percentage));
+                                }
+                                // Fall back to frame-based progress if time is not available
+                                else if (progress.currentFrame >= 0 && totalFrames > 0) {
+                                    percentage = (progress.currentFrame / (double) totalFrames) * 100.0;
+                                    logger.debug("Using frame-based progress: frame {}/{} = {}%",
+                                            progress.currentFrame, totalFrames, String.format("%.1f", percentage));
+                                }
+
+                                // If we got a valid percentage, send the update
+                                if (percentage >= 0.0) {
+                                    long currentTimeMillis = System.currentTimeMillis();
+                                    if (currentTimeMillis - lastProgressUpdateMillis >= PROGRESS_THROTTLE_MS) {
+                                        percentage = Math.min(100.0, Math.max(0.0, percentage));
+
+                                        if (progress.currentTime != null && totalDurationFinal != null) {
+                                            logger.debug("Progress update: {}% (time={}/{}, {} of {} seconds)",
+                                                    String.format("%.1f", percentage),
+                                                    progress.currentTime.getSeconds(),
+                                                    totalDurationFinal.getSeconds(),
+                                                    progress.currentTime.toMillis(),
+                                                    totalDurationFinal.toMillis());
+                                        } else if (progress.currentFrame >= 0 && totalFrames > 0) {
+                                            logger.debug("Progress update: {}% (frame={}/{})",
+                                                    String.format("%.1f", percentage),
+                                                    progress.currentFrame,
+                                                    totalFrames);
+                                        }
+
+                                        progressCallback.onProgress(percentage, lastKnownBytes,
+                                                lastKnownSpeed);
+                                        lastProgressUpdateMillis = currentTimeMillis;
+                                    } else {
+                                        logger.trace("Progress throttled ({}ms since last update)",
+                                                currentTimeMillis - lastProgressUpdateMillis);
+                                    }
                                 }
                             }
                         }
                     }
+                    logger.debug("Finished reading FFmpeg output. Total lines read: {}", lineCount);
+                } catch (IOException e) {
+                    logger.trace("Error reading FFmpeg output: {}", e.getMessage());
                 }
-                logger.debug("Finished reading FFmpeg output. Total lines read: {}", lineCount);
-            }
+            });
+            outputReader.start();
 
             // Wait for process to complete with timeout (1 hour default)
             // Check for interruption periodically so cancellation can work
             boolean finished = false;
-            long timeoutMillis = TimeUnit.HOURS.toMillis(1);
+            long timeoutMillis = PROCESS_TIMEOUT_MILLIS;
             long startWaitTime = System.currentTimeMillis();
 
             while (!finished && (System.currentTimeMillis() - startWaitTime) < timeoutMillis) {
@@ -1716,6 +1759,19 @@ public class FFmpegService {
                         "Process timeout after 1 hour");
             }
 
+            // The process has ended, so the pipe is at EOF and the reader
+            // drains quickly; the bounded join only matters for a pipe held
+            // open by a grandchild.
+            outputReader.join(READER_JOIN_MILLIS);
+            if (outputReader.isAlive()) {
+                outputReader.interrupt();
+            }
+
+            String capturedOutput;
+            synchronized (outputLog) {
+                capturedOutput = outputLog.toString();
+            }
+
             int exitCode = process.exitValue();
             Duration conversionTime = Duration.between(startTime, Instant.now());
 
@@ -1734,14 +1790,14 @@ public class FFmpegService {
                 return ConversionResult.success(
                         inputPath.toString(),
                         outputPath,
-                        outputLog.toString(), // Tool output for conversion details dialog
+                        capturedOutput, // Tool output for conversion details dialog
                         conversionTime,
                         inputSize,
                         outputSize,
                         ConversionTool.FFMPEG);
             } else {
                 // Failure - extract error from output
-                String errorMessage = extractErrorMessage(outputLog.toString());
+                String errorMessage = extractErrorMessage(capturedOutput);
                 logger.error("Conversion failed with exit code {}: {}", exitCode, errorMessage);
 
                 // Requirement REQ-004.2: Clean up partial output file on error
@@ -1750,7 +1806,7 @@ public class FFmpegService {
                 return ConversionResult.failure(
                         inputPath.toString(),
                         "FFmpeg conversion failed (exit code " + exitCode + "): " + errorMessage,
-                        outputLog.toString(), // Tool output for debugging
+                        capturedOutput, // Tool output for debugging
                         conversionTime,
                         inputSize,
                         ConversionTool.FFMPEG);
@@ -1840,6 +1896,41 @@ public class FFmpegService {
                 logger.trace("Failed to parse frame number from: {}", line);
                 // Continue anyway - we might still get useful info from the rest of the line
             }
+        }
+
+        // -progress pipe:1 also emits total_size and speed as single-key
+        // lines. Unlike the console format below, total_size is raw bytes
+        // (not kB) and speed is a multiplier ("1.5x"), "N/A" while the rate
+        // is still unknown. Both lines carry no timestamp or frame, so they
+        // never yield a percentage on their own; the reader loop carries the
+        // values forward to the next percentage-bearing update.
+        if (line.startsWith("total_size=")) {
+            long totalSizeBytes = 0;
+            try {
+                String value = line.substring("total_size=".length()).trim();
+                if (!"N/A".equals(value)) {
+                    totalSizeBytes = Long.parseLong(value);
+                }
+            } catch (NumberFormatException e) {
+                logger.trace("Failed to parse total_size from: {}", line);
+            }
+            return new ProgressInfo(null, totalSizeBytes, 0);
+        }
+
+        if (line.startsWith("speed=")) {
+            double speedMultiplier = 0;
+            try {
+                String value = line.substring("speed=".length()).trim();
+                if (value.endsWith("x")) {
+                    value = value.substring(0, value.length() - 1);
+                }
+                if (!"N/A".equals(value)) {
+                    speedMultiplier = Double.parseDouble(value);
+                }
+            } catch (NumberFormatException e) {
+                logger.trace("Failed to parse speed from: {}", line);
+            }
+            return new ProgressInfo(null, 0, speedMultiplier);
         }
 
         // Check for -progress format (out_time_ms=value, out_time_us=value, or

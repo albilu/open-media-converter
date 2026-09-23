@@ -30,6 +30,11 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  */
 public final class AudioSettings {
 
+    // Validation bounds: single source of truth, shared by isValid(), the
+    // Builder, and ValidationEngine
+    public static final int MIN_BITRATE = 64; // kbps
+    public static final int MAX_BITRATE = 320; // kbps
+
     private final String codec;
     private final int bitrate; // in kbps
     private final int sampleRate; // in Hz, -1 for original
@@ -158,17 +163,17 @@ public final class AudioSettings {
         }
 
         // Bitrate validation (64-320 kbps)
-        if (bitrate < 64 || bitrate > 320) {
+        if (bitrate < MIN_BITRATE || bitrate > MAX_BITRATE) {
             return false;
         }
 
         // Sample rate validation (-1 for original, or valid rates)
-        if (sampleRate != -1 && !isValidSampleRate(sampleRate)) {
+        if (!isValidSampleRate(sampleRate)) {
             return false;
         }
 
         // Channels validation (-1 for original, or 1, 2, 6)
-        if (channels != -1 && channels != 1 && channels != 2 && channels != 6) {
+        if (!isValidChannels(channels)) {
             return false;
         }
 
@@ -192,8 +197,15 @@ public final class AudioSettings {
         return codec != null && !codec.isBlank();
     }
 
-    private static boolean isValidSampleRate(int rate) {
-        return rate == 8000 ||
+    /**
+     * Validates a sample rate: -1 (original) or a standard rate.
+     *
+     * @param rate the sample rate in Hz
+     * @return true if the rate is valid
+     */
+    public static boolean isValidSampleRate(int rate) {
+        return rate == -1 ||
+                rate == 8000 ||
                 rate == 11025 ||
                 rate == 16000 ||
                 rate == 22050 ||
@@ -204,6 +216,17 @@ public final class AudioSettings {
                 rate == 96000 ||
                 rate == 176400 ||
                 rate == 192000;
+    }
+
+    /**
+     * Validates a channel count: -1 (original), 1 (mono), 2 (stereo) or 6
+     * (5.1 surround).
+     *
+     * @param channels the channel count
+     * @return true if the channel count is valid
+     */
+    public static boolean isValidChannels(int channels) {
+        return channels == -1 || channels == 1 || channels == 2 || channels == 6;
     }
 
     public static Builder builder() {
@@ -314,13 +337,14 @@ public final class AudioSettings {
             if (outputFormat == null || outputFormat.getCategory() != FormatCategory.AUDIO) {
                 throw new IllegalArgumentException("Output format must be AUDIO category");
             }
-            if (bitrate < 64 || bitrate > 320) {
-                throw new IllegalArgumentException("Bitrate must be between 64 and 320 kbps");
+            if (bitrate < MIN_BITRATE || bitrate > MAX_BITRATE) {
+                throw new IllegalArgumentException(
+                        "Bitrate must be between " + MIN_BITRATE + " and " + MAX_BITRATE + " kbps");
             }
-            if (sampleRate != -1 && !AudioSettings.isValidSampleRate(sampleRate)) {
+            if (!AudioSettings.isValidSampleRate(sampleRate)) {
                 throw new IllegalArgumentException("Invalid sample rate: " + sampleRate);
             }
-            if (channels != -1 && channels != 1 && channels != 2 && channels != 6) {
+            if (!AudioSettings.isValidChannels(channels)) {
                 throw new IllegalArgumentException("Channels must be -1, 1, 2, or 6");
             }
             if (quality < 0 || quality > 9) {

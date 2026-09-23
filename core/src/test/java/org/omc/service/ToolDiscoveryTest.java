@@ -488,4 +488,204 @@ class ToolDiscoveryTest {
         String os = System.getProperty("os.name").toLowerCase();
         return os.contains("nix") || os.contains("nux") || os.contains("mac");
     }
+
+    // ========================================
+    // FFmpeg git-snapshot version parsing
+    // ========================================
+
+    private static java.lang.reflect.Method parseVersionProbe() throws Exception {
+        java.lang.reflect.Method method = ToolDiscovery.class.getDeclaredMethod(
+                "parseVersion", String.class, String.class);
+        method.setAccessible(true);
+        return method;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Optional<String> parseVersion(String toolName, String output) throws Exception {
+        return (Optional<String>) parseVersionProbe().invoke(toolDiscovery, toolName, output);
+    }
+
+    @Test
+    void testParseVersion_FfmpegGitSnapshot_ParsesSnapshotVersion() throws Exception {
+        // Git-snapshot builds print "ffmpeg version N-110753-g1234abc ...":
+        // the optional 'n' prefix followed by digits does not match the dash
+        // after 'N', so the version used to come back empty
+        Optional<String> version = parseVersion("ffmpeg",
+                "ffmpeg version N-110753-g1234abc Copyright (c) 2000-2023 the FFmpeg developers");
+
+        assertTrue(version.isPresent(), "git-snapshot version must be parsed");
+        assertEquals("N-110753", version.get(), "snapshot maps to its N-<build> identifier");
+    }
+
+    @Test
+    void testParseVersion_FfprobeGitSnapshot_ParsesSnapshotVersion() throws Exception {
+        Optional<String> version = parseVersion("ffprobe",
+                "ffprobe version N-110753-g1234abc Copyright (c) 2000-2023 the FFmpeg developers");
+
+        assertTrue(version.isPresent(), "ffprobe git-snapshot version must be parsed");
+        assertEquals("N-110753", version.get());
+    }
+
+    @Test
+    void testParseVersion_FfmpegReleaseFormats_Unchanged() throws Exception {
+        // Guard: release version formats must keep parsing exactly as before
+        assertEquals(Optional.of("7.0.1"),
+                parseVersion("ffmpeg", "ffmpeg version n7.0.1 Copyright (c) 2000-2024 the FFmpeg developers"));
+        assertEquals(Optional.of("6.1.1"),
+                parseVersion("ffmpeg", "ffmpeg version 6.1.1-3ubuntu5 Copyright"));
+        assertEquals(Optional.of("4.4.2"),
+                parseVersion("ffprobe", "ffprobe version 4.4.2-0ubuntu0.22.04.1"));
+    }
+
+    @Test
+    void testDetectVersion_FfmpegGitSnapshotStub_ReportsSnapshotVersion() throws Exception {
+        assumeTrue(isUnixLike(), "Requires POSIX executable scripts");
+
+        // End-to-end through the process-executing detector: a stub ffmpeg
+        // printing a git-snapshot version line must yield a non-empty version
+        Path ffmpegStub = tempDir.resolve("ffmpeg");
+        Files.writeString(ffmpegStub,
+                "#!/bin/sh\necho 'ffmpeg version N-110753-g1234abc Copyright (c) 2000-2023 the FFmpeg developers'\n");
+        Files.setPosixFilePermissions(ffmpegStub, PosixFilePermissions.fromString("rwxr-xr-x"));
+
+        java.lang.reflect.Method detectVersion = ToolDiscovery.class.getDeclaredMethod(
+                "detectVersion", Path.class, String.class);
+        detectVersion.setAccessible(true);
+
+        @SuppressWarnings("unchecked")
+        Optional<String> version = (Optional<String>) detectVersion.invoke(toolDiscovery, ffmpegStub, "-version");
+
+        assertTrue(version.isPresent(), "git-snapshot ffmpeg must report a version");
+        assertEquals("N-110753", version.get());
+    }
+
+    // ========================================
+    // ImageMagick 7 "magick" binary discovery
+    // ========================================
+
+    @Test
+    void testImageMagickCandidateNames_ConvertPreferredThenMagick() {
+        // IM6 compatibility: "convert" stays the preferred probe name; IM7's
+        // "magick" (whose "magick input ... output" form accepts the same
+        // convert-style arguments) is the fallback
+        assertArrayEquals(new String[] { "convert", "magick" }, ToolDiscovery.IMAGEMAGICK_CANDIDATE_NAMES);
+    }
+
+    @Test
+    void testDiscoverImageMagick_Im7OnlyMagickStub_DiscoveredAsConvertTool() throws Exception {
+        assumeTrue(isUnixLike(), "Requires POSIX executable scripts");
+
+        // A pure IM7 install ships only "magick". The stub uses a unique name
+        // so the probe can never resolve a real system binary instead.
+        Path fakeBin = Files.createDirectories(tempDir.resolve("im7-only-bin"));
+        Path magickStub = fakeBin.resolve("omc-im7-magick");
+        Files.writeString(magickStub,
+                "#!/bin/sh\necho 'Version: ImageMagick 7.1.1-15 Q16 x86_64 2023-07-01 https://imagemagick.org'\n");
+        Files.setPosixFilePermissions(magickStub, PosixFilePermissions.fromString("rwxr-xr-x"));
+
+        ToolConfiguration config = new ToolConfiguration();
+        toolDiscovery.discoverImageMagick(config, fakeBin.toString(),
+                new String[] { "omc-absent-convert", "omc-im7-magick" });
+
+        assertEquals(magickStub, config.getConvertPath(),
+                "IM7-only install must be discovered through the magick binary");
+        assertEquals("7.1.1-15", config.getConvertVersion());
+        assertTrue(config.isImageMagickAvailable());
+    }
+
+    @Test
+    void testDiscoverImageMagick_ConvertPreferredOverMagick() throws Exception {
+        assumeTrue(isUnixLike(), "Requires POSIX executable scripts");
+
+        Path fakeBin = Files.createDirectories(tempDir.resolve("im6-and-7-bin"));
+        Path convertStub = fakeBin.resolve("omc-im6-convert");
+        Files.writeString(convertStub,
+                "#!/bin/sh\necho 'Version: ImageMagick 6.9.12-98 Q16 x86_64 2021-10-01 https://legacy.imagemagick.org'\n");
+        Files.setPosixFilePermissions(convertStub, PosixFilePermissions.fromString("rwxr-xr-x"));
+        Path magickStub = fakeBin.resolve("omc-im7-magick2");
+        Files.writeString(magickStub,
+                "#!/bin/sh\necho 'Version: ImageMagick 7.1.1-15 Q16 x86_64 2023-07-01 https://imagemagick.org'\n");
+        Files.setPosixFilePermissions(magickStub, PosixFilePermissions.fromString("rwxr-xr-x"));
+
+        ToolConfiguration config = new ToolConfiguration();
+        toolDiscovery.discoverImageMagick(config, fakeBin.toString(),
+                new String[] { "omc-im6-convert", "omc-im7-magick2" });
+
+        assertEquals(convertStub, config.getConvertPath(),
+                "convert stays preferred for IM6 compatibility when both exist");
+        assertEquals("6.9.12-98", config.getConvertVersion());
+    }
+
+    // ========================================
+    // Interrupt handling regression tests
+    // ========================================
+
+    private static java.lang.reflect.Method trustedBinaryProbe() throws Exception {
+        java.lang.reflect.Method method = ToolDiscovery.class.getDeclaredMethod(
+                "isTrustedBinary", Path.class, String.class);
+        method.setAccessible(true);
+        return method;
+    }
+
+    /**
+     * Interrupting a version probe blocked reading tool output must restore
+     * the interrupt flag instead of swallowing it in a generic catch.
+     */
+    @Test
+    void testIsTrustedBinary_InterruptedDuringOutputRead_RestoresInterruptFlag() throws Exception {
+        assumeTrue(isUnixLike(), "Requires POSIX executable scripts");
+        // Stub holds stdout open with no output and never exits: the probe
+        // blocks waiting for the async output reader.
+        Path stub = tempDir.resolve("stub-silent-hang");
+        Files.writeString(stub, "#!/bin/sh\nexec sleep 60\n");
+        Files.setPosixFilePermissions(stub, PosixFilePermissions.fromString("rwxr-xr-x"));
+
+        java.lang.reflect.Method probe = trustedBinaryProbe();
+        Thread worker = new Thread(() -> {
+            try {
+                probe.invoke(toolDiscovery, stub, "ffmpeg");
+            } catch (ReflectiveOperationException e) {
+                // probe returns false on interrupt; only unexpected here
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+        Thread.sleep(500); // let the worker block in the bounded get()
+        worker.interrupt();
+        worker.join(5000);
+
+        assertFalse(worker.isAlive(), "isTrustedBinary must return after interruption");
+        assertTrue(worker.isInterrupted(), "interrupt flag must be restored by isTrustedBinary");
+    }
+
+    /**
+     * Interrupting a version probe blocked in waitFor must restore the
+     * interrupt flag instead of swallowing it in a generic catch.
+     */
+    @Test
+    void testIsTrustedBinary_InterruptedDuringWait_RestoresInterruptFlag() throws Exception {
+        assumeTrue(isUnixLike(), "Requires POSIX executable scripts");
+        // Stub emits a version line, closes its streams (so the async reader
+        // completes) and then never exits: the probe blocks in waitFor().
+        Path stub = tempDir.resolve("stub-blocking-wait");
+        Files.writeString(stub, "#!/bin/sh\necho ffmpeg version 1.0\nexec 1>&- 2>&-\nexec sleep 60\n");
+        Files.setPosixFilePermissions(stub, PosixFilePermissions.fromString("rwxr-xr-x"));
+
+        java.lang.reflect.Method probe = trustedBinaryProbe();
+        Thread worker = new Thread(() -> {
+            try {
+                probe.invoke(toolDiscovery, stub, "ffmpeg");
+            } catch (ReflectiveOperationException e) {
+                // probe returns false on interrupt; only unexpected here
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+        Thread.sleep(500); // let the worker reach the bounded waitFor()
+        worker.interrupt();
+        worker.join(5000);
+
+        assertFalse(worker.isAlive(), "isTrustedBinary must return after interruption");
+        assertTrue(worker.isInterrupted(), "interrupt flag must be restored by isTrustedBinary");
+    }
 }

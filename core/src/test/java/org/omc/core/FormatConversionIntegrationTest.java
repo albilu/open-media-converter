@@ -113,6 +113,15 @@ public class FormatConversionIntegrationTest {
                 });
     }
 
+    private ConversionResult completedOutput(org.mockito.invocation.InvocationOnMock invocation,
+            ConversionResult result) throws IOException {
+        // A successful tool must actually create its output; an empty placeholder
+        // is now correctly rejected by the engine's publication safety check.
+        Path temporary = invocation.getArgument(2);
+        Files.writeString(temporary, "simulated converter output");
+        return result;
+    }
+
     @AfterEach
     public void tearDown() throws Exception {
         if (conversionEngine != null) {
@@ -201,10 +210,10 @@ public class FormatConversionIntegrationTest {
                 any(ConversionSettings.class),
                 any(),
                 any(),
-                any())).thenReturn(ConversionResult.success(file.id(), expectedOutput, null, Duration.ofSeconds(10),
+                any())).thenAnswer(invocation -> completedOutput(invocation, ConversionResult.success(file.id(), expectedOutput, null, Duration.ofSeconds(10),
                         inputSize,
                         inputSize - 1000, // Simulated output size
-                        expectedTool));
+                        expectedTool)));
 
         // When: Convert the file
         CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(file, settings);
@@ -471,10 +480,10 @@ public class FormatConversionIntegrationTest {
                 any(ConversionSettings.class),
                 any(),
                 any(),
-                any())).thenReturn(ConversionResult.success(file.id(), expectedOutput, null, Duration.ofSeconds(5),
+                any())).thenAnswer(invocation -> completedOutput(invocation, ConversionResult.success(file.id(), expectedOutput, null, Duration.ofSeconds(5),
                         4000000L,
                         3200000L, // Compressed with quality setting
-                        ConversionTool.IMAGEMAGICK));
+                        ConversionTool.IMAGEMAGICK)));
 
         // When: Convert the file
         CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(file, settings);
@@ -531,10 +540,10 @@ public class FormatConversionIntegrationTest {
                 any(ConversionSettings.class),
                 any(),
                 any(),
-                any())).thenReturn(ConversionResult.success(file.id(), expectedOutput, null, Duration.ofSeconds(8),
+                any())).thenAnswer(invocation -> completedOutput(invocation, ConversionResult.success(file.id(), expectedOutput, null, Duration.ofSeconds(8),
                         8000000L,
                         2500000L, // Smaller output after resize
-                        ConversionTool.IMAGEMAGICK));
+                        ConversionTool.IMAGEMAGICK)));
 
         // When: Convert the file
         CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(file, settings);
@@ -592,10 +601,10 @@ public class FormatConversionIntegrationTest {
                 any(ConversionSettings.class),
                 any(),
                 any(),
-                any())).thenReturn(ConversionResult.success(file.id(), expectedOutput, null, Duration.ofSeconds(6),
+                any())).thenAnswer(invocation -> completedOutput(invocation, ConversionResult.success(file.id(), expectedOutput, null, Duration.ofSeconds(6),
                         5000000L,
                         1800000L,
-                        ConversionTool.IMAGEMAGICK));
+                        ConversionTool.IMAGEMAGICK)));
 
         // When: Convert the file
         CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(file, settings);

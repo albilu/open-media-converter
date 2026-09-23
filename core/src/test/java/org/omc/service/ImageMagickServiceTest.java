@@ -570,10 +570,7 @@ class ImageMagickServiceTest {
         // Requirement: REQ-IMG-4, NFR-IMG-1
         // Test that progress callback is invoked during conversion
 
-        // Skip if ImageMagick not available
-        if (!isImageMagickAvailable()) {
-            return;
-        }
+        org.junit.jupiter.api.Assumptions.assumeTrue(isImageMagickAvailable(), "ImageMagick not available");
 
         // Use system ImageMagick for execution test
         ImageMagickService execService = getSystemImageMagickService();
@@ -611,10 +608,7 @@ class ImageMagickServiceTest {
         // Requirement: REQ-IMG-2, REQ-IMG-3
         // Test successful image conversion
 
-        // Skip if ImageMagick not available
-        if (!isImageMagickAvailable()) {
-            return;
-        }
+        org.junit.jupiter.api.Assumptions.assumeTrue(isImageMagickAvailable(), "ImageMagick not available");
 
         // Use system ImageMagick for execution test
         ImageMagickService execService = getSystemImageMagickService();
@@ -644,10 +638,7 @@ class ImageMagickServiceTest {
         // Requirement: REQ-IMG-3
         // Test conversion with resolution change
 
-        // Skip if ImageMagick not available
-        if (!isImageMagickAvailable()) {
-            return;
-        }
+        org.junit.jupiter.api.Assumptions.assumeTrue(isImageMagickAvailable(), "ImageMagick not available");
 
         // Use system ImageMagick for execution test
         ImageMagickService execService = getSystemImageMagickService();
@@ -678,10 +669,7 @@ class ImageMagickServiceTest {
         // Requirement: REQ-SEL-4
         // Test that process is registered during conversion
 
-        // Skip if ImageMagick not available
-        if (!isImageMagickAvailable()) {
-            return;
-        }
+        org.junit.jupiter.api.Assumptions.assumeTrue(isImageMagickAvailable(), "ImageMagick not available");
 
         // Use system ImageMagick for execution test
         ImageMagickService execService = getSystemImageMagickService();
@@ -720,10 +708,7 @@ class ImageMagickServiceTest {
         // Requirement: REQ-IMG-2, NFR-IMG-2
         // Test that tool output is captured in result
 
-        // Skip if ImageMagick not available
-        if (!isImageMagickAvailable()) {
-            return;
-        }
+        org.junit.jupiter.api.Assumptions.assumeTrue(isImageMagickAvailable(), "ImageMagick not available");
 
         // Use system ImageMagick for execution test
         ImageMagickService execService = getSystemImageMagickService();
@@ -1090,10 +1075,7 @@ class ImageMagickServiceTest {
      */
     @Test
     void testConvertImage_RealTimeProgressTracking() throws Exception {
-        // Skip if ImageMagick not available
-        if (!isImageMagickAvailable()) {
-            return;
-        }
+        org.junit.jupiter.api.Assumptions.assumeTrue(isImageMagickAvailable(), "ImageMagick not available");
 
         // Use system ImageMagick for execution test
         ImageMagickService execService = getSystemImageMagickService();
@@ -1187,5 +1169,144 @@ class ImageMagickServiceTest {
                 }
             }
         }
+    }
+
+    // ========================================
+    // Process hang / output-cap regression tests
+    // ========================================
+
+    private void assumeUnixLike() {
+        String os = System.getProperty("os.name").toLowerCase();
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                os.contains("nix") || os.contains("nux") || os.contains("mac"),
+                "Requires POSIX executable scripts");
+    }
+
+    /**
+     * Creates an executable convert stub that publishes its pid to
+     * {@code pidFile}, then KEEPS stdout open without writing a single byte
+     * and never exits promptly. An inline read-to-EOF loop blocks forever on
+     * such a process, so the bounded waitFor never fires.
+     */
+    private Path createSilentHangingConvertStub(Path pidFile) throws IOException {
+        Path stub = tempDir.resolve("convert-hanging");
+        Files.writeString(stub, "#!/bin/sh\necho $$ > '" + pidFile + "'\nexec sleep 60\n");
+        Files.setPosixFilePermissions(stub,
+                java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+        return stub;
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 30)
+    void testConvertImage_SilentHang_TimesOutAndDestroysProcess() throws Exception {
+        assumeUnixLike();
+        Path pidFile = tempDir.resolve("convert-hanging.pid");
+        Path stub = createSilentHangingConvertStub(pidFile);
+        ImageMagickService hangingService = new ImageMagickService(stub);
+
+        Files.writeString(inputPath, "not-a-real-image");
+        Path outputPath = tempDir.resolve("output-timeout.png");
+
+        long originalTimeout = ImageMagickService.PROCESS_TIMEOUT_MILLIS;
+        ImageMagickService.PROCESS_TIMEOUT_MILLIS = 1200;
+        try {
+            ToolExecutionException exception = assertThrows(ToolExecutionException.class,
+                    () -> hangingService.convertImage(inputPath, outputPath, ImageSettings.builder().build(),
+                            ProgressCallback.noOp(), "hang-file", ProcessRegistry.noOp()));
+            assertTrue(exception.getMessage().contains("timed out"),
+                    "Timeout failure expected but got: " + exception.getMessage());
+        } finally {
+            ImageMagickService.PROCESS_TIMEOUT_MILLIS = originalTimeout;
+        }
+
+        // The hung convert must not outlive the timed-out call.
+        String pid = Files.readString(pidFile).trim();
+        Path procEntry = Path.of("/proc", pid);
+        long destroyDeadline = System.currentTimeMillis() + 5000;
+        while (Files.exists(procEntry) && System.currentTimeMillis() < destroyDeadline) {
+            Thread.sleep(50);
+        }
+        assertFalse(Files.exists(procEntry),
+                "timed-out convert process (pid " + pid + ") must be destroyed");
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 30)
+    void testConvertImage_Interrupted_DestroysProcessAndRestoresInterruptFlag() throws Exception {
+        assumeUnixLike();
+        Path pidFile = tempDir.resolve("convert-interrupt.pid");
+        Path stub = createSilentHangingConvertStub(pidFile);
+        ImageMagickService hangingService = new ImageMagickService(stub);
+
+        Files.writeString(inputPath, "not-a-real-image");
+        Path outputPath = tempDir.resolve("output-interrupt.png");
+
+        Object[] outcome = { "unset" };
+        Thread worker = new Thread(() -> {
+            try {
+                hangingService.convertImage(inputPath, outputPath, ImageSettings.builder().build(),
+                        ProgressCallback.noOp(), "interrupt-file", ProcessRegistry.noOp());
+                outcome[0] = "returned without exception";
+            } catch (ToolExecutionException e) {
+                outcome[0] = e;
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+
+        // Wait for the stub to publish its pid, then let the worker block in
+        // the read/wait.
+        long pidDeadline = System.currentTimeMillis() + 2000;
+        while (!Files.exists(pidFile) && System.currentTimeMillis() < pidDeadline) {
+            Thread.sleep(20);
+        }
+        assertTrue(Files.exists(pidFile), "convert stub must publish its pid");
+        Thread.sleep(500);
+
+        worker.interrupt();
+        worker.join(10000);
+        assertFalse(worker.isAlive(), "convertImage must return after interruption");
+        assertTrue(outcome[0] instanceof ToolExecutionException,
+                "convertImage must throw ToolExecutionException on interrupt, got: " + outcome[0]);
+        assertTrue(worker.isInterrupted(), "interrupt flag must be restored by convertImage");
+
+        // The hung convert must not outlive the interrupted call.
+        String pid = Files.readString(pidFile).trim();
+        Path procEntry = Path.of("/proc", pid);
+        long destroyDeadline = System.currentTimeMillis() + 5000;
+        while (Files.exists(procEntry) && System.currentTimeMillis() < destroyDeadline) {
+            Thread.sleep(50);
+        }
+        assertFalse(Files.exists(procEntry),
+                "interrupted convert process (pid " + pid + ") must be destroyed");
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 30)
+    void testConvertImage_UnterminatedOutputOverCap_IsTruncatedWithMarker() throws Exception {
+        assumeUnixLike();
+        // Emits >1MB with no \r/\n terminator at all, then fails. The output
+        // accumulator must stay bounded while accumulating and the truncated
+        // capture must carry the truncation marker instead of silently
+        // dropping the oversized tail.
+        Path stub = tempDir.resolve("convert-flooding");
+        Files.writeString(stub, "#!/bin/sh\nhead -c 2000000 /dev/zero | tr '\\000' 'a'\nexit 1\n");
+        Files.setPosixFilePermissions(stub,
+                java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+        ImageMagickService floodingService = new ImageMagickService(stub);
+
+        Files.writeString(inputPath, "not-a-real-image");
+        Path outputPath = tempDir.resolve("output-cap.png");
+
+        ConversionResult result = floodingService.convertImage(inputPath, outputPath,
+                ImageSettings.builder().build(), ProgressCallback.noOp(), "cap-file", ProcessRegistry.noOp());
+
+        assertFalse(result.success(), "stub exits 1 so conversion must fail");
+        assertTrue(result.toolOutput().isPresent(), "Tool output should be present");
+        String output = result.toolOutput().get();
+        assertTrue(output.contains("[Output truncated - exceeded 1MB limit]"),
+                "oversized unterminated output must be marked truncated, got length " + output.length());
+        assertTrue(output.length() <= 1024 * 1024 + 1024,
+                "captured output must stay bounded at ~1MB, got " + output.length());
     }
 }

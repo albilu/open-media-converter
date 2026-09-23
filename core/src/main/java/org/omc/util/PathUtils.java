@@ -289,4 +289,56 @@ public final class PathUtils {
 
         return pathString;
     }
+
+    /**
+     * Gets the XDG configuration directory (~/.config by default).
+     *
+     * <p>
+     * Honors the XDG Base Directory specification: sandboxed environments
+     * such as Flatpak point the variable at a writable per-application
+     * directory.
+     * </p>
+     *
+     * @return The XDG config home path
+     */
+    public static java.nio.file.Path xdgConfigHome() {
+        return xdgDir(System.getenv("XDG_CONFIG_HOME"), ".config");
+    }
+
+    /**
+     * Gets the XDG data directory (~/.local/share by default).
+     *
+     * @return The XDG data home path
+     */
+    public static java.nio.file.Path xdgDataHome() {
+        return xdgDir(System.getenv("XDG_DATA_HOME"), ".local/share");
+    }
+
+    /**
+     * Gets the XDG cache directory (~/.cache by default).
+     *
+     * @return The XDG cache home path
+     */
+    public static java.nio.file.Path xdgCacheHome() {
+        return xdgDir(System.getenv("XDG_CACHE_HOME"), ".cache");
+    }
+
+    /**
+     * Resolves an XDG base directory: the environment value wins when it is
+     * set and absolute (relative values are invalid per the specification),
+     * otherwise the named directory under the user's home is used.
+     *
+     * @param envValue        The raw environment variable value, may be null
+     * @param fallbackDirName The directory name under the user's home
+     * @return The resolved base directory
+     */
+    static java.nio.file.Path xdgDir(String envValue, String fallbackDirName) {
+        if (envValue != null && !envValue.isBlank()) {
+            java.nio.file.Path candidate = java.nio.file.Paths.get(envValue);
+            if (candidate.isAbsolute()) {
+                return candidate;
+            }
+        }
+        return java.nio.file.Paths.get(System.getProperty("user.home"), fallbackDirName);
+    }
 }

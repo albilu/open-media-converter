@@ -740,17 +740,6 @@ public class FileListView {
     }
 
     /**
-     * Clears the file list.
-     */
-    public void clear() {
-        files.clear();
-        fileIdToIndexMap.clear();
-        progressWidgetCache.clear(); // Clear widget cache when file list is cleared
-        stringListModel.splice(0, stringListModel.getNItems(), new String[0]);
-        logger.debug("File list cleared");
-    }
-
-    /**
      * Finds a ConversionFile by its ID.
      * 
      * @param fileId the file ID to search for
@@ -867,11 +856,14 @@ public class FileListView {
      * @return the format name or "Not Set"
      */
     private String resolveFormatFromGlobalSettings(org.omc.model.ConversionFile file) {
+        if (cachedSettings == null) {
+            return "Not Set";
+        }
         try {
             org.omc.model.FileFormat outputFormat =
                     cachedSettings.resolveOutputFormat(file.format().getCategory());
             return outputFormat != null ? outputFormat.name() : "Not Set";
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             logger.warn("Failed to resolve output format from global settings", e);
             return "Not Set";
         }
@@ -1165,39 +1157,6 @@ public class FileListView {
     public void setSortChangeListener(SortChangeListener listener) {
         this.sortChangeListener = listener;
         logger.debug("Sort change listener {}", listener != null ? "registered" : "removed");
-    }
-
-    /**
-     * Sets the current sort state and sorts the file list accordingly.
-     * 
-     * <p>
-     * Requirement REQ-FL-4.5: Sort state persistence
-     * </p>
-     * <p>
-     * Task 77: Implement sort state tracking
-     * </p>
-     * 
-     * @param sortState the new sort state
-     */
-    public void setSortState(FileListSortState sortState) {
-        this.currentSortState = sortState;
-
-        if (sortState.isSorted()) {
-            files.sort(sortState.createComparator());
-        }
-
-        // Update model
-        stringListModel.splice(0, stringListModel.getNItems(), new String[0]);
-        String[] ids = files.stream().map(ConversionFile::id).toArray(String[]::new);
-        stringListModel.splice(0, 0, ids);
-
-        // Update fileIdToIndexMap
-        fileIdToIndexMap.clear();
-        for (int i = 0; i < files.size(); i++) {
-            fileIdToIndexMap.put(files.get(i).id(), i);
-        }
-
-        logger.debug("Sort state set to: {}", sortState);
     }
 
     /**

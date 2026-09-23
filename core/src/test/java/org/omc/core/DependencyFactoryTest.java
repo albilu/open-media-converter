@@ -462,9 +462,22 @@ class DependencyFactoryTest {
             // When
             factory.createApplicationController();
 
-            // Then: All wiring assertions are in the mock construction lambdas above
-            // This test ensures the integration is covered by the successful initialization
-            // test
+            // Then: every collaborator in the wiring graph is constructed exactly once
+            assertEquals(1, configMock.constructed().size(), "ConfigurationManager");
+            assertEquals(1, fileHandlerMock.constructed().size(), "FileHandler");
+            assertEquals(1, validationMock.constructed().size(), "ValidationEngine");
+            assertEquals(1, progressMock.constructed().size(), "ProgressEngine");
+            assertEquals(1, toolDiscoveryMock.constructed().size(), "ToolDiscovery");
+            assertEquals(1, ffmpegMock.constructed().size(), "FFmpegService");
+            assertEquals(1, pandocMock.constructed().size(), "PandocService");
+            assertEquals(1, libreOfficeMock.constructed().size(), "LibreOfficeService");
+            assertEquals(1, imageMagickMock.constructed().size(), "ImageMagickService");
+            assertEquals(1, toolManagerMock.constructed().size(), "ToolManager");
+            assertEquals(1, conversionMock.constructed().size(), "ConversionEngine");
+            assertEquals(1, fileManagerMock.constructed().size(), "FileManager");
+            assertEquals(1, settingsManagerMock.constructed().size(), "SettingsManager");
+            assertEquals(1, stateManagerMock.constructed().size(), "StateManager");
+            assertEquals(1, controllerMock.constructed().size(), "ApplicationWorkflowController");
         }
     }
 

@@ -1501,4 +1501,150 @@ class SettingsManagerTest {
                 .build();
         return SettingsPreset.createUserPreset(name, "Concurrent delete test preset", settings);
     }
+
+    @Test
+    void loadPresetsBySection_withOneMalformedSectionEntry_keepsValidEntries() throws Exception {
+        // Given: a section array where one entry is malformed; per-entry
+        // salvage must keep the valid preset instead of dropping the section
+        Path presetsPath = configurationManager.getPresetsFilePath();
+        String presetsJson = """
+                {
+                  "videoPresets": [
+                    {
+                      "name": "Good Video",
+                      "description": "survives",
+                      "category": "VIDEO",
+                      "videoSettings": {"outputFormat": "MP4", "codec": "libx264", "bitrate": 5000},
+                      "builtIn": false,
+                      "createdAt": 1700000000000
+                    },
+                    42
+                  ]
+                }
+                """;
+        Files.writeString(presetsPath, presetsJson);
+
+        // When
+        PresetsBySection loaded = settingsManager.loadPresetsBySection();
+
+        // Then
+        assertEquals(1, loaded.videoPresets().size());
+        assertEquals("Good Video", loaded.videoPresets().get(0).name());
+    }
+
+    // ===== Preset load caching (context-menu / settings-open must not re-read disk) =====
+
+    @Test
+    void loadPresetsBySection_cachesAcrossCalls() throws Exception {
+        // Given: a valid presets file with one preset
+        Path presetsPath = configurationManager.getConfigDirectory().resolve("presets.json");
+        settingsManager.addSectionPreset(
+                SectionPreset.forVideo("Cached", "desc", VideoSettings.builder().build(), false));
+        PresetsBySection first = settingsManager.loadPresetsBySection();
+        assertEquals(1, first.videoPresets().size());
+        java.nio.file.attribute.FileTime originalMtime = Files.getLastModifiedTime(presetsPath);
+
+        // When: the file is corrupted in place but size and mtime are
+        // preserved (nothing the app or an external tool could observe as a
+        // write), a cached load must not re-read the disk
+        byte[] original = Files.readAllBytes(presetsPath);
+        byte[] garbage = new byte[original.length];
+        Arrays.fill(garbage, (byte) 'x');
+        Files.write(presetsPath, garbage);
+        Files.setLastModifiedTime(presetsPath, originalMtime);
+
+        // Then: the cached value is served
+        PresetsBySection second = settingsManager.loadPresetsBySection();
+        assertEquals(1, second.videoPresets().size());
+        assertEquals("Cached", second.videoPresets().get(0).name());
+    }
+
+    @Test
+    void loadPresetsBySection_detectsExternalModification() throws Exception {
+        // Given: a cached load
+        Path presetsPath = configurationManager.getConfigDirectory().resolve("presets.json");
+        settingsManager.addSectionPreset(
+                SectionPreset.forVideo("First", "desc", VideoSettings.builder().build(), false));
+        assertEquals(1, settingsManager.loadPresetsBySection().videoPresets().size());
+
+        // When: the file is rewritten externally with different content
+        JsonUtils.writeJsonFile(
+                new PresetsBySection(
+                        List.of(SectionPreset.forVideo("Second", "desc", VideoSettings.builder().build(), false)),
+                        null, null, null),
+                presetsPath.toFile());
+
+        // Then: the new content is picked up
+        PresetsBySection reloaded = settingsManager.loadPresetsBySection();
+        assertEquals(1, reloaded.videoPresets().size());
+        assertEquals("Second", reloaded.videoPresets().get(0).name());
+    }
+
+    @Test
+    void loadPresetsBySection_detectsExternalDeletion() throws Exception {
+        // Given: a cached load
+        Path presetsPath = configurationManager.getConfigDirectory().resolve("presets.json");
+        settingsManager.addSectionPreset(
+                SectionPreset.forVideo("Doomed", "desc", VideoSettings.builder().build(), false));
+        assertEquals(1, settingsManager.loadPresetsBySection().videoPresets().size());
+
+        // When: the file is deleted externally
+        Files.delete(presetsPath);
+
+        // Then: the deletion is picked up
+        assertTrue(settingsManager.loadPresetsBySection().videoPresets().isEmpty());
+    }
+
+    // ===== Transient filesystem state must not be treated as corruption =====
+
+    @Test
+    void loadSettings_withMissingTemplatePath_preservesSettingsWithoutBackup() throws Exception {
+        // Given: valid settings whose document template lives on
+        // offline/removable storage (template currently missing)
+        Path settingsPath = configurationManager.getSettingsFilePath();
+        Path outputDir = Files.createDirectories(tempDir.resolve("output"));
+        DocumentSettings documentSettings = DocumentSettings.builder()
+                .templatePath(tempDir.resolve("missing-template.docx"))
+                .build();
+        ConversionSettings original = ConversionSettings.builder()
+                .outputDirectory(outputDir)
+                .parallelConversions(4)
+                .documentSettings(documentSettings)
+                .build();
+        JsonUtils.writeJsonFile(original, settingsPath.toFile());
+
+        // When: Load settings
+        ConversionSettings loaded = settingsManager.loadSettings();
+
+        // Then: the document section survives; nothing is backed up or reset
+        assertEquals(documentSettings, loaded.documentSettings());
+        assertEquals(outputDir, loaded.outputDirectory());
+        try (var files = Files.list(configDir)) {
+            assertFalse(files.anyMatch(p -> p.getFileName().toString().contains(".backup")),
+                    "transient filesystem state must not trigger a corruption backup");
+        }
+    }
+
+    @Test
+    void loadSettings_withMissingOutputDirectory_preservesSettingsWithoutBackup() throws Exception {
+        // Given: valid settings whose output directory is on
+        // offline/removable storage (directory currently missing)
+        Path settingsPath = configurationManager.getSettingsFilePath();
+        Path missingDir = tempDir.resolve("offline-storage").resolve("output");
+        ConversionSettings original = ConversionSettings.builder()
+                .outputDirectory(missingDir)
+                .parallelConversions(4)
+                .build();
+        JsonUtils.writeJsonFile(original, settingsPath.toFile());
+
+        // When: Load settings
+        ConversionSettings loaded = settingsManager.loadSettings();
+
+        // Then: the configured directory survives; nothing is backed up or reset
+        assertEquals(missingDir, loaded.outputDirectory());
+        try (var files = Files.list(configDir)) {
+            assertFalse(files.anyMatch(p -> p.getFileName().toString().contains(".backup")),
+                    "a merely-missing output directory is not corruption");
+        }
+    }
 }

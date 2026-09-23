@@ -24,7 +24,7 @@ def prepare():
     if platform.system() != "Linux" or architecture is None:
         parser.error("Embedded tools support Linux x86_64 and aarch64. Use -Domc.skipEmbeddedTools=true for a system-tools build.")
     module = Path(__file__).resolve().parents[1]
-    manifest_path = module / "packaging" / "tools.json"
+    manifest_path = module / "scripts" / "tools.json"
     manifest = json.loads(manifest_path.read_text())
     cache = module / ".tool-cache"
     resources = cache / "resources"
@@ -67,7 +67,7 @@ def prepare():
                         shutil.copyfileobj(source, output)
         (target / "SOURCE.json").write_text(json.dumps(spec, indent=2) + "\n")
         if tool == "pandoc":
-            shutil.copyfile(module / "packaging" / "licenses" / "PANDOC-COPYING", target / "COPYING")
+            shutil.copyfile(module / "scripts" / "licenses" / "PANDOC-COPYING", target / "COPYING")
         print("Prepared " + tool + " for " + architecture, flush=True)
     shutil.copyfile(manifest_path, resources / "bin" / "tools.json")
     shutil.copyfile(module.parent / "BINARY_LICENSES.md", resources / "bin" / "BINARY_LICENSES.md")

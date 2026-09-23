@@ -174,48 +174,8 @@ public class ProgressView {
     }
 
     /**
-     * Updates the progress display (legacy method).
-     * 
-     * <p>
-     * This method is retained for backward compatibility and internal use.
-     * New code should use updateOverallProgress(BatchProgress) instead.
-     * </p>
-     * 
-     * <p>
-     * <strong>Thread Safety:</strong> Must be called on the GTK main thread.
-     * Use {@code GLib.idleAdd()} from background threads.
-     * </p>
-     * 
-     * @param currentFile          the current file being converted (1-based)
-     * @param totalFiles           the total number of files
-     * @param overallProgress      the overall progress (0.0 to 1.0)
-     * @param timeRemainingSeconds estimated time remaining in seconds
-     * @param speed                conversion speed string (e.g., "2.5 MB/s")
-     */
-    public void updateProgress(int currentFile, int totalFiles, double overallProgress,
-            long timeRemainingSeconds, String speed) {
-        // Update progress bar
-        progressBar.setFraction(overallProgress);
-        progressBar.setText(String.format("%.0f%%", overallProgress * 100));
-
-        // Update status label
-        String status = String.format("Converting %d of %d files...", currentFile, totalFiles);
-        statusLabel.setLabel(status);
-
-        // Update time remaining
-        String timeRemaining = formatTimeRemaining(timeRemainingSeconds);
-        timeRemainingLabel.setLabel("Time remaining: " + timeRemaining);
-
-        // Update conversion speed
-        conversionSpeedLabel.setLabel("Speed: " + (speed != null ? speed : "--"));
-
-        logger.debug("Progress updated: {}/{} ({}%)", currentFile, totalFiles,
-                (int) (overallProgress * 100));
-    }
-
-    /**
      * Clears all tracked file progress.
-     * 
+     *
      * <p>
      * Should be called when starting a new batch conversion
      * or when clearing the file list.
@@ -224,39 +184,5 @@ public class ProgressView {
     public void clearFileProgress() {
         fileProgressMap.clear();
         logger.debug("File progress tracking cleared");
-    }
-
-    /**
-     * Gets the current progress for a specific file.
-     * 
-     * @param fileId the unique file identifier
-     * @return the conversion progress, or null if not found
-     */
-    public ConversionProgress getFileProgress(String fileId) {
-        return fileProgressMap.get(fileId);
-    }
-
-    /**
-     * Formats time remaining in seconds to human-readable format.
-     * 
-     * @param seconds the number of seconds
-     * @return formatted time string (e.g., "2h 15m" or "45s")
-     */
-    private String formatTimeRemaining(long seconds) {
-        if (seconds < 0) {
-            return "--";
-        }
-
-        if (seconds < 60) {
-            return seconds + "s";
-        } else if (seconds < 3600) {
-            long minutes = seconds / 60;
-            long secs = seconds % 60;
-            return minutes + "m " + secs + "s";
-        } else {
-            long hours = seconds / 3600;
-            long minutes = (seconds % 3600) / 60;
-            return hours + "h " + minutes + "m";
-        }
     }
 }

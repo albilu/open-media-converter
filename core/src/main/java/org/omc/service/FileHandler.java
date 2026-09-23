@@ -601,7 +601,7 @@ public class FileHandler {
                     return FormatDetectionResult.fromMagicBytes(magicFormat);
                 }
             }
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             logger.warn("Magic bytes detection failed for {}, falling back to extension", filePath, e);
         }
 
@@ -632,6 +632,17 @@ public class FileHandler {
             byte[] header = readFileHeader(filePath, 18);
             if (header.length == 0) {
                 return null;
+            }
+
+            // ISO media brands are independent of the ftyp box length. In
+            // particular FFmpeg writes M4A with a 28-byte rather than 24-byte box.
+            if (header.length >= 12 && header[4] == 'f' && header[5] == 't'
+                    && header[6] == 'y' && header[7] == 'p') {
+                String brand = new String(header, 8, 4, java.nio.charset.StandardCharsets.US_ASCII);
+                if (brand.equals("M4A ") || brand.equals("M4B ") || brand.equals("M4P ")) {
+                    return FileFormat.M4A;
+                }
+                if (brand.equals("qt  ")) return FileFormat.MOV;
             }
 
             // Check against known magic bytes
@@ -671,7 +682,7 @@ public class FileHandler {
             }
 
             return FileFormat.UNKNOWN;
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             logger.debug("Failed to detect format by magic bytes: {}", filePath, e);
             return null;
         }
@@ -691,7 +702,7 @@ public class FileHandler {
             try (var inputStream = Files.newInputStream(filePath)) {
                 return inputStream.readNBytes(bytesToRead);
             }
-        } catch (Exception e) {
+        } catch (IOException | FileOperationException | RuntimeException e) {
             logger.debug("Failed to read file header: {}", filePath, e);
             return new byte[0];
         }
@@ -829,7 +840,7 @@ public class FileHandler {
             }
 
             return byExtension;
-        } catch (Exception e) {
+        } catch (IOException | RuntimeException e) {
             // Unparseable/truncated zip or unexpected failure: the extension
             // stays authoritative rather than guessing UNKNOWN.
             logger.debug("ZIP content inspection failed for {}, using extension fallback", filePath, e);
@@ -1054,7 +1065,8 @@ public class FileHandler {
                 // they never block writing to an unread pipe.
                 pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
                 pb.redirectError(ProcessBuilder.Redirect.DISCARD);
-                pb.start();
+                Process process = pb.start();
+                reapOnDaemonThread(process, fileManager);
                 logger.debug("Successfully launched {} for: {}", fileManager, filePath);
                 return true;
             } catch (IOException e) {
@@ -1063,5 +1075,29 @@ public class FileHandler {
         }
 
         return false;
+    }
+
+    /**
+     * Reaps a launched GUI process on a daemon thread so an exited child
+     * never lingers unreaped, without blocking the caller and without
+     * destroying a long-lived GUI application (unlike the xdg-open launcher,
+     * a file manager process IS the window the user asked to open).
+     *
+     * @param process     the launched process to reap
+     * @param description short name used in log messages
+     * @return the daemon reaper thread (already started)
+     */
+    static Thread reapOnDaemonThread(Process process, String description) {
+        Thread reaper = org.omc.util.ThreadUtils.createThreadFactory("Gui-Reaper")
+                .newThread(() -> {
+                    try {
+                        int exitCode = process.waitFor();
+                        logger.trace("{} exited with code {}", description, exitCode);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+        reaper.start();
+        return reaper;
     }
 }

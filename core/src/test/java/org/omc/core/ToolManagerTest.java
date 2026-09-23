@@ -77,6 +77,11 @@ class ToolManagerTest {
 
     @BeforeEach
     void setUp() {
+        // Model an installed complete Pandoc pipeline while mocking execution only.
+        PandocService capabilities = new PandocService(Path.of("/usr/bin/pandoc"),
+                new LibreOfficeService(Path.of("/usr/bin/soffice")));
+        org.mockito.Mockito.lenient().when(pandocService.supportsConversion(any(), any()))
+                .thenAnswer(invocation -> capabilities.supportsConversion(invocation.getArgument(0), invocation.getArgument(1)));
         toolManager = new ToolManager(ffmpegService, pandocService, libreOfficeService, imageMagickService);
         inputPath = Paths.get("/tmp/input.mp4");
         outputPath = Paths.get("/tmp/output.avi");

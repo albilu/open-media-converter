@@ -60,8 +60,8 @@ public class ToolSelectionIntegrationTest {
         FFmpegService ffmpegService = new FFmpegService(
                 Path.of("/usr/bin/ffmpeg"),
                 Path.of("/usr/bin/ffprobe"));
-        PandocService pandocService = new PandocService(Path.of("/usr/bin/pandoc"));
         LibreOfficeService libreOfficeService = new LibreOfficeService(Path.of("/usr/bin/soffice"));
+        PandocService pandocService = new PandocService(Path.of("/usr/bin/pandoc"), libreOfficeService);
         ImageMagickService imageMagickService = new ImageMagickService(Path.of("/usr/bin/convert"));
 
         // Create ToolManager with all services

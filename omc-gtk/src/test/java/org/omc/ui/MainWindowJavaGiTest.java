@@ -102,6 +102,7 @@ class MainWindowJavaGiTest {
                 ConversionFile.create(Path.of("/test/file1.mp4"), FileFormat.MP4, 1024L),
                 ConversionFile.create(Path.of("/test/file2.mp4"), FileFormat.MP4, 2048L));
         when(controller.getFileList()).thenReturn(files);
+        when(controller.handleStartConversion()).thenReturn(files.stream().map(ConversionFile::id).toList());
 
         // Act
         invokeHandleConvert();

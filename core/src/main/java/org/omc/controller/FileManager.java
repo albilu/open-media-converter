@@ -22,6 +22,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
 import org.omc.core.ValidationEngine;
@@ -60,6 +62,10 @@ public class FileManager {
     // Track file hashes for duplicate detection
     private final Map<String, String> fileHashMap; // path -> hash
     private final Set<String> fileHashes; // set of hashes for fast lookup
+
+    // Background hasher for session-restored files (restore must not do disk
+    // I/O on the startup path, so their hashes are indexed asynchronously)
+    private final ExecutorService hashWarmupExecutor;
 
     // Event listeners
     private final CopyOnWriteArrayList<Consumer<FileEvent>> eventListeners;
@@ -119,6 +125,11 @@ public class FileManager {
         this.files = new CopyOnWriteArrayList<>();
         this.fileHashMap = new ConcurrentHashMap<>();
         this.fileHashes = ConcurrentHashMap.newKeySet();
+        this.hashWarmupExecutor = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "file-hash-warmup");
+            thread.setDaemon(true);
+            return thread;
+        });
         this.eventListeners = new CopyOnWriteArrayList<>();
         logger.info("FileManager initialized");
     }
@@ -157,8 +168,13 @@ public class FileManager {
                     continue;
                 }
 
-                // Detect format
+                // Detect format; UNKNOWN files can never be routed to a tool,
+                // so reject them at admission (consistent with folder scans)
                 FileFormat format = fileHandler.detectFormat(path);
+                if (format == FileFormat.UNKNOWN) {
+                    logger.warn("Skipping unsupported file (format not recognized): {}", path);
+                    continue;
+                }
                 long size = fileHandler.getFileSize(path);
 
                 // Create conversion file
@@ -471,16 +487,59 @@ public class FileManager {
      */
     public void restoreFiles(List<ConversionFile> savedFiles) {
         Objects.requireNonNull(savedFiles, "savedFiles");
+        List<ConversionFile> restoredFiles = new ArrayList<>(savedFiles.size());
         for (ConversionFile saved : savedFiles) {
-            if (!Files.isRegularFile(saved.path()) || !Files.isReadable(saved.path())) continue;
+            boolean readableSource = Files.isRegularFile(saved.path()) && Files.isReadable(saved.path());
+            boolean completedOutput = saved.status() == org.omc.model.ConversionStatus.COMPLETED
+                    && saved.outputPath().filter(path -> Files.isRegularFile(path) && Files.isReadable(path)).isPresent();
+            if (!readableSource && !completedOutput) continue;
             ConversionFile restored = saved.status() == org.omc.model.ConversionStatus.IN_PROGRESS
                     ? saved.withStatus(org.omc.model.ConversionStatus.PENDING).withProgress(0) : saved;
             synchronized (files) {
                 if (isDuplicate(restored.path(), null)) continue;
                 files.add(restored);
+                if (readableSource) restoredFiles.add(restored);
             }
             notifyListeners(new FileEvent(EventType.FILE_ADDED, restored));
         }
+        if (!restoredFiles.isEmpty()) {
+            warmUpHashIndexesAsync(restoredFiles);
+        }
+    }
+
+    /**
+     * Indexes content hashes of restored files on a background thread so
+     * content-duplicate detection covers them without blocking session
+     * restore on disk I/O. The first file restored with a given content is
+     * the canonical indexed one; later same-content restores stay
+     * path-detectable only, preserving the hash-to-file 1:1 removal
+     * invariant. Files removed before their turn are skipped.
+     */
+    private void warmUpHashIndexesAsync(List<ConversionFile> restoredFiles) {
+        hashWarmupExecutor.execute(() -> {
+            for (ConversionFile restored : restoredFiles) {
+                String hash = calculateFileHash(restored.path());
+                if (hash == null) {
+                    continue;
+                }
+                synchronized (files) {
+                    if (!files.contains(restored) || fileHashes.contains(hash)) {
+                        continue;
+                    }
+                    fileHashMap.put(restored.path().toString(), hash);
+                    fileHashes.add(hash);
+                }
+            }
+            logger.debug("Hash warm-up completed for {} restored file(s)", restoredFiles.size());
+        });
+    }
+
+    /**
+     * Test seam: whether the given path currently has an indexed content hash.
+     */
+    boolean isContentHashIndexed(Path path) {
+        String hash = fileHashMap.get(path.toString());
+        return hash != null && fileHashes.contains(hash);
     }
 
     /**

@@ -47,9 +47,21 @@ public class ToolDiscovery {
     private static final String PANDOC_NAME = "pandoc";
     private static final String LIBREOFFICE_NAME = "soffice";
     private static final String IMAGEMAGICK_NAME = "convert";
+    private static final String IMAGEMAGICK_MAGICK_NAME = "magick";
+
+    /**
+     * ImageMagick candidate binary names in probe order: the IM6-era
+     * "convert" stays preferred, with IM7's "magick" as fallback for pure
+     * IM7 installs that ship no "convert" binary ("magick input ... output"
+     * accepts the same convert-style arguments this app builds).
+     * Package-visible so tests can pin the production probe order.
+     */
+    static final String[] IMAGEMAGICK_CANDIDATE_NAMES = { IMAGEMAGICK_NAME, IMAGEMAGICK_MAGICK_NAME };
 
     // Version detection patterns
-    private static final Pattern FFMPEG_VERSION_PATTERN = Pattern.compile("ff(?:mpeg|probe) version n?([\\d.]+)",
+    // Release builds print "n7.0.1"/"6.1.1"; git-snapshot builds print
+    // "N-110753-g1234abc" and are reported as their N-<build> identifier
+    private static final Pattern FFMPEG_VERSION_PATTERN = Pattern.compile("ff(?:mpeg|probe) version n?([\\d.]+|N-\\d+)",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern PANDOC_VERSION_PATTERN = Pattern.compile("pandoc ([\\d.]+)", Pattern.CASE_INSENSITIVE);
     private static final Pattern LIBREOFFICE_VERSION_PATTERN = Pattern.compile("LibreOffice ([\\d.]+)",
@@ -244,9 +256,29 @@ public class ToolDiscovery {
      * @param config the configuration to update
      */
     private void discoverImageMagick(ToolConfiguration config) {
+        discoverImageMagick(config, System.getenv("PATH"), IMAGEMAGICK_CANDIDATE_NAMES);
+    }
+
+    /**
+     * Discovers ImageMagick by probing the candidate binary names in order
+     * against the well-known system directories first and then the given
+     * PATH. Package-visible so tests can probe controlled candidate names
+     * against a fake tool directory regardless of the host installation.
+     *
+     * @param config         the configuration to update
+     * @param pathEnv        the PATH environment variable to search
+     * @param candidateNames binary names to probe, in preference order
+     */
+    void discoverImageMagick(ToolConfiguration config, String pathEnv, String[] candidateNames) {
         // ImageMagick is typically not embedded due to size and complexity
         // Try system ImageMagick
-        Optional<Path> systemConvert = findSystemBinary(IMAGEMAGICK_NAME);
+        Optional<Path> systemConvert = Optional.empty();
+        for (String candidateName : candidateNames) {
+            systemConvert = findSystemBinary(candidateName, pathEnv);
+            if (systemConvert.isPresent()) {
+                break;
+            }
+        }
         if (systemConvert.isPresent()) {
             logger.info("Found system ImageMagick convert: {}", systemConvert.get());
             config.setConvertPath(systemConvert.get());
@@ -258,7 +290,7 @@ public class ToolDiscovery {
                         logger.info("ImageMagick version: {}", version);
                     });
         } else {
-            logger.warn("ImageMagick 'convert' not found in system paths");
+            logger.warn("ImageMagick ({}) not found in system paths", String.join("/", candidateNames));
         }
     }
 
@@ -483,7 +515,7 @@ public class ToolDiscovery {
             String captured;
             try {
                 captured = out.get(VERSION_CHECK_TIMEOUT, TimeUnit.MILLISECONDS);
-            } catch (Exception e) {
+            } catch (java.util.concurrent.TimeoutException | java.util.concurrent.ExecutionException e) {
                 out.cancel(true);
                 process.destroyForcibly();
                 logger.debug("Rejecting unrunnable binary {}: {}", binaryPath, e.getMessage());
@@ -499,8 +531,12 @@ public class ToolDiscovery {
                 logger.debug("Rejecting binary with no version output: {}", binaryPath);
             }
             return ok;
-        } catch (Exception e) {
+        } catch (IOException | RuntimeException e) {
             logger.debug("Rejecting untrusted binary {}: {}", binaryPath, e.getMessage());
+            return false;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            logger.debug("Interrupted while probing binary {}: {}", binaryPath, e.getMessage());
             return false;
         }
     }

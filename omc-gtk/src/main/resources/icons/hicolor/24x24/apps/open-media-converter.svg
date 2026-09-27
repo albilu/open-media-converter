@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" role="img" aria-labelledby="title description">
+  <title id="title">Open Media Converter</title>
+  <desc id="description">Conversion arrows surround video, audio, image and document symbols. Simplified for small icons.</desc>
+  <rect x="1" y="1" width="22" height="22" rx="5" fill="#1b3043"/>
+  <path d="M3.75 12a8.25 8.25 0 0 1 14.4-5.4" fill="none" stroke="#49d9c6" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="m19.75 8.8-3.65-.7 2.55-2.7z" fill="#73f2d0" stroke="#73f2d0" stroke-width=".4" stroke-linejoin="round"/>
+  <g transform="rotate(180 12 12)">
+    <path d="M3.75 12a8.25 8.25 0 0 1 14.4-5.4" fill="none" stroke="#67b9f1" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="m19.75 8.8-3.65-.7 2.55-2.7z" fill="#96d4ff" stroke="#96d4ff" stroke-width=".4" stroke-linejoin="round"/>
+  </g>
+  <g fill="#f5fcff" stroke="#f5fcff" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m8.1 8 2.6 1.6-2.6 1.6z" stroke-width=".5"/>
+    <path d="M13.6 8.8v1.8m1.3-2.6v3.2m1.3-2.7v2.2" fill="none" stroke-width=".9"/>
+    <rect x="7.5" y="13" width="3.6" height="3" rx=".5" fill="none" stroke-width=".8"/>
+    <path d="m7.8 15.8 1.2-1.7 1.1 1 1-.4v1.1z" stroke="none"/>
+    <path d="M13.5 13h2l1 1v2.5h-3z" fill="none" stroke-width=".8"/>
+    <path d="M14.3 15.1h1.4" fill="none" stroke-width=".7"/>
+  </g>
+</svg>

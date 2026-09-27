@@ -27,6 +27,9 @@ public interface ProcessRegistry {
      */
     void unregisterProcess(String fileId);
 
+    /** Waits for permission to perform the next conversion stage, or throws on cancellation. */
+    default void awaitRunning() { }
+
     /**
      * Creates a no-op process registry that ignores registration calls.
      * 

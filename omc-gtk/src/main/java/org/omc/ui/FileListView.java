@@ -558,18 +558,11 @@ public class FileListView {
                 if (file != null) {
                     // Get the progress bar (first child of overlay)
                     var progressBar = (ProgressBar) overlay.getChild();
-                    double fraction = file.progress() / 100.0;
-                    progressBar.setFraction(fraction);
 
                     // Get the label overlay (first overlay child)
                     var progressLabel = (Label) overlay.getFirstChild().getNextSibling();
 
-                    // Build progress text with percentage and speed if available
-                    String text = file.progress() + "%";
-                    if (file.progressInfo() != null && file.progressInfo().formatSpeed() != null) {
-                        text += " at " + file.progressInfo().formatSpeed();
-                    }
-                    progressLabel.setLabel(text);
+                    renderProgress(file, progressBar, progressLabel);
 
                     // Cache progress widgets for direct updates (eliminates flickering)
                     ProgressWidgets widgets = progressWidgetCache.get(fileId);
@@ -659,19 +652,7 @@ public class FileListView {
             // directly
             ProgressWidgets widgets = progressWidgetCache.get(fileId);
             if (widgets != null) {
-                // Update progress bar directly if available
-                if (widgets.progressBar != null) {
-                    widgets.progressBar.setFraction(file.progress() / 100.0);
-                }
-
-                // Update progress label directly if available
-                if (widgets.progressLabel != null) {
-                    String text = file.progress() + "%";
-                    if (file.progressInfo() != null && file.progressInfo().formatSpeed() != null) {
-                        text += " at " + file.progressInfo().formatSpeed();
-                    }
-                    widgets.progressLabel.setLabel(text);
-                }
+                renderProgress(file, widgets.progressBar, widgets.progressLabel);
 
                 // Update status label directly if available
                 if (widgets.statusLabel != null) {
@@ -739,12 +720,27 @@ public class FileListView {
         logger.debug("Select all triggered");
     }
 
-    /**
-     * Finds a ConversionFile by its ID.
-     * 
-     * @param fileId the file ID to search for
-     * @return the ConversionFile, or null if not found
-     */
+    private void renderProgress(ConversionFile file, ProgressBar bar, Label label) {
+        boolean paused = file.status() == ConversionStatus.IN_PROGRESS
+                && file.progressInfo() != null && file.progressInfo().paused();
+        boolean indeterminate = file.status() == ConversionStatus.IN_PROGRESS
+                && file.progressInfo() != null && file.progressInfo().indeterminate();
+        if (bar != null) {
+            if (indeterminate && !paused) bar.pulse();
+            else bar.setFraction(file.progress() / 100.0);
+        }
+        if (label != null) {
+            String text = paused ? "Paused" : indeterminate ? "Converting..." : file.progress() + "%";
+            if (!paused && !indeterminate && file.progressInfo() != null
+                    && !file.progressInfo().indeterminate() && !file.progressInfo().paused()
+                    && (file.status() == ConversionStatus.IN_PROGRESS || file.status() == ConversionStatus.COMPLETED)) {
+                text += " at " + file.progressInfo().formatSpeed();
+            }
+            label.setLabel(text);
+        }
+    }
+
+    /** Finds the queued file by its stable identifier. */
     private ConversionFile findFileById(String fileId) {
         Integer index = fileIdToIndexMap.get(fileId);
         if (index != null && index < files.size()) {

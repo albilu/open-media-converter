@@ -217,7 +217,7 @@ class ProgressEngineTest {
     }
 
     @Test
-    void testUpdateProgressWithPercentage_FullProgress_ReachesOneHundredPercent() throws InterruptedException {
+    void testUpdateProgressWithPercentage_FullProgress_WaitsForSuccessfulCompletion() throws InterruptedException {
         // Given
         String fileId = "file1";
         progressEngine.startTracking(fileId, 1000L);
@@ -230,8 +230,8 @@ class ProgressEngineTest {
         Optional<ConversionProgress> progressOpt = progressEngine.getProgress(fileId);
         assertTrue(progressOpt.isPresent());
         ConversionProgress progress = progressOpt.get();
-        assertEquals(100, progress.percentage());
-        assertEquals(1000L, progress.processedBytes());
+        assertEquals(99, progress.percentage());
+        assertEquals(990L, progress.processedBytes());
     }
 
     @Test
@@ -455,6 +455,7 @@ class ProgressEngineTest {
         // Given
         progressEngine.startBatch(Arrays.asList("file1"), Map.of("file1", 1000L));
         progressEngine.startTracking("file1", 1000L);
+        progressEngine.updateProgress("file1", 257L);
         ConversionResult result = ConversionResult.failure("file1", "error", null, Duration.ofSeconds(1), 1000L,
                 mockTool);
 
@@ -571,9 +572,9 @@ class ProgressEngineTest {
         // (the batch is terminal: no pending or in-progress files)
         progressEngine.updateProgress("file1", 900L);
 
-        // Then - the terminal-state bypass delivers it immediately: the forced
-        // startBatch + completion notifications plus the late update
-        verify(batchProgressListener, times(3)).accept(any(BatchProgress.class));
+        // Terminal progress is immutable: late tool output cannot overwrite success.
+        verify(batchProgressListener, times(2)).accept(any(BatchProgress.class));
+        assertEquals(100, progressEngine.getProgress("file1").orElseThrow().percentage());
     }
 
     @Test
@@ -720,7 +721,8 @@ class ProgressEngineTest {
         progressEngine.startTracking("file2", 2000L);
 
         // When
-        progressEngine.updateProgress("file1", 1000L); // Complete
+        progressEngine.completeTracking("file1", ConversionResult.success("file1", Path.of("output"), null,
+                Duration.ofSeconds(1), 1000L, 800L, mockTool)); // Published output
         progressEngine.updateProgress("file2", 500L); // Half
 
         // Then
@@ -770,9 +772,10 @@ class ProgressEngineTest {
     }
 
     @Test
-    void testCompleteTracking_Failure_UpdatesToComplete() {
+    void testCompleteTracking_Failure_PreservesMeasuredProgress() {
         // Given
         progressEngine.startTracking("file1", 1000L);
+        progressEngine.updateProgress("file1", 257L);
         ConversionResult result = ConversionResult.failure("file1", "error", null, Duration.ofSeconds(1), 1000L,
                 mockTool);
 
@@ -783,9 +786,9 @@ class ProgressEngineTest {
         Optional<ConversionProgress> progressOpt = progressEngine.getProgress("file1");
         assertTrue(progressOpt.isPresent());
         ConversionProgress progress = progressOpt.get();
-        assertEquals(1000L, progress.processedBytes());
-        assertEquals(100, progress.percentage());
-        assertTrue(progress.isComplete());
+        assertEquals(257L, progress.processedBytes());
+        assertEquals(25, progress.percentage());
+        assertFalse(progress.isComplete());
     }
 
     @Test

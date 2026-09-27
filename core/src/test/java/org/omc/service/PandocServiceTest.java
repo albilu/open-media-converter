@@ -66,6 +66,18 @@ class PandocServiceTest {
     // Constructor tests
 
     @Test
+    void literalTextRoundTripRetainsBytesAndAResultIdentifier() throws IOException, ToolExecutionException {
+        Path text = tempDir.resolve("literal.txt");
+        Path copy = tempDir.resolve("literal-copy.txt");
+        byte[] literal = "  first\r\n\tsecond  column\r\n\r\nlast".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        Files.write(text, literal);
+        ConversionResult result = service.convertDocument(text, copy, defaultSettings, noOpCallback);
+        assertTrue(result.success());
+        assertEquals(text.toString(), result.fileId());
+        org.junit.jupiter.api.Assertions.assertArrayEquals(literal, Files.readAllBytes(copy));
+    }
+
+    @Test
     void testConstructor_Success() {
         assertNotNull(service);
         assertEquals(pandocPath, service.getPandocPath());

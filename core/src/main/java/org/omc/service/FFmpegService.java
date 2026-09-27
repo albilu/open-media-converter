@@ -21,6 +21,7 @@ import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 import org.omc.core.ProcessRegistry;
+import org.omc.core.ToolProcess;
 import org.omc.core.ProgressCallback;
 import org.omc.exception.ErrorCode;
 import org.omc.exception.ToolExecutionException;
@@ -182,6 +183,16 @@ public class FFmpegService {
         command.add("-i");
         command.add(safePathArg(inputPath));
 
+        // Preserve all tracks, metadata and chapters. If the destination cannot
+        // represent a stream, fail instead of silently discarding source content.
+        command.addAll(List.of("-map", "0", "-map_metadata", "0", "-map_chapters", "0"));
+        String subtitleCodec = switch (targetFormat) {
+            case MP4, MOV -> "mov_text";
+            case WEBM -> "webvtt";
+            default -> "copy";
+        };
+        command.addAll(List.of("-c:s", subtitleCodec, "-c:d", "copy", "-c:t", "copy"));
+
         // Video codec mapping
         command.add("-c:v");
         command.add(ffmpegCodec);
@@ -307,9 +318,12 @@ public class FFmpegService {
 
         // Requirement REQ-AUD-1.1: Skip encoding parameters for copy codec
         if (!ffmpegCodec.equals("copy")) {
-            // Bitrate
-            command.add("-b:a");
-            command.add(settings.bitrate() + "k");
+            // MP3 and Vorbis use the quality slider in VBR mode. Supplying
+            // bitrate as well can impose incompatible Vorbis rate constraints.
+            if (!ffmpegCodec.equals("libmp3lame") && !ffmpegCodec.equals("libvorbis")) {
+                command.add("-b:a");
+                command.add(settings.bitrate() + "k");
+            }
 
             // Sample rate
             if (settings.sampleRate() > 0) {
@@ -330,9 +344,9 @@ public class FFmpegService {
                 command.add("-q:a");
                 command.add(String.valueOf(settings.quality()));
             } else if (ffmpegCodec.equals("libvorbis")) {
-                // Vorbis: quality -1 to 10 (higher is better)
-                // Map 0-9 to -1 to 8
-                int vorbisQuality = settings.quality() - 1;
+                // The application's saved quality scale is lower-is-better.
+                // Invert it for Vorbis's higher-is-better encoder scale.
+                int vorbisQuality = 10 - settings.quality();
                 command.add("-q:a");
                 command.add(String.valueOf(vorbisQuality));
             } else if (ffmpegCodec.equals("libopus")) {
@@ -691,6 +705,10 @@ public class FFmpegService {
      * @throws ToolExecutionException if ffprobe execution fails
      */
     private Duration getDuration(Path inputPath) throws ToolExecutionException {
+        return getDuration(inputPath, null, ProcessRegistry.noOp());
+    }
+
+    private Duration getDuration(Path inputPath, String fileId, ProcessRegistry registry) throws ToolExecutionException {
         List<String> command = List.of(
                 ffprobePath.toString(),
                 "-v", "quiet",
@@ -698,7 +716,7 @@ public class FFmpegService {
                 "-show_format",
                 safePathArg(inputPath));
 
-        String output = runFfprobeBounded(command, "getting duration", inputPath);
+        String output = runFfprobeBounded(command, "getting duration", inputPath, fileId, registry);
         if (output == null) {
             return null;
         }
@@ -728,6 +746,10 @@ public class FFmpegService {
      * @return total number of frames, or -1 if unable to determine
      */
     private long getTotalFrames(Path inputPath) {
+        return getTotalFrames(inputPath, null, ProcessRegistry.noOp());
+    }
+
+    private long getTotalFrames(Path inputPath, String fileId, ProcessRegistry registry) {
         List<String> command = List.of(
                 ffprobePath.toString(),
                 "-v", "quiet",
@@ -737,7 +759,7 @@ public class FFmpegService {
                 "-select_streams", "v:0", // Select first video stream only
                 safePathArg(inputPath));
 
-        String output = runFfprobeBounded(command, "getting frame count", inputPath);
+        String output = runFfprobeBounded(command, "getting frame count", inputPath, fileId, registry);
         if (output == null) {
             return -1;
         }
@@ -846,14 +868,19 @@ public class FFmpegService {
      *         interruption or execution failure
      */
     private String runFfprobeBounded(List<String> command, String purpose, Path inputPath) {
+        return runFfprobeBounded(command, purpose, inputPath, null, ProcessRegistry.noOp());
+    }
+
+    private String runFfprobeBounded(List<String> command, String purpose, Path inputPath,
+            String fileId, ProcessRegistry registry) {
         ProcessBuilder processBuilder = new ProcessBuilder(command);
         processBuilder.redirectErrorStream(true);
 
         logger.debug("Executing ffprobe command: {}", String.join(" ", command));
 
-        Process process = null;
+        ToolProcess process = null;
         try {
-            process = processBuilder.start();
+            process = ToolProcess.start(processBuilder, fileId, registry);
 
             // Effectively-final alias so the reader lambda can capture the
             // process even though the outer reference is reassigned/null.
@@ -877,7 +904,7 @@ public class FFmpegService {
                     });
             outputReader.start();
 
-            if (!process.waitFor(FFPROBE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+            if (!process.waitForActive(FFPROBE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
                 logger.warn("ffprobe timed out after {} ms while {} for {}",
                         FFPROBE_TIMEOUT_MILLIS, purpose, inputPath);
                 process.destroyForcibly();
@@ -920,8 +947,10 @@ public class FFmpegService {
             // destroyForcibly is a no-op on an already-terminated process,
             // so normal completion is unaffected.
             if (process != null && process.isAlive()) {
+                process.descendants().forEach(ProcessHandle::destroyForcibly);
                 process.destroyForcibly();
             }
+            if (fileId != null && registry != null) registry.unregisterProcess(fileId);
         }
     }
 
@@ -1566,13 +1595,13 @@ public class FFmpegService {
         }
 
         // Get total duration for progress calculation
-        Duration totalDuration = getDuration(inputPath);
+        Duration totalDuration = getDuration(inputPath, fileId, processRegistry);
         if (totalDuration != null && totalDuration.isZero()) {
             totalDuration = null; // Treat zero duration as unknown
         }
 
         // Get total frames for frame-based progress (fallback if time-based fails)
-        long totalFrames = getTotalFrames(inputPath);
+        long totalFrames = getTotalFrames(inputPath, fileId, processRegistry);
 
         if (totalDuration != null) {
             logger.info("Total duration for progress tracking: {} seconds", totalDuration.getSeconds());
@@ -1587,7 +1616,7 @@ public class FFmpegService {
         }
 
         if (totalDuration == null && totalFrames <= 0) {
-            logger.warn("Neither duration nor frame count available - progress tracking will be disabled");
+            logger.warn("Neither duration nor frame count available - reporting indeterminate progress");
         }
 
         ProcessBuilder processBuilder = new ProcessBuilder(command);
@@ -1595,17 +1624,16 @@ public class FFmpegService {
 
         logger.info("Executing FFmpeg command: {}", String.join(" ", command));
 
-        Process process = null;
+        ToolProcess process = null;
         StringBuilder outputLog = new StringBuilder(4096); // Initial capacity for performance
         final boolean[] outputTruncated = { false };
 
         try {
-            process = processBuilder.start();
+            process = ToolProcess.start(processBuilder, fileId, processRegistry);
 
-            // Register process for cancellation support
-            if (fileId != null && processRegistry != null) {
-                processRegistry.registerProcess(fileId, process);
-            }
+
+            boolean unknownProgress = totalDuration == null && totalFrames <= 0;
+            if (unknownProgress && progressCallback != null && !process.isPaused()) progressCallback.onIndeterminate();
 
             // Effectively-final aliases so the reader lambda can capture them.
             final Process ffmpegProcess = process;
@@ -1695,8 +1723,9 @@ public class FFmpegService {
                                 // If we got a valid percentage, send the update
                                 if (percentage >= 0.0) {
                                     long currentTimeMillis = System.currentTimeMillis();
-                                    if (currentTimeMillis - lastProgressUpdateMillis >= PROGRESS_THROTTLE_MS) {
-                                        percentage = Math.min(100.0, Math.max(0.0, percentage));
+                                    if (currentTimeMillis - lastProgressUpdateMillis >= PROGRESS_THROTTLE_MS
+                                            && !((ToolProcess) ffmpegProcess).isPaused()) {
+                                        percentage = Math.min(99.0, Math.max(0.0, percentage));
 
                                         if (progress.currentTime != null && totalDurationFinal != null) {
                                             logger.debug("Progress update: {}% (time={}/{}, {} of {} seconds)",
@@ -1734,9 +1763,9 @@ public class FFmpegService {
             // Check for interruption periodically so cancellation can work
             boolean finished = false;
             long timeoutMillis = PROCESS_TIMEOUT_MILLIS;
-            long startWaitTime = System.currentTimeMillis();
+            long startWaitTime = process.activeElapsed().toMillis();
 
-            while (!finished && (System.currentTimeMillis() - startWaitTime) < timeoutMillis) {
+            while (!finished && (process.activeElapsed().toMillis() - startWaitTime) < timeoutMillis) {
                 // Check for interruption (from cancel operation)
                 if (Thread.currentThread().isInterrupted()) {
                     logger.info("FFmpeg process interrupted, destroying process");
@@ -1746,6 +1775,9 @@ public class FFmpegService {
 
                 // Wait for process with short timeout to allow interruption checks
                 finished = process.waitFor(500, TimeUnit.MILLISECONDS);
+                if (!finished && unknownProgress && progressCallback != null && !process.isPaused()) {
+                    progressCallback.onIndeterminate();
+                }
             }
 
             if (!finished) {

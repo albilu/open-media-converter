@@ -2752,6 +2752,9 @@ class ConversionEngineTest {
          */
         @Test
         void engineReusableAfterCancel() throws Exception {
+                // Configure mocks before starting workers; re-stubbing while a cancelled
+                // worker unwinds races Mockito interception.
+                setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
                 // Given - a conversion cancelled while paused
                 conversionEngine.onConversionComplete(completionHandler);
                 conversionEngine.pauseConversion();
@@ -2765,7 +2768,6 @@ class ConversionEngineTest {
                                 "cancelConversion must not permanently shut down the engine");
 
                 // When - a new conversion is submitted after cancellation
-                setupSuccessfulConversion(FileFormat.MP4, FileFormat.AVI);
                 CompletableFuture<ConversionResult> future = conversionEngine.convertSingle(testFile, testSettings);
                 ConversionResult result = future.get(5, TimeUnit.SECONDS);
 

@@ -240,8 +240,7 @@ class FFmpegServiceTest {
                 List<String> command = service.buildAudioCommand(audioInput, audioOutput, settings);
 
                 assertTrue(command.contains("libmp3lame"));
-                assertTrue(command.contains("-b:a"));
-                assertTrue(command.contains("320k"));
+                assertFalse(command.contains("-b:a"), "Quality mode must not also constrain bitrate");
                 assertTrue(command.contains("-q:a"));
                 assertTrue(command.contains("2"));
         }
@@ -287,7 +286,8 @@ class FFmpegServiceTest {
 
                 assertTrue(command.contains("libvorbis"));
                 assertTrue(command.contains("-q:a"));
-                assertTrue(command.contains("4")); // Quality 5 mapped to 4 for vorbis
+                assertEquals("5", command.get(command.indexOf("-q:a") + 1));
+                assertFalse(command.contains("-b:a"), "Vorbis VBR must not impose a conflicting bitrate");
         }
 
         @Test
@@ -2510,8 +2510,8 @@ class FFmpegServiceTest {
                                 "Audio codec should be 'libmp3lame' for MP3");
 
                 // Verify encoding parameters ARE present
-                assertTrue(command.contains("-b:a"),
-                                "Non-copy codec should include bitrate flag");
+                assertFalse(command.contains("-b:a"),
+                                "MP3 quality mode must not also impose a conflicting bitrate");
                 assertTrue(command.contains("-ar"),
                                 "Non-copy codec should include sample rate flag");
                 assertTrue(command.contains("-ac"),

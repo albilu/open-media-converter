@@ -10,6 +10,7 @@ depends=(
     'gtk4>=4.10'
     'glib2>=2.66.0'
     'gobject-introspection>=1.66.0'
+    'hicolor-icon-theme'
     'imagemagick'
     'libreoffice-fresh'
 )

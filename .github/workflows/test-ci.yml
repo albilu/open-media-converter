@@ -2,8 +2,8 @@ name: Test CI
 
 on:
     workflow_call:
-    push:
-        branches: [main, develop]
+    # push:
+    #     branches: [main, develop]
     pull_request:
         branches: [main, develop]
 

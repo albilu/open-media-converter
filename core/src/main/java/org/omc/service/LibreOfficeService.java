@@ -16,6 +16,7 @@ import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 import org.omc.core.ProcessRegistry;
+import org.omc.core.ToolProcess;
 import org.omc.core.ProgressCallback;
 import org.omc.exception.ErrorCode;
 import org.omc.exception.ToolExecutionException;
@@ -136,11 +137,33 @@ public class LibreOfficeService {
             String fileId,
             ProcessRegistry processRegistry) throws ToolExecutionException {
 
+        return convertDocument(inputPath, outputPath, settings, progressCallback, fileId, processRegistry,
+                detectFormat(inputPath));
+    }
+
+    /**
+     * Converts a document using its detected format, including renamed office files.
+     *
+     * @param inputPath source document
+     * @param outputPath destination document
+     * @param settings document options
+     * @param progressCallback progress receiver
+     * @param fileId conversion identifier, or null
+     * @param processRegistry process owner for cancellation
+     * @param inputFormat authoritative detected format
+     * @return conversion result
+     * @throws ToolExecutionException if execution fails
+     */
+    public ConversionResult convertDocument(Path inputPath, Path outputPath, DocumentSettings settings,
+            ProgressCallback progressCallback, String fileId, ProcessRegistry processRegistry, FileFormat inputFormat)
+            throws ToolExecutionException {
+        Objects.requireNonNull(inputFormat, "inputFormat must not be null");
+
         // MDC correlation: every log line emitted during this conversion
         // carries the file and tool context
         try (MDC.MDCCloseable omcFileCtx = MDC.putCloseable("omcFile", String.valueOf(fileId));
                 MDC.MDCCloseable omcToolCtx = MDC.putCloseable("omcTool", "libreoffice")) {
-            return convertDocumentInternal(inputPath, outputPath, settings, progressCallback, fileId, processRegistry);
+            return convertDocumentInternal(inputPath, outputPath, settings, progressCallback, fileId, processRegistry, inputFormat);
         }
     }
 
@@ -150,7 +173,7 @@ public class LibreOfficeService {
             DocumentSettings settings,
             ProgressCallback progressCallback,
             String fileId,
-            ProcessRegistry processRegistry) throws ToolExecutionException {
+            ProcessRegistry processRegistry, FileFormat inputFormat) throws ToolExecutionException {
 
         Objects.requireNonNull(inputPath, "inputPath must not be null");
         Objects.requireNonNull(outputPath, "outputPath must not be null");
@@ -162,6 +185,7 @@ public class LibreOfficeService {
 
         Instant startTime = Instant.now();
         long inputSize = 0;
+        ToolProcess ownedProcess = null;
 
         try {
             inputSize = Files.size(inputPath);
@@ -175,7 +199,14 @@ public class LibreOfficeService {
         try {
             tempOutputDir = Files.createTempDirectory("libreoffice-conversion-");
 
-            FileFormat inputFormat = detectFormat(inputPath);
+            Path preparedInput = inputPath;
+            if (detectFormat(inputPath) != inputFormat) {
+                // Office containers are self-contained. Give LibreOffice the
+                // detected extension without renaming or writing beside the source.
+                Path inputDirectory = Files.createDirectory(tempOutputDir.resolve("input"));
+                preparedInput = inputDirectory.resolve("document." + inputFormat.getPrimaryExtension());
+                Files.copy(inputPath, preparedInput);
+            }
             // Text layout options are applied by Pandoc before HTML reaches this renderer.
             if (inputFormat != FileFormat.HTML && (settings.templatePath() != null
                     || settings.generateTableOfContents() || !settings.preserveFormatting()
@@ -186,7 +217,7 @@ public class LibreOfficeService {
                         ErrorCode.INVALID_SETTINGS, "libreoffice");
             }
             // Build LibreOffice command with temp directory
-            List<String> command = buildCommand(inputPath, outputPath, settings, tempOutputDir);
+            List<String> command = buildCommand(preparedInput, outputPath, settings, tempOutputDir);
             final Path finalTempOutputDir = tempOutputDir; // For cleanup in finally block
 
             logger.debug("Executing LibreOffice command: {}", String.join(" ", command));
@@ -195,12 +226,9 @@ public class LibreOfficeService {
             ProcessBuilder processBuilder = new ProcessBuilder(command);
             processBuilder.redirectErrorStream(true);
 
-            Process process = processBuilder.start();
+            ToolProcess process = ToolProcess.start(processBuilder, fileId, processRegistry);
+            ownedProcess = process;
 
-            // Register process for cancellation support
-            if (fileId != null && processRegistry != null) {
-                processRegistry.registerProcess(fileId, process);
-            }
 
             // Read output in a separate daemon thread (Requirement REQ-FL-2.2:
             // Capture tool output)
@@ -249,32 +277,31 @@ public class LibreOfficeService {
 
             outputReader.start();
 
-            // LibreOffice doesn't provide progress updates, so we simulate progress
-            Thread progressThread = simulateProgress(process, progressCallback, inputSize);
+            // The LibreOffice CLI has no measurable completion fraction.
+            if (!process.isPaused()) progressCallback.onIndeterminate();
 
             // Wait for process to complete with timeout (1 hour default)
             // Check for interruption periodically so cancellation can work
             int exitCode = -1;
             boolean finished = false;
-            long startWaitTime = System.currentTimeMillis();
+            long startWaitTime = process.activeElapsed().toMillis();
 
-            while (!finished && (System.currentTimeMillis() - startWaitTime) < PROCESS_TIMEOUT_MILLIS) {
+            while (!finished && (process.activeElapsed().toMillis() - startWaitTime) < PROCESS_TIMEOUT_MILLIS) {
                 // Check for interruption (from cancel operation)
                 if (Thread.currentThread().isInterrupted()) {
                     logger.info("LibreOffice process interrupted, destroying process");
                     process.destroyForcibly();
-                    progressThread.interrupt(); // Stop progress simulation
                     throw new InterruptedException("Conversion cancelled by user");
                 }
 
                 // Wait for process with short timeout to allow interruption checks
                 finished = process.waitFor(500, TimeUnit.MILLISECONDS);
+                if (!finished && !process.isPaused()) progressCallback.onIndeterminate();
             }
 
             if (!finished) {
                 logger.error("LibreOffice process timed out after 1 hour");
                 process.destroyForcibly();
-                progressThread.interrupt(); // Stop progress simulation
                 throw new ToolExecutionException(
                         "LibreOffice process timed out after 1 hour",
                         ErrorCode.TOOL_EXECUTION_FAILED,
@@ -286,9 +313,6 @@ public class LibreOfficeService {
 
             exitCode = process.exitValue();
 
-            // Wait for progress thread to complete its final 100% update before proceeding
-            // This ensures the completion status is set AFTER all progress updates
-            progressThread.join(1000); // Wait up to 1 second for progress thread
             // Bounded join: a grandchild inheriting the pipe would otherwise
             // block this join forever (pipe reads are not interruptible, but
             // the reader is a daemon so interrupting is best-effort).
@@ -329,7 +353,7 @@ public class LibreOfficeService {
             // Example: input "document.docx" -> output "document.pdf" (not custom name)
             // We need to find the generated file and move it to the desired output path.
             // Extensionless inputs have no '.'; fall back to the full name.
-            String inputFileName = inputPath.getFileName().toString();
+            String inputFileName = preparedInput.getFileName().toString();
             int dotIndex = inputFileName.lastIndexOf('.');
             String inputBaseName = dotIndex > 0 ? inputFileName.substring(0, dotIndex) : inputFileName;
             FileFormat outputFormat = detectFormat(outputPath);
@@ -366,6 +390,8 @@ public class LibreOfficeService {
 
             // Get output file size
             long outputSize = Files.size(outputPath);
+            if (processRegistry != null) processRegistry.awaitRunning();
+            progressCallback.onProgress(100, inputSize, 0);
 
             logger.info("LibreOffice conversion successful: {} -> {} in {}ms ({} bytes -> {} bytes)",
                     inputPath.getFileName(), outputPath.getFileName(), conversionTime.toMillis(), inputSize,
@@ -405,6 +431,7 @@ public class LibreOfficeService {
                     "Process interrupted",
                     e);
         } finally {
+            if (ownedProcess != null && ownedProcess.isAlive()) ownedProcess.destroyForcibly();
             // Unregister process
             if (fileId != null && processRegistry != null) {
                 processRegistry.unregisterProcess(fileId);
@@ -603,52 +630,6 @@ public class LibreOfficeService {
 
     private static boolean isPresentation(FileFormat format) {
         return format == FileFormat.PPT || format == FileFormat.PPTX || format == FileFormat.ODP;
-    }
-
-    /**
-     * Simulates progress updates for LibreOffice conversion.
-     * LibreOffice doesn't provide real-time progress, so we estimate based on file
-     * size and time.
-     * 
-     * @param process   running LibreOffice process
-     * @param callback  progress callback
-     * @param inputSize input file size in bytes
-     * @return the progress thread (caller must join before checking exit code)
-     */
-    private Thread simulateProgress(Process process, ProgressCallback callback, long inputSize) {
-        Thread progressThread = org.omc.util.ThreadUtils.createThreadFactory("LibreOffice-Progress")
-                .newThread(() -> {
-            try {
-                double progress = 0.0;
-                long startNanos = System.nanoTime();
-                while (process.isAlive() && progress < 100.0) {
-                    // Simulate progress: increment by 10% every 500ms
-                    progress = Math.min(progress + 10.0, 95.0); // Cap at 95% until done
-
-                    long bytesProcessed = (long) (inputSize * progress / 100.0);
-                    // Real bytes/second from elapsed wall time.
-                    double elapsedSeconds = Math.max((System.nanoTime() - startNanos) / 1_000_000_000.0, 0.001);
-                    double speed = bytesProcessed / elapsedSeconds;
-
-                    callback.onProgress(progress, bytesProcessed, speed);
-
-                    Thread.sleep(500);
-                }
-
-                // Final progress update (skipped when cancelled/timed out so a
-                // destroyed process is not reported as 100% complete)
-                if (!process.isAlive() && !Thread.currentThread().isInterrupted()) {
-                    callback.onProgress(100.0, inputSize, 0.0);
-                }
-
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                logger.trace("Progress simulation interrupted");
-            }
-        });
-
-        progressThread.start();
-        return progressThread;
     }
 
     /**

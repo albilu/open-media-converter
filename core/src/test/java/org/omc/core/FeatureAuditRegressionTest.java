@@ -13,6 +13,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import org.omc.controller.ApplicationWorkflowController;
 import org.omc.controller.SettingsManager;
 import org.omc.exception.ToolExecutionException;
 import org.omc.model.AspectRatio;
@@ -34,6 +35,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class FeatureAuditRegressionTest {
     @TempDir static Path root;
     private static DependencyFactory factory;
+    private static ApplicationWorkflowController controller;
     private static Path image;
     private static Path notes;
     private static final AtomicInteger SEQUENCE = new AtomicInteger();
@@ -41,7 +43,8 @@ class FeatureAuditRegressionTest {
     @BeforeAll
     static void prepare() throws Exception {
         factory = new DependencyFactory(root.resolve("config"));
-        factory.createApplicationController().initialize();
+        controller = factory.createApplicationController();
+        controller.initialize();
         assertNotNull(factory.getToolManager().getImageMagickService(), "Run in the prepared Docker environment");
         byte[] pixels = new byte[120 * 80 * 3];
         new Random(739).nextBytes(pixels);
@@ -132,15 +135,145 @@ class FeatureAuditRegressionTest {
     }
 
     @Test
+    void preservedOfficePdfRetainsHeaderAndFooterContent() throws Exception {
+        Path input = root.resolve("header-footer.docx");
+        try (var fixture = FeatureAuditRegressionTest.class.getResourceAsStream("/documents/header-footer.docx")) {
+            assertNotNull(fixture);
+            Files.copy(fixture, input);
+        }
+        Path pdf = successful(convert(input, document(FileFormat.PDF)));
+        String text = new String(run("pdftotext", pdf.toString(), "-"), java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(text.contains("AUDIT_HEADER_MUST_SURVIVE"), text);
+        assertTrue(text.contains("AUDIT_FOOTER_MUST_SURVIVE"), text);
+        assertTrue(text.contains("AUDIT_BODY_ABC123"), text);
+    }
+
+    @Test
+    void removedAndClearedRowsReleaseTheirStoredResults() throws Exception {
+        Path output = Files.createDirectory(root.resolve("retention-" + SEQUENCE.incrementAndGet()));
+        controller.handleSettingsSave(ConversionSettings.builder().imageSettings(ImageSettings.builder()
+                .outputFormat(FileFormat.JPEG).quality(85).build())
+                .outputDirectory(output).build().withDefaults());
+        Path other = root.resolve("retention-other.png");
+        run("convert", image.toString(), "-flop", other.toString());
+        controller.addFiles(List.of(image, other));
+        List<String> ids = controller.getFileList().stream().map(ConversionFile::id).toList();
+        assertEquals(2, ids.size(), "Both distinct files must be admitted");
+        controller.handleStartConversion();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (controller.isConversionInProgress() && System.nanoTime() < deadline) Thread.sleep(20);
+        assertFalse(controller.isConversionInProgress(), "Conversion must finish before removal");
+        for (String id : ids) successful(controller.getConversionResult(id));
+        controller.removeFiles(List.of(ids.getFirst()));
+        assertNull(controller.getConversionResult(ids.getFirst()));
+        assertNotNull(controller.getConversionResult(ids.getLast()));
+        controller.handleClearFiles();
+        assertNull(controller.getConversionResult(ids.getLast()));
+    }
+
+    @Test
+    void optimizedGifResizePreservesLogicalFrameGeometry() throws Exception {
+        Path first = root.resolve("frame-one.png"), second = root.resolve("frame-two.png");
+        run("convert", "-size", "120x80", "xc:red", "-fill", "white", "-draw", "rectangle 2,2 20,20", first.toString());
+        run("convert", "-size", "120x80", "xc:red", "-fill", "white", "-draw", "rectangle 60,30 78,48", second.toString());
+        Path input = root.resolve("optimized.gif"), reference = root.resolve("reference.gif");
+        run("convert", "-delay", "30", first.toString(), second.toString(), "-loop", "0", "-layers", "Optimize", input.toString());
+        run("convert", input.toString(), "-coalesce", "-resize", "60x40", reference.toString());
+        Path actual = successful(convert(input, ConversionSettings.builder().imageSettings(ImageSettings.builder()
+                .outputFormat(FileFormat.GIF).resolution(new Resolution(60, 40))
+                .resizeMode(org.omc.model.ResizeMode.FIT).build())));
+        assertArrayEquals(run("convert", reference.toString(), "-coalesce", "-depth", "8", "rgb:-"),
+                run("convert", actual.toString(), "-coalesce", "-depth", "8", "rgb:-"));
+        assertEquals(new String(run("identify", "-format", "%T,%D;", reference.toString())),
+                new String(run("identify", "-format", "%T,%D;", actual.toString())));
+    }
+
+    @Test
+    void pngCompressionZeroUsesTheUncompressedZlibMode() throws Exception {
+        Path output = successful(convert(image, ConversionSettings.builder().imageSettings(ImageSettings.builder()
+                .outputFormat(FileFormat.PNG).compressionLevel(0).build())));
+        byte[] png = Files.readAllBytes(output);
+        int offset = 8;
+        boolean checked = false;
+        while (offset + 12 <= png.length) {
+            int length = java.nio.ByteBuffer.wrap(png, offset, 4).getInt();
+            String type = new String(png, offset + 4, 4, java.nio.charset.StandardCharsets.US_ASCII);
+            if ("IDAT".equals(type)) {
+                assertEquals(0, png[offset + 9] & 0xc0, "Zlib compression flags must represent the fastest mode");
+                checked = true;
+                break;
+            }
+            offset += length + 12;
+        }
+        assertTrue(checked, "PNG must contain compressed image data");
+        assertArrayEquals(run("convert", image.toString(), "-depth", "8", "rgb:-"),
+                run("convert", output.toString(), "-depth", "8", "rgb:-"));
+    }
+
+    @Test
+    void detectedDocxReaderSurvivesAMisleadingTextExtension() throws Exception {
+        Path docx = successful(convert(notes, document(FileFormat.DOCX)));
+        Path renamed = Files.copy(docx, root.resolve("renamed-office.txt"));
+        assertEquals(FileFormat.DOCX, factory.getFileHandler().detectFormat(renamed));
+        Path html = successful(convert(renamed, document(FileFormat.HTML)));
+        assertTrue(Files.readString(html).contains("AuditSentinel739"));
+        assertTrue(Files.readString(html).contains("data:image/png;base64,"));
+        Path pdf = successful(convert(renamed, document(FileFormat.PDF)));
+        assertTrue(new String(run("pdftotext", pdf.toString(), "-")).contains("AuditSentinel739"));
+    }
+
+    @Test
+    void vorbisHighQualityWorksForMonoAndExceedsSmallSizeBitrate() throws Exception {
+        Path wav = root.resolve("vorbis-noise.wav");
+        run("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "anoisesrc=d=4:color=pink:seed=412", "-ar", "44100", wav.toString());
+        Path high = successful(convert(wav, ConversionSettings.builder().audioSettings(AudioSettings.builder()
+                .outputFormat(FileFormat.OGG).quality(0).bitrate(320).build())));
+        Path small = successful(convert(wav, ConversionSettings.builder().audioSettings(AudioSettings.builder()
+                .outputFormat(FileFormat.OGG).quality(7).bitrate(128).build())));
+        run("ffmpeg", "-v", "error", "-i", high.toString(), "-f", "null", "-");
+        run("ffmpeg", "-v", "error", "-i", small.toString(), "-f", "null", "-");
+        assertTrue(Files.size(high) > Files.size(small), "High Quality must not select a lower Vorbis quality");
+    }
+
+    @Test
+    void videoConversionPreservesBothAudioTracksAndSubtitleText() throws Exception {
+        Path subtitles = Files.writeString(root.resolve("tracks.srt"), "1\n00:00:00,000 --> 00:00:00,800\nTrackSentinel\n");
+        Path input = root.resolve("tracks.mkv");
+        run("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=red:size=80x40:duration=1",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-f", "lavfi", "-i", "sine=frequency=880:duration=1",
+                "-i", subtitles.toString(), "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:s",
+                "-metadata:s:a:0", "language=eng", "-metadata:s:a:1", "language=fra",
+                "-c:v", "libx264", "-c:a", "aac", "-c:s", "srt", input.toString());
+        Path result = successful(convert(input, ConversionSettings.builder()
+                .videoSettings(VideoSettings.builder().outputFormat(FileFormat.MKV).build())));
+        String audio = new String(run("ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+                "stream=index:stream_tags=language", "-of", "json", result.toString()));
+        var streams = new com.fasterxml.jackson.databind.ObjectMapper().readTree(audio).path("streams");
+        assertEquals(2, streams.size());
+        assertEquals("eng", streams.get(0).path("tags").path("language").asText());
+        assertEquals("fra", streams.get(1).path("tags").path("language").asText());
+        assertTrue(new String(run("ffmpeg", "-v", "error", "-i", result.toString(), "-map", "0:s:0", "-f", "srt", "-")).contains("TrackSentinel"));
+    }
+
+    @Test
     void plainTextPunctuationIsLiteralInHtml() throws Exception {
         Path text = root.resolve("literal.txt");
-        Files.writeString(text, "# Literal heading\n**literal asterisks** and [link](https://example.invalid)\n<tag> & text\n");
+        String literal = "# Literal heading\n**literal asterisks** and [link](https://example.invalid)\n  <tag> & text\n\nlast line\n";
+        Files.writeString(text, literal);
         String html = Files.readString(successful(convert(text, document(FileFormat.HTML))));
         assertTrue(html.contains("# Literal heading"));
         assertTrue(html.contains("**literal asterisks**"));
         assertTrue(html.contains("[link](https://example.invalid)"));
         assertTrue(html.contains("&lt;tag&gt; &amp; text"));
         assertFalse(html.contains("<strong>literal asterisks</strong>"));
+        assertTrue(html.contains("<pre><code>"), "Literal whitespace needs a preformatted output block");
+        assertTrue(html.contains("\n  &lt;tag&gt; &amp; text\n\nlast line"));
+        Path roundTrip = successful(convert(text, document(FileFormat.TXT)));
+        assertArrayEquals(Files.readAllBytes(text), Files.readAllBytes(roundTrip));
+        Path pdf = successful(convert(text, document(FileFormat.PDF)));
+        String rendered = new String(run("pdftotext", "-layout", pdf.toString(), "-"));
+        assertTrue(rendered.lines().filter(line -> !line.isBlank()).count() >= 4, rendered);
+        assertTrue(rendered.contains("\n  <tag> & text\n"), "PDF must retain the two-character indentation: " + rendered);
     }
 
     @Test

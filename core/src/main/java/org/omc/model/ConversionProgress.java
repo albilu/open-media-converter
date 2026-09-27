@@ -24,7 +24,32 @@ public final class ConversionProgress {
     private final Duration elapsedTime;
     private final Duration estimatedTimeRemaining;
     private final double bytesPerSecond;
+    private final boolean indeterminate;
+    private final boolean paused;
 
+    /** Creates progress with a known completion fraction. */
+    public ConversionProgress(
+            String fileId, long totalBytes, long processedBytes, int percentage,
+            Instant startTime, Duration elapsedTime, Duration estimatedTimeRemaining, double bytesPerSecond) {
+        this(fileId, totalBytes, processedBytes, percentage, startTime, elapsedTime,
+                estimatedTimeRemaining, bytesPerSecond, false);
+    }
+
+    /** Creates progress, including whether its completion fraction is unknown. */
+    public ConversionProgress(
+            String fileId,
+            long totalBytes,
+            long processedBytes,
+            int percentage,
+            Instant startTime,
+            Duration elapsedTime,
+            Duration estimatedTimeRemaining,
+            double bytesPerSecond,
+            boolean indeterminate) {
+        this(fileId, totalBytes, processedBytes, percentage, startTime, elapsedTime, estimatedTimeRemaining, bytesPerSecond, indeterminate, false);
+    }
+
+    /** Creates progress including an explicit paused state. */
     @JsonCreator
     public ConversionProgress(
             @JsonProperty("fileId") String fileId,
@@ -34,7 +59,9 @@ public final class ConversionProgress {
             @JsonProperty("startTime") Instant startTime,
             @JsonProperty("elapsedTime") Duration elapsedTime,
             @JsonProperty("estimatedTimeRemaining") Duration estimatedTimeRemaining,
-            @JsonProperty("bytesPerSecond") double bytesPerSecond) {
+            @JsonProperty("bytesPerSecond") double bytesPerSecond,
+            @JsonProperty("indeterminate") boolean indeterminate,
+            @JsonProperty("paused") boolean paused) {
         this.fileId = fileId;
         this.totalBytes = totalBytes;
         this.processedBytes = processedBytes;
@@ -43,6 +70,8 @@ public final class ConversionProgress {
         this.elapsedTime = elapsedTime;
         this.estimatedTimeRemaining = estimatedTimeRemaining;
         this.bytesPerSecond = bytesPerSecond;
+        this.indeterminate = indeterminate;
+        this.paused = paused;
     }
 
     /**
@@ -127,6 +156,43 @@ public final class ConversionProgress {
                 speed);
     }
 
+    /**
+     * Records activity when the tool cannot measure its completion fraction.
+     * Unknown work contributes no invented bytes, speed or ETA.
+     *
+     * @return progress with an updated elapsed time and unknown completion fraction
+     */
+    public ConversionProgress updateIndeterminate() {
+        return new ConversionProgress(fileId, totalBytes, 0, 0, startTime,
+                Duration.between(startTime, Instant.now()), Duration.ZERO, 0, true);
+    }
+
+    /** Returns a copy using active time, excluding suspended intervals. */
+    public ConversionProgress withTiming(Duration elapsed, boolean paused) {
+        double seconds = elapsed.toNanos() / 1_000_000_000.0;
+        double speed = !indeterminate && seconds > 0 ? processedBytes / seconds : 0;
+        Duration eta = speed > 0 ? Duration.ofSeconds((long) (Math.max(0, totalBytes - processedBytes) / speed)) : Duration.ZERO;
+        return new ConversionProgress(fileId, totalBytes, processedBytes, percentage, startTime, elapsed, eta, speed, indeterminate, paused);
+    }
+
+    /** Freezes terminal progress; only successful output receives full completion. */
+    public ConversionProgress finish(boolean successful, Duration elapsed) {
+        long bytes = successful ? totalBytes : processedBytes;
+        double seconds = elapsed.toNanos() / 1_000_000_000.0;
+        return new ConversionProgress(fileId, totalBytes, bytes, successful ? 100 : percentage,
+                startTime, elapsed, Duration.ZERO, seconds > 0 ? bytes / seconds : 0, false, false);
+    }
+
+    /** Returns whether progress is frozen by a user or disk-space pause. */
+    @JsonProperty("paused")
+    public boolean paused() { return paused; }
+
+    /** @return true when the conversion's completion fraction is unknown */
+    @JsonProperty("indeterminate")
+    public boolean indeterminate() {
+        return indeterminate;
+    }
+
     @JsonProperty("fileId")
     public String fileId() {
         return fileId;
@@ -172,13 +238,15 @@ public final class ConversionProgress {
      */
     @JsonIgnore
     public boolean isComplete() {
-        return processedBytes >= totalBytes && totalBytes > 0;
+        return !indeterminate && processedBytes >= totalBytes && totalBytes > 0;
     }
 
     /**
      * Formats the speed as a human-readable string.
      */
     public String formatSpeed() {
+        if (paused) return "Paused";
+        if (indeterminate) return "Unknown";
         if (bytesPerSecond < 1024) {
             return String.format(java.util.Locale.US, "%.1f B/s", bytesPerSecond);
         } else if (bytesPerSecond < 1024 * 1024) {
@@ -194,7 +262,8 @@ public final class ConversionProgress {
      * Formats the ETA as a human-readable string.
      */
     public String formatEta() {
-        if (estimatedTimeRemaining.isZero() || estimatedTimeRemaining.isNegative()) {
+        if (paused) return "Paused";
+        if (indeterminate || estimatedTimeRemaining.isZero() || estimatedTimeRemaining.isNegative()) {
             return "Unknown";
         }
 
@@ -222,6 +291,8 @@ public final class ConversionProgress {
         return totalBytes == that.totalBytes &&
                 processedBytes == that.processedBytes &&
                 percentage == that.percentage &&
+                indeterminate == that.indeterminate &&
+                paused == that.paused &&
                 Double.compare(that.bytesPerSecond, bytesPerSecond) == 0 &&
                 Objects.equals(fileId, that.fileId) &&
                 Objects.equals(startTime, that.startTime) &&
@@ -232,7 +303,7 @@ public final class ConversionProgress {
     @Override
     public int hashCode() {
         return Objects.hash(fileId, totalBytes, processedBytes, percentage,
-                startTime, elapsedTime, estimatedTimeRemaining, bytesPerSecond);
+                startTime, elapsedTime, estimatedTimeRemaining, bytesPerSecond, indeterminate, paused);
     }
 
     @Override

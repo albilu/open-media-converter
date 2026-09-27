@@ -279,24 +279,24 @@ class ImageMagickServiceTest {
     }
 
     @Test
-    void testBuildImageCommand_CompressionZero_NoCompressionParameter() {
+    void testBuildImageCommand_CompressionZero_ExplicitFastestLevel() {
         ImageSettings settings = ImageSettings.builder()
                 .compressionLevel(0)
                 .build();
 
         List<String> command = service.buildImageCommand(inputPath, outputPathPng, settings);
 
-        assertFalse(command.contains("-compress"));
+        assertTrue(command.contains("png:compression-level=0"));
     }
 
     @Test
-    void testBuildImageCommand_CompressionNotSet_NoCompressionParameter() {
+    void testBuildImageCommand_CompressionNotSet_UsesDefaultZero() {
         ImageSettings settings = ImageSettings.builder()
                 .build();
 
         List<String> command = service.buildImageCommand(inputPath, outputPathPng, settings);
 
-        assertFalse(command.contains("-compress"));
+        assertTrue(command.contains("png:compression-level=0"));
     }
 
     // Combined settings tests
@@ -598,8 +598,8 @@ class ImageMagickServiceTest {
         assertTrue(result.success());
         assertFalse(progressUpdates.isEmpty());
 
-        // Should have at least 0% and 100% progress
-        assertTrue(progressUpdates.contains(0.0), "Should report 0% at start");
+        // Overall progress stays unknown until every operation succeeds.
+        assertTrue(progressUpdates.contains(ProgressCallback.INDETERMINATE), "Should report unknown progress at start");
         assertTrue(progressUpdates.contains(100.0), "Should report 100% at completion");
     }
 
@@ -1125,50 +1125,18 @@ class ImageMagickServiceTest {
         assertTrue(result.success(), "Conversion should succeed");
         assertTrue(Files.exists(outputPath), "Output file should exist");
 
-        // Verify progress updates
-        assertFalse(progressUpdates.isEmpty(), "Should have progress updates");
-        assertTrue(progressUpdates.contains(0.0), "Should report 0% at start");
-        assertTrue(progressUpdates.contains(100.0), "Should report 100% at completion");
-
-        // Verify progress is monotonically increasing
-        for (int i = 1; i < progressUpdates.size(); i++) {
-            assertTrue(progressUpdates.get(i) >= progressUpdates.get(i - 1),
-                    "Progress should be monotonically increasing");
+        assertTrue(progressUpdates.size() >= 2, "Report activity and validated completion");
+        assertEquals(100.0, progressUpdates.getLast());
+        assertTrue(progressUpdates.subList(0, progressUpdates.size() - 1).stream()
+                .allMatch(p -> p == ProgressCallback.INDETERMINATE),
+                "Per-operation percentages must never be presented as overall completion: " + progressUpdates);
+        // Initial and terminal events are immediate; intermediate heartbeats
+        // must respect the two-per-second UI budget.
+        for (int i = 1; i < timestamps.size() - 1; i++) {
+            assertTrue(timestamps.get(i) - timestamps.get(i - 1) >= 490,
+                    "Activity updates must be at least 500ms apart (10ms clock tolerance)");
         }
 
-        // Check for intermediate updates (but don't fail if conversion was too fast)
-        int intermediateUpdates = 0;
-        for (double progress : progressUpdates) {
-            if (progress > 0.0 && progress < 100.0) {
-                intermediateUpdates++;
-            }
-        }
-
-        // NFR-IMG-1: Throttling at 500ms means fast conversions may only show 0% and
-        // 100%
-        // This is correct behavior - the service still parses all ImageMagick progress
-        // internally
-        if (conversionDuration < 500) {
-            // Fast conversion: 0% and 100% only is acceptable
-            assertTrue(progressUpdates.size() >= 2,
-                    "Fast conversion (<500ms) should have at least start and end progress. " +
-                            "Duration: " + conversionDuration + "ms, Updates: " + progressUpdates);
-        } else {
-            // Slower conversion: should have intermediate updates
-            assertTrue(intermediateUpdates > 0,
-                    "Conversion took " + conversionDuration + "ms, should have intermediate progress. " +
-                            "Got " + progressUpdates.size() + " total updates: " + progressUpdates);
-
-            // Verify throttling intervals (NFR-IMG-1: max 2 updates/second = 500ms
-            // intervals)
-            if (timestamps.size() > 2) {
-                for (int i = 2; i < timestamps.size(); i++) {
-                    long timeDiff = timestamps.get(i) - timestamps.get(i - 1);
-                    // Verify intervals are reasonably close to 500ms (allowing 100ms tolerance)
-                    // Some variation is expected due to system scheduling and I/O timing
-                }
-            }
-        }
     }
 
     // ========================================

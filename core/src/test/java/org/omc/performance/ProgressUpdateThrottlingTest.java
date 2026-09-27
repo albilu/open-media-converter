@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assumptions.*;
  * Tests REQ-IMG-4, NFR-IMG-1: ImageMagick progress throttling
  * - ImageMagick progress updates should be throttled to max 2 updates/second
  * (500ms interval)
- * - Simulated progress (0%, 50%, 100%) should be properly throttled
+ * - Simulated progress (unknown activity, then 100%) should be properly throttled
  */
 class ProgressUpdateThrottlingTest {
 
@@ -469,7 +469,7 @@ class ProgressUpdateThrottlingTest {
      * prevent UI flooding
      * 
      * ImageMagick doesn't provide real-time progress, so we use simulated progress
-     * (0%, 50%, 100%).
+     * (unknown activity, then 100%).
      * This test verifies that progress callbacks respect the 500ms minimum
      * interval.
      */
@@ -526,10 +526,10 @@ class ProgressUpdateThrottlingTest {
 
         // Verify we received progress updates (at least 0%, 50%, 100%)
         assertTrue(progressCallbackCount.get() >= 2,
-                "Should receive at least 2 progress updates (0% start, 100% end)");
+                "Should receive at least 2 progress updates (unknown start, 100% end)");
 
         // Verify we received initial and final progress
-        assertTrue(progressPercentages.contains(0.0), "Should receive 0% progress");
+        assertTrue(progressPercentages.contains(ProgressCallback.INDETERMINATE), "Should report unknown progress");
         assertTrue(progressPercentages.contains(100.0), "Should receive 100% progress");
 
         // Verify throttling: calculate intervals between progress updates
@@ -578,7 +578,7 @@ class ProgressUpdateThrottlingTest {
         } else {
             System.out.printf("Conversion too fast (%d ms) to test throttling - only start/end updates expected%n",
                     conversionDuration);
-            // For fast conversions, we expect minimal updates (0% start, 100% end)
+            // For fast conversions, we expect minimal updates (unknown start, 100% end)
             assertTrue(progressCallbackCount.get() <= 3,
                     String.format("Fast conversion should have ≤3 updates, got %d", progressCallbackCount.get()));
         }

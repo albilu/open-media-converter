@@ -59,11 +59,15 @@ for format in deb rpm arch; do
     test -s "$root/usr/share/doc/open-media-converter/copyright"
     test -s "$root/usr/share/licenses/open-media-converter/LICENSE"
     test -s "$root/usr/share/applications/open-media-converter.desktop"
+    test -s "$root/usr/share/applications/org.omc.OpenMediaConverter.desktop"
+    grep -qx 'NoDisplay=true' "$root/usr/share/applications/org.omc.OpenMediaConverter.desktop"
     grep -qx 'Exec=/usr/bin/open-media-converter %F' "$root/usr/share/applications/open-media-converter.desktop"
     grep -qx 'Icon=open-media-converter' "$root/usr/share/applications/open-media-converter.desktop"
     grep -qx 'StartupWMClass=open-media-converter' "$root/usr/share/applications/open-media-converter.desktop"
     test -s "$root/usr/share/metainfo/open-media-converter.metainfo.xml"
     test -s "$root/usr/share/man/man1/open-media-converter.1"
+    # Native packages must not overwrite the shared system icon-theme index.
+    test ! -e "$root/usr/share/icons/hicolor/index.theme"
     test -s "$root/usr/share/icons/hicolor/scalable/apps/open-media-converter.svg"
     test -s "$root/usr/share/icons/hicolor/256x256/apps/open-media-converter.png"
     (cd "$root" && find opt usr -type f -print0 | sort -z | xargs -0 sha256sum) > "$CHECK_ROOT/$format.sha256"
@@ -146,50 +150,5 @@ if [ -s "$APPIMAGE" ]; then
     test -x "$CHECK_ROOT/squashfs-root/opt/open-media-converter/runtime/bin/java"
     cmp "$APP_ROOT/omc.jar" "$CHECK_ROOT/squashfs-root/opt/open-media-converter/omc.jar"
     echo 'AppImage payload matches the staged application'
-fi
-# Flatpak bundle: install into a throwaway user installation and smoke it.
-FLATPAK="$PACKAGE_ROOT/Open_Media_Converter-${VERSION}-x86_64.flatpak"
-if [ -s "$FLATPAK" ]; then
-    FLATPAK_ID=io.github.albilu.OpenMediaConverter
-    # flatpak's parental-controls lookup targets the system bus
-    # (AccountsService); bare containers have none — alias it to a throwaway
-    # session bus so the lookup finds no service and proceeds
-    flatpak --user remote-add --if-not-exists flathub \
-        https://flathub.org/repo/flathub.flatpakrepo >/dev/null
-    eval "$(dbus-launch --sh-syntax)"
-    export DBUS_SYSTEM_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS"
-    # Remove any leftover installation from a previous, interrupted verify run
-    flatpak --user uninstall -y --noninteractive "$FLATPAK_ID" >/dev/null 2>&1 || true
-    flatpak --user install -y --noninteractive "$FLATPAK" >/dev/null
-    flatpak --user info "$FLATPAK_ID" >/dev/null
-    FP_FILES="$HOME/.local/share/flatpak/app/$FLATPAK_ID/current/active/files"
-    test -x "$FP_FILES/bin/open-media-converter"
-    test -s "$FP_FILES/open-media-converter/omc.jar"
-    test -x "$FP_FILES/open-media-converter/runtime/bin/java"
-    test -s "$FP_FILES/share/applications/$FLATPAK_ID.desktop"
-    test -s "$FP_FILES/share/metainfo/$FLATPAK_ID.metainfo.xml"
-    test -s "$FP_FILES/share/icons/hicolor/scalable/apps/$FLATPAK_ID.svg"
-    test -x "$FP_FILES/bin/convert"
-    cmp "$APP_ROOT/omc.jar" "$FP_FILES/open-media-converter/omc.jar"
-    appstreamcli validate --no-net --explain \
-        "$FP_FILES/share/metainfo/$FLATPAK_ID.metainfo.xml" 2>&1 | tee "$CHECK_ROOT/appstream.log" || true
-    if grep -Eq 'E: |error:' "$CHECK_ROOT/appstream.log"; then
-        echo 'AppStream validation reported errors' >&2; exit 1
-    fi
-    # No XDG overrides here: the flatpak sandbox hides /tmp and provides its
-    # own writable per-app data directories under ~/.var/app/<id>/.
-    set +e
-    xvfb-run -a timeout -k 10s 25s flatpak --user run "$FLATPAK_ID" \
-        > "$CHECK_ROOT/flatpak-launcher.log" 2>&1
-    fp_status=$?
-    set -e
-    cat "$CHECK_ROOT/flatpak-launcher.log"
-    [[ "$fp_status" == 124 ]]
-    if grep -Eq 'Startup failed|NoClassDefFoundError|NoSuchMethodError' "$CHECK_ROOT/flatpak-launcher.log"; then
-        exit 1
-    fi
-    flatpak --user uninstall -y --noninteractive "$FLATPAK_ID" >/dev/null
-    kill "${DBUS_SESSION_BUS_PID:-}" 2>/dev/null || true
-    echo 'Flatpak bundle installs and launches'
 fi
 echo 'All package formats and the bundled launcher passed'

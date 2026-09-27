@@ -23,7 +23,8 @@ import org.slf4j.LoggerFactory;
 /**
  * Thread-safe progress tracking engine for conversions.
  * Tracks individual file progress and aggregates batch progress.
- * Uses moving averages for accurate time estimation.
+ * Estimates remaining time from elapsed time and processed input bytes.
+ * Suppresses speed and ETA when a tool cannot measure progress.
  * Implements progress update throttling to prevent UI flickering.
  * Requirement REQ-004.3: Progress tracking and reporting.
  * Requirement NFR-FL-1: Performance - smooth UI updates without flickering.
@@ -51,6 +52,10 @@ public class ProgressEngine {
     // Batch tracking (volatile: written on the submitting thread, read on
     // worker threads via getBatchProgress)
     private volatile Instant batchStartTime;
+    private ActiveTime batchClock = new ActiveTime();
+    private final Map<String, ActiveTime> clocks = new ConcurrentHashMap<>();
+    private boolean paused;
+    private final Object stateLock = new Object();
     private volatile int totalFiles;
     private volatile long totalBytes;
 
@@ -95,31 +100,36 @@ public class ProgressEngine {
      * @param fileSizes map of file IDs to their sizes in bytes
      */
     public void startBatch(List<String> fileIds, Map<String, Long> fileSizes) {
-        Objects.requireNonNull(fileIds, "File IDs cannot be null");
-        Objects.requireNonNull(fileSizes, "File sizes cannot be null");
+        synchronized (stateLock) {
+            Objects.requireNonNull(fileIds, "File IDs cannot be null");
+            Objects.requireNonNull(fileSizes, "File sizes cannot be null");
 
-        // Clear previous state
-        progressMap.clear();
-        statusMap.clear();
-        fileSizeMap.clear();
-        lastNotificationTimeMap.clear();
+            // Clear previous state
+            progressMap.clear();
+            clocks.clear();
+            batchClock = new ActiveTime();
+            paused = false;
+            statusMap.clear();
+            fileSizeMap.clear();
+            lastNotificationTimeMap.clear();
 
-        // Initialize batch tracking
-        this.batchStartTime = Instant.now();
-        this.totalFiles = fileIds.size();
-        this.totalBytes = fileSizes.values().stream().mapToLong(Long::longValue).sum();
+            // Initialize batch tracking
+            this.batchStartTime = Instant.now();
+            this.totalFiles = fileIds.size();
+            this.totalBytes = fileSizes.values().stream().mapToLong(Long::longValue).sum();
 
-        // Initialize file sizes and statuses
-        for (String fileId : fileIds) {
-            long fileSize = fileSizes.getOrDefault(fileId, 0L);
-            fileSizeMap.put(fileId, fileSize);
-            statusMap.put(fileId, ConversionStatus.PENDING);
+            // Initialize file sizes and statuses
+            for (String fileId : fileIds) {
+                long fileSize = fileSizes.getOrDefault(fileId, 0L);
+                fileSizeMap.put(fileId, fileSize);
+                statusMap.put(fileId, ConversionStatus.PENDING);
+            }
+
+            logger.info("Started batch tracking: {} files, {} total bytes", totalFiles, totalBytes);
+
+            // Notify listeners of initial batch progress (forced: baseline state)
+            notifyBatchProgress(true);
         }
-
-        logger.info("Started batch tracking: {} files, {} total bytes", totalFiles, totalBytes);
-
-        // Notify listeners of initial batch progress (forced: baseline state)
-        notifyBatchProgress(true);
     }
 
     /**
@@ -130,23 +140,28 @@ public class ProgressEngine {
      * @param totalBytes the total size of the file in bytes
      */
     public void startTracking(String fileId, long totalBytes) {
-        Objects.requireNonNull(fileId, "File ID cannot be null");
-        if (totalBytes < 0) {
-            throw new IllegalArgumentException("Total bytes cannot be negative");
+        synchronized (stateLock) {
+            Objects.requireNonNull(fileId, "File ID cannot be null");
+            if (totalBytes < 0) {
+                throw new IllegalArgumentException("Total bytes cannot be negative");
+            }
+
+            ActiveTime clock = new ActiveTime();
+            if (paused) clock.pause();
+            clocks.put(fileId, clock);
+            ConversionProgress progress = ConversionProgress.initial(fileId, totalBytes).withTiming(clock.elapsed(), paused);
+            progressMap.put(fileId, progress);
+            statusMap.put(fileId, ConversionStatus.IN_PROGRESS);
+
+            // Store file size if not already stored
+            fileSizeMap.putIfAbsent(fileId, totalBytes);
+
+            logger.debug("Started tracking file: {} ({} bytes)", fileId, totalBytes);
+
+            // Notify listeners (force notification for start event)
+            notifyProgressListeners(progress, true);
+            notifyBatchProgress();
         }
-
-        ConversionProgress progress = ConversionProgress.initial(fileId, totalBytes);
-        progressMap.put(fileId, progress);
-        statusMap.put(fileId, ConversionStatus.IN_PROGRESS);
-
-        // Store file size if not already stored
-        fileSizeMap.putIfAbsent(fileId, totalBytes);
-
-        logger.debug("Started tracking file: {} ({} bytes)", fileId, totalBytes);
-
-        // Notify listeners (force notification for start event)
-        notifyProgressListeners(progress, true);
-        notifyBatchProgress();
     }
 
     /**
@@ -157,27 +172,31 @@ public class ProgressEngine {
      * @param processedBytes the number of bytes processed so far
      */
     public void updateProgress(String fileId, long processedBytes) {
-        Objects.requireNonNull(fileId, "File ID cannot be null");
-        if (processedBytes < 0) {
-            logger.warn("Ignoring negative processedBytes for file: {}", fileId);
-            return;
+        synchronized (stateLock) {
+            Objects.requireNonNull(fileId, "File ID cannot be null");
+            if (paused || statusMap.get(fileId) != ConversionStatus.IN_PROGRESS) return;
+            if (processedBytes < 0) {
+                logger.warn("Ignoring negative processedBytes for file: {}", fileId);
+                return;
+            }
+
+            ConversionProgress currentProgress = progressMap.get(fileId);
+            if (currentProgress == null) {
+                logger.warn("No progress tracking found for file: {}", fileId);
+                return;
+            }
+
+            // Update progress with new processed bytes
+            ConversionProgress updatedProgress = currentProgress.update(Math.min(processedBytes, Math.max(0, currentProgress.totalBytes() - 1)))
+                    .withTiming(clocks.get(fileId).elapsed(), false);
+            progressMap.put(fileId, updatedProgress);
+
+            logger.trace("Updated progress for file: {} - {}%", fileId, updatedProgress.percentage());
+
+            // Notify listeners (throttled)
+            notifyProgressListeners(updatedProgress, false);
+            notifyBatchProgress();
         }
-
-        ConversionProgress currentProgress = progressMap.get(fileId);
-        if (currentProgress == null) {
-            logger.warn("No progress tracking found for file: {}", fileId);
-            return;
-        }
-
-        // Update progress with new processed bytes
-        ConversionProgress updatedProgress = currentProgress.update(processedBytes);
-        progressMap.put(fileId, updatedProgress);
-
-        logger.trace("Updated progress for file: {} - {}%", fileId, updatedProgress.percentage());
-
-        // Notify listeners (throttled)
-        notifyProgressListeners(updatedProgress, false);
-        notifyBatchProgress();
     }
 
     /**
@@ -190,28 +209,50 @@ public class ProgressEngine {
      * @param percentage the completion percentage (0.0 to 100.0)
      */
     public void updateProgressWithPercentage(String fileId, double percentage) {
-        Objects.requireNonNull(fileId, "File ID cannot be null");
-        if (percentage < 0 || percentage > 100) {
-            logger.warn("Ignoring invalid percentage {} for file: {}", percentage, fileId);
-            return;
+        synchronized (stateLock) {
+            Objects.requireNonNull(fileId, "File ID cannot be null");
+            if (paused || statusMap.get(fileId) != ConversionStatus.IN_PROGRESS) return;
+            if (!Double.isFinite(percentage) || percentage < 0 || percentage > 100) {
+                logger.warn("Ignoring invalid percentage {} for file: {}", percentage, fileId);
+                return;
+            }
+
+            ConversionProgress currentProgress = progressMap.get(fileId);
+            if (currentProgress == null) {
+                logger.warn("No progress tracking found for file: {}", fileId);
+                return;
+            }
+
+            // Update progress with direct percentage
+            ConversionProgress updatedProgress = currentProgress.updateWithPercentage(Math.min(99, percentage))
+                    .withTiming(clocks.get(fileId).elapsed(), false);
+            progressMap.put(fileId, updatedProgress);
+
+            logger.debug("Updated progress for file: {} - {}% (direct percentage update)",
+                    fileId, String.format(java.util.Locale.US, "%.2f", percentage));
+
+            // Notify listeners (throttled for intermediate updates)
+            notifyProgressListeners(updatedProgress, false);
+            notifyBatchProgress();
         }
+    }
 
-        ConversionProgress currentProgress = progressMap.get(fileId);
-        if (currentProgress == null) {
-            logger.warn("No progress tracking found for file: {}", fileId);
-            return;
+    /**
+     * Records activity from a tool that cannot measure its completion fraction.
+     *
+     * @param fileId the file identifier
+     */
+    public void updateIndeterminateProgress(String fileId) {
+        synchronized (stateLock) {
+            Objects.requireNonNull(fileId, "File ID cannot be null");
+            if (paused || statusMap.get(fileId) != ConversionStatus.IN_PROGRESS) return;
+            ConversionProgress currentProgress = progressMap.get(fileId);
+            if (currentProgress == null || statusMap.get(fileId) != ConversionStatus.IN_PROGRESS) return;
+            ConversionProgress updated = currentProgress.updateIndeterminate().withTiming(clocks.get(fileId).elapsed(), false);
+            progressMap.put(fileId, updated);
+            notifyProgressListeners(updated, false);
+            notifyBatchProgress();
         }
-
-        // Update progress with direct percentage
-        ConversionProgress updatedProgress = currentProgress.updateWithPercentage(percentage);
-        progressMap.put(fileId, updatedProgress);
-
-        logger.debug("Updated progress for file: {} - {}% (direct percentage update)",
-                fileId, String.format(java.util.Locale.US, "%.2f", percentage));
-
-        // Notify listeners (throttled for intermediate updates)
-        notifyProgressListeners(updatedProgress, false);
-        notifyBatchProgress();
     }
 
     /**
@@ -222,32 +263,34 @@ public class ProgressEngine {
      * @param result the conversion result
      */
     public void completeTracking(String fileId, ConversionResult result) {
-        Objects.requireNonNull(fileId, "File ID cannot be null");
-        Objects.requireNonNull(result, "Result cannot be null");
+        synchronized (stateLock) {
+            Objects.requireNonNull(fileId, "File ID cannot be null");
+            Objects.requireNonNull(result, "Result cannot be null");
 
-        ConversionProgress currentProgress = progressMap.get(fileId);
-        if (currentProgress == null) {
-            currentProgress = ConversionProgress.initial(fileId, fileSizeMap.getOrDefault(fileId, result.inputSize()));
+            ConversionProgress currentProgress = progressMap.get(fileId);
+            if (currentProgress == null) {
+                currentProgress = ConversionProgress.initial(fileId, fileSizeMap.getOrDefault(fileId, result.inputSize()));
+            }
+
+            ActiveTime clock = clocks.get(fileId);
+            if (clock != null) clock.pause();
+            // Only successfully published output earns 100%. Failure retains the
+            // last measured fraction and never invents completion.
+            ConversionProgress completedProgress = currentProgress.finish(result.success(),
+                    clock == null ? currentProgress.elapsedTime() : clock.elapsed());
+            progressMap.put(fileId, completedProgress);
+
+            // Update status based on result
+            ConversionStatus status = result.isCancelled() ? ConversionStatus.CANCELLED
+                    : result.success() ? ConversionStatus.COMPLETED : ConversionStatus.FAILED;
+            statusMap.put(fileId, status);
+
+            logger.debug("Completed tracking for file: {} - {}", fileId, status);
+
+            // Notify listeners (force notification for completion event)
+            notifyProgressListeners(completedProgress, true);
+            notifyBatchProgress(true);
         }
-
-        // Update to 100% complete. NOTE: this is deliberate for ALL terminal
-        // states including FAILED/CANCELLED (test contract:
-        // testCompleteTracking_Failure_UpdatesToComplete): the per-file bar is
-        // terminal, and batch speed/ETA derive from status counts, not from
-        // reinterpreting these bytes. Do not "fix" to partial progress.
-        ConversionProgress completedProgress = currentProgress.update(currentProgress.totalBytes());
-        progressMap.put(fileId, completedProgress);
-
-        // Update status based on result
-        ConversionStatus status = result.isCancelled() ? ConversionStatus.CANCELLED
-                : result.success() ? ConversionStatus.COMPLETED : ConversionStatus.FAILED;
-        statusMap.put(fileId, status);
-
-        logger.debug("Completed tracking for file: {} - {}", fileId, status);
-
-        // Notify listeners (force notification for completion event)
-        notifyProgressListeners(completedProgress, true);
-        notifyBatchProgress(true);
     }
 
     /**
@@ -263,21 +306,24 @@ public class ProgressEngine {
      * @param fileId the file identifier
      */
     public void cancelTracking(String fileId) {
-        Objects.requireNonNull(fileId, "File ID cannot be null");
+        synchronized (stateLock) {
+            Objects.requireNonNull(fileId, "File ID cannot be null");
 
-        statusMap.put(fileId, ConversionStatus.CANCELLED);
-        ConversionProgress frozen = progressMap.get(fileId);
-        if (frozen == null) {
-            frozen = ConversionProgress.initial(fileId, fileSizeMap.getOrDefault(fileId, 0L));
+            statusMap.put(fileId, ConversionStatus.CANCELLED);
+            ConversionProgress frozen = progressMap.getOrDefault(fileId,
+                    ConversionProgress.initial(fileId, fileSizeMap.getOrDefault(fileId, 0L)));
+            ActiveTime clock = clocks.get(fileId);
+            if (clock != null) clock.pause();
+            frozen = frozen.finish(false, clock == null ? frozen.elapsedTime() : clock.elapsed());
             progressMap.put(fileId, frozen);
+
+            logger.debug("Cancelled tracking for file: {}", fileId);
+
+            // Forced per-file event so the row leaves PENDING/IN_PROGRESS.
+            notifyProgressListeners(frozen, true);
+            // Batch completion sides of a cancel must always be delivered.
+            notifyBatchProgress(true);
         }
-
-        logger.debug("Cancelled tracking for file: {}", fileId);
-
-        // Forced per-file event so the row leaves PENDING/IN_PROGRESS.
-        notifyProgressListeners(frozen, true);
-        // Batch completion sides of a cancel must always be delivered.
-        notifyBatchProgress(true);
     }
 
     /**
@@ -299,44 +345,71 @@ public class ProgressEngine {
      * @return the batch progress
      */
     public BatchProgress getBatchProgress() {
-        if (batchStartTime == null) {
-            // No batch started yet
-            return BatchProgress.initial(0, 0);
-        }
-
-        // Count files by status
-        int completedFiles = 0;
-        int failedFiles = 0;
-        int inProgressFiles = 0;
-        int cancelledFiles = 0;
-
-        for (ConversionStatus status : statusMap.values()) {
-            switch (status) {
-                case COMPLETED -> completedFiles++;
-                case FAILED -> failedFiles++;
-                case IN_PROGRESS -> inProgressFiles++;
-                case PENDING -> {
-                } // Pending files not counted as in progress
-                case CANCELLED -> cancelledFiles++;
+        synchronized (stateLock) {
+            if (batchStartTime == null) {
+                // No batch started yet
+                return BatchProgress.initial(0, 0);
             }
-        }
 
-        // Calculate total processed bytes across all files
-        long processedBytes = 0;
-        for (ConversionProgress progress : progressMap.values()) {
-            processedBytes += progress.processedBytes();
-        }
+            // Count files by status
+            int completedFiles = 0;
+            int failedFiles = 0;
+            int inProgressFiles = 0;
+            int cancelledFiles = 0;
 
-        // Build batch progress (cancelled files are terminal, not pending)
-        return BatchProgress.update(
-                totalFiles,
-                completedFiles,
-                failedFiles,
-                inProgressFiles,
-                cancelledFiles,
-                totalBytes,
-                processedBytes,
-                batchStartTime);
+            for (ConversionStatus status : statusMap.values()) {
+                switch (status) {
+                    case COMPLETED -> completedFiles++;
+                    case FAILED -> failedFiles++;
+                    case IN_PROGRESS -> inProgressFiles++;
+                    case PENDING -> {
+                    } // Pending files not counted as in progress
+                    case CANCELLED -> cancelledFiles++;
+                }
+            }
+
+            // Calculate total processed bytes across all files
+            long processedBytes = 0;
+            boolean indeterminate = false;
+            for (ConversionProgress progress : progressMap.values()) {
+                processedBytes += progress.processedBytes();
+                if (progress.indeterminate() && statusMap.get(progress.fileId()) == ConversionStatus.IN_PROGRESS) {
+                    indeterminate = true;
+                }
+            }
+
+            if (completedFiles + failedFiles + cancelledFiles == totalFiles) batchClock.pause();
+
+            // Build batch progress (cancelled files are terminal, not pending)
+            return BatchProgress.update(
+                    totalFiles,
+                    completedFiles,
+                    failedFiles,
+                    inProgressFiles,
+                    cancelledFiles,
+                    totalBytes,
+                    processedBytes,
+                    batchStartTime,
+                    indeterminate).withTiming(batchClock.elapsed(), paused);
+        }
+    }
+
+    /** Freezes or resumes active file clocks and the overall batch clock. */
+    public void setPaused(boolean paused) {
+        synchronized (stateLock) {
+            if (this.paused == paused) return;
+            this.paused = paused;
+            if (paused) batchClock.pause(); else batchClock.resume();
+            progressMap.replaceAll((id, progress) -> {
+                if (statusMap.get(id) != ConversionStatus.IN_PROGRESS) return progress;
+                ActiveTime clock = clocks.get(id);
+                if (paused) clock.pause(); else clock.resume();
+                ConversionProgress updated = progress.withTiming(clock.elapsed(), paused);
+                notifyProgressListeners(updated, true);
+                return updated;
+            });
+            notifyBatchProgress(true);
+        }
     }
 
     /**
@@ -362,16 +435,21 @@ public class ProgressEngine {
      * Clears all tracking data.
      */
     public void reset() {
-        progressMap.clear();
-        statusMap.clear();
-        fileSizeMap.clear();
-        lastNotificationTimeMap.clear();
-        batchStartTime = null;
-        totalFiles = 0;
-        totalBytes = 0;
-        lastBatchNotificationTime = 0;
+        synchronized (stateLock) {
+            progressMap.clear();
+            clocks.clear();
+            batchClock = new ActiveTime();
+            paused = false;
+            statusMap.clear();
+            fileSizeMap.clear();
+            lastNotificationTimeMap.clear();
+            batchStartTime = null;
+            totalFiles = 0;
+            totalBytes = 0;
+            lastBatchNotificationTime = 0;
 
-        logger.debug("ProgressEngine reset");
+            logger.debug("ProgressEngine reset");
+        }
     }
 
     /**

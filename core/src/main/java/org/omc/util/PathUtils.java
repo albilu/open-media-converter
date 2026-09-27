@@ -294,9 +294,8 @@ public final class PathUtils {
      * Gets the XDG configuration directory (~/.config by default).
      *
      * <p>
-     * Honors the XDG Base Directory specification: sandboxed environments
-     * such as Flatpak point the variable at a writable per-application
-     * directory.
+     * Honors the XDG Base Directory specification by using XDG_CONFIG_HOME
+     * when it names an absolute directory.
      * </p>
      *
      * @return The XDG config home path

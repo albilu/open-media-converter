@@ -627,6 +627,7 @@ public class ApplicationWorkflowController {
 
         try {
             fileManager.removeFiles(fileIds);
+            conversionEngine.forgetResults(fileIds);
             logger.info("Files removed successfully");
 
         } catch (Exception e) {
@@ -645,7 +646,9 @@ public class ApplicationWorkflowController {
         logger.info("Clearing all files from conversion list");
 
         try {
+            List<String> removedIds = fileManager.getFiles().stream().map(ConversionFile::id).toList();
             fileManager.clearFiles();
+            conversionEngine.forgetResults(removedIds);
             logger.info("Files cleared successfully");
 
         } catch (Exception e) {

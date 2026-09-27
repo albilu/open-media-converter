@@ -174,7 +174,14 @@ public class ToolManager {
      */
     private ConversionTool selectDocumentTool(FileFormat inputFormat, FileFormat outputFormat)
             throws ToolExecutionException {
-        // Prefer native office layout when Pandoc cannot read or write this pair.
+        // PDF rendering of native office input must retain page content such
+        // as headers and footers that Pandoc's document model cannot represent.
+        if (outputFormat == FileFormat.PDF && libreOfficeService != null
+                && java.util.Set.of(FileFormat.DOC, FileFormat.DOCX, FileFormat.ODT, FileFormat.RTF,
+                        FileFormat.XLS, FileFormat.XLSX, FileFormat.ODS,
+                        FileFormat.PPT, FileFormat.PPTX, FileFormat.ODP).contains(inputFormat)) {
+            return ConversionTool.LIBREOFFICE;
+        }
         if (pandocService != null && pandocService.supportsConversion(inputFormat, outputFormat)) {
             return ConversionTool.PANDOC;
         }
@@ -310,6 +317,33 @@ public class ToolManager {
 
         return this.executeTool(tool, inputPath, outputPath, outputFormat, sectionSettings, progressCallback, fileId,
                 processRegistry);
+    }
+
+    /**
+     * Executes a document reader using its detected format rather than a misleading extension.
+     *
+     * @param tool selected document converter
+     * @param input source document
+     * @param output destination document
+     * @param inputFormat authoritative input format
+     * @param settings document options
+     * @param callback progress receiver
+     * @param fileId conversion identifier
+     * @param registry process owner for cancellation
+     * @return conversion result
+     * @throws ToolExecutionException if the selected reader is unavailable
+     */
+    public ConversionResult executeDocument(ConversionTool tool, Path input, Path output, FileFormat inputFormat,
+            DocumentSettings settings, ProgressCallback callback, String fileId, ProcessRegistry registry)
+            throws ToolExecutionException {
+        if (tool == ConversionTool.PANDOC && pandocService != null) {
+            return pandocService.convertDocument(input, output, settings, callback, fileId, registry, inputFormat);
+        }
+        if (tool == ConversionTool.LIBREOFFICE && libreOfficeService != null) {
+            return libreOfficeService.convertDocument(input, output, settings, callback, fileId, registry, inputFormat);
+        }
+        throw new ToolExecutionException("Document converter unavailable: " + tool,
+                ErrorCode.TOOL_NOT_FOUND, String.valueOf(tool));
     }
 
     /**

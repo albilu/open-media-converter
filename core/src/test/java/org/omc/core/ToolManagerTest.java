@@ -284,12 +284,12 @@ class ToolManagerTest {
     // Tool selection tests - LibreOffice formats (REQ-006.4)
 
     @Test
-    void testSelectTool_DOCXToPDF_SelectsPandoc() throws ToolExecutionException {
+    void testSelectTool_DOCXToPDF_PreservesNativeOfficeLayout() throws ToolExecutionException {
         // When
         ConversionTool tool = toolManager.selectTool(FileFormat.DOCX, FileFormat.PDF);
 
         // Then
-        assertEquals(ConversionTool.PANDOC, tool);
+        assertEquals(ConversionTool.LIBREOFFICE, tool);
     }
 
     @Test
@@ -316,12 +316,12 @@ class ToolManagerTest {
     }
 
     @Test
-    void testSelectTool_ODTToPDF_SelectsPandoc() throws ToolExecutionException {
+    void testSelectTool_ODTToPDF_SelectsLibreOffice() throws ToolExecutionException {
         // When
         ConversionTool tool = toolManager.selectTool(FileFormat.ODT, FileFormat.PDF);
 
         // Then
-        assertEquals(ConversionTool.PANDOC, tool);
+        assertEquals(ConversionTool.LIBREOFFICE, tool);
     }
 
     // Tool selection tests - Mixed document conversions

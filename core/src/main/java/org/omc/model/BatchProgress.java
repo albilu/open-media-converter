@@ -28,7 +28,38 @@ public final class BatchProgress {
     private final Duration elapsedTime;
     private final Duration estimatedTimeRemaining;
     private final double bytesPerSecond;
+    private final boolean indeterminate;
+    private final boolean paused;
 
+    /** Creates batch progress with a known completion fraction. */
+    public BatchProgress(
+            int totalFiles, int completedFiles, int failedFiles, int inProgressFiles, int pendingFiles,
+            long totalBytes, long processedBytes, int overallPercentage, Instant startTime,
+            Duration elapsedTime, Duration estimatedTimeRemaining, double bytesPerSecond) {
+        this(totalFiles, completedFiles, failedFiles, inProgressFiles, pendingFiles, totalBytes,
+                processedBytes, overallPercentage, startTime, elapsedTime, estimatedTimeRemaining,
+                bytesPerSecond, false);
+    }
+
+    /** Creates batch progress, including whether some active work is unmeasurable. */
+    public BatchProgress(
+            int totalFiles,
+            int completedFiles,
+            int failedFiles,
+            int inProgressFiles,
+            int pendingFiles,
+            long totalBytes,
+            long processedBytes,
+            int overallPercentage,
+            Instant startTime,
+            Duration elapsedTime,
+            Duration estimatedTimeRemaining,
+            double bytesPerSecond,
+            boolean indeterminate) {
+        this(totalFiles, completedFiles, failedFiles, inProgressFiles, pendingFiles, totalBytes, processedBytes, overallPercentage, startTime, elapsedTime, estimatedTimeRemaining, bytesPerSecond, indeterminate, false);
+    }
+
+    /** Creates progress including an explicit paused state. */
     @JsonCreator
     public BatchProgress(
             @JsonProperty("totalFiles") int totalFiles,
@@ -42,7 +73,9 @@ public final class BatchProgress {
             @JsonProperty("startTime") Instant startTime,
             @JsonProperty("elapsedTime") Duration elapsedTime,
             @JsonProperty("estimatedTimeRemaining") Duration estimatedTimeRemaining,
-            @JsonProperty("bytesPerSecond") double bytesPerSecond) {
+            @JsonProperty("bytesPerSecond") double bytesPerSecond,
+            @JsonProperty("indeterminate") boolean indeterminate,
+            @JsonProperty("paused") boolean paused) {
         this.totalFiles = totalFiles;
         this.completedFiles = completedFiles;
         this.failedFiles = failedFiles;
@@ -55,6 +88,8 @@ public final class BatchProgress {
         this.elapsedTime = elapsedTime;
         this.estimatedTimeRemaining = estimatedTimeRemaining;
         this.bytesPerSecond = bytesPerSecond;
+        this.indeterminate = indeterminate;
+        this.paused = paused;
     }
 
     /**
@@ -103,6 +138,20 @@ public final class BatchProgress {
     public static BatchProgress update(int totalFiles, int completedFiles, int failedFiles,
             int inProgressFiles, int cancelledFiles, long totalBytes, long processedBytes,
             Instant startTime) {
+        return update(totalFiles, completedFiles, failedFiles, inProgressFiles, cancelledFiles,
+                totalBytes, processedBytes, startTime, false);
+    }
+
+    /**
+     * Creates batch progress without estimating speed or ETA while an active tool
+     * has an unknown completion fraction.
+     *
+     * @param indeterminate whether any active conversion reports unknown progress
+     * @return the batch's current counts and progress
+     */
+    public static BatchProgress update(int totalFiles, int completedFiles, int failedFiles,
+            int inProgressFiles, int cancelledFiles, long totalBytes, long processedBytes,
+            Instant startTime, boolean indeterminate) {
         int pendingFiles = totalFiles - completedFiles - failedFiles - inProgressFiles - cancelledFiles;
 
         Instant now = Instant.now();
@@ -110,7 +159,7 @@ public final class BatchProgress {
         double elapsedSeconds = elapsed.toMillis() / 1000.0;
 
         // Calculate speed and ETA
-        double speed = elapsedSeconds > 0 ? processedBytes / elapsedSeconds : 0.0;
+        double speed = !indeterminate && elapsedSeconds > 0 ? processedBytes / elapsedSeconds : 0.0;
         long remainingBytes = totalBytes - processedBytes;
         Duration eta = speed > 0 ? Duration.ofSeconds((long) (remainingBytes / speed)) : Duration.ZERO;
 
@@ -130,7 +179,26 @@ public final class BatchProgress {
                 startTime,
                 elapsed,
                 eta,
-                speed);
+                speed,
+                indeterminate);
+    }
+
+    /** Returns a copy using active time, excluding suspended intervals. */
+    public BatchProgress withTiming(Duration elapsed, boolean paused) {
+        double seconds = elapsed.toNanos() / 1_000_000_000.0;
+        double speed = !indeterminate && seconds > 0 ? processedBytes / seconds : 0;
+        Duration eta = speed > 0 ? Duration.ofSeconds((long) (Math.max(0, totalBytes - processedBytes) / speed)) : Duration.ZERO;
+        return new BatchProgress(totalFiles, completedFiles, failedFiles, inProgressFiles, pendingFiles, totalBytes, processedBytes, overallPercentage, startTime, elapsed, isComplete() ? Duration.ZERO : eta, speed, indeterminate, paused);
+    }
+
+    /** Returns whether progress is frozen by a user or disk-space pause. */
+    @JsonProperty("paused")
+    public boolean paused() { return paused; }
+
+    /** @return true when at least one active conversion has unknown progress */
+    @JsonProperty("indeterminate")
+    public boolean indeterminate() {
+        return indeterminate;
     }
 
     public int totalFiles() {
@@ -200,6 +268,8 @@ public final class BatchProgress {
      * Formats the speed as a human-readable string.
      */
     public String formatSpeed() {
+        if (paused) return "Paused";
+        if (indeterminate) return "Unknown";
         if (bytesPerSecond < 1024) {
             return String.format(Locale.US, "%.1f B/s", bytesPerSecond);
         } else if (bytesPerSecond < 1024 * 1024) {
@@ -215,7 +285,8 @@ public final class BatchProgress {
      * Formats the ETA as a human-readable string.
      */
     public String formatEta() {
-        if (estimatedTimeRemaining.isZero() || estimatedTimeRemaining.isNegative()) {
+        if (paused) return "Paused";
+        if (indeterminate || estimatedTimeRemaining.isZero() || estimatedTimeRemaining.isNegative()) {
             return "Unknown";
         }
 
@@ -237,6 +308,11 @@ public final class BatchProgress {
      * Formats a summary status message.
      */
     public String formatStatusMessage() {
+        if (paused) return "Conversion Paused";
+        if (indeterminate) {
+            return String.format("Converting files (%d of %d finished)",
+                    totalFiles - pendingFiles - inProgressFiles, totalFiles);
+        }
         return String.format("Converting %d of %d files (%d%% complete)",
                 completedFiles + inProgressFiles, totalFiles, overallPercentage);
     }
@@ -256,6 +332,8 @@ public final class BatchProgress {
                 totalBytes == that.totalBytes &&
                 processedBytes == that.processedBytes &&
                 overallPercentage == that.overallPercentage &&
+                indeterminate == that.indeterminate &&
+                paused == that.paused &&
                 Double.compare(that.bytesPerSecond, bytesPerSecond) == 0 &&
                 Objects.equals(startTime, that.startTime) &&
                 Objects.equals(elapsedTime, that.elapsedTime) &&
@@ -266,7 +344,7 @@ public final class BatchProgress {
     public int hashCode() {
         return Objects.hash(totalFiles, completedFiles, failedFiles, inProgressFiles,
                 pendingFiles, totalBytes, processedBytes, overallPercentage,
-                startTime, elapsedTime, estimatedTimeRemaining, bytesPerSecond);
+                startTime, elapsedTime, estimatedTimeRemaining, bytesPerSecond, indeterminate, paused);
     }
 
     @Override

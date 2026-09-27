@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Objects;
 
 import org.omc.core.ProcessRegistry;
+import org.omc.core.ToolProcess;
 import org.omc.core.ProgressCallback;
 import org.omc.exception.ErrorCode;
 import org.omc.exception.ToolExecutionException;
@@ -157,11 +158,33 @@ public class PandocService {
             String fileId,
             ProcessRegistry processRegistry) throws ToolExecutionException {
 
+        return convertDocument(inputPath, outputPath, settings, progressCallback, fileId, processRegistry,
+                detectFormat(inputPath));
+    }
+
+    /**
+     * Converts using the authoritative input format established at admission.
+     *
+     * @param inputPath source document
+     * @param outputPath destination document
+     * @param settings document options
+     * @param progressCallback progress receiver
+     * @param fileId conversion identifier, or null
+     * @param processRegistry process owner for cancellation
+     * @param inputFormat detected input format, independent of its extension
+     * @return conversion result
+     * @throws ToolExecutionException if execution fails
+     */
+    public ConversionResult convertDocument(Path inputPath, Path outputPath, DocumentSettings settings,
+            ProgressCallback progressCallback, String fileId, ProcessRegistry processRegistry, FileFormat inputFormat)
+            throws ToolExecutionException {
+        Objects.requireNonNull(inputFormat, "inputFormat must not be null");
+
         // MDC correlation: every log line emitted during this conversion
         // carries the file and tool context
         try (MDC.MDCCloseable omcFileCtx = MDC.putCloseable("omcFile", String.valueOf(fileId));
                 MDC.MDCCloseable omcToolCtx = MDC.putCloseable("omcTool", "pandoc")) {
-            return convertDocumentInternal(inputPath, outputPath, settings, progressCallback, fileId, processRegistry);
+            return convertDocumentInternal(inputPath, outputPath, settings, progressCallback, fileId, processRegistry, inputFormat);
         }
     }
 
@@ -171,18 +194,22 @@ public class PandocService {
             DocumentSettings settings,
             ProgressCallback progressCallback,
             String fileId,
-            ProcessRegistry processRegistry) throws ToolExecutionException {
+            ProcessRegistry processRegistry, FileFormat inputFormat) throws ToolExecutionException {
 
         Objects.requireNonNull(inputPath, "inputPath must not be null");
         Objects.requireNonNull(outputPath, "outputPath must not be null");
         Objects.requireNonNull(settings, "settings must not be null");
         Objects.requireNonNull(progressCallback, "progressCallback must not be null");
+        if (!settings.isValid()) {
+            throw new IllegalArgumentException("Invalid document settings: " + settings);
+        }
 
         if (detectFormat(outputPath) == FileFormat.PDF) {
-            return convertPdf(inputPath, outputPath, settings, progressCallback, fileId, processRegistry);
+            return convertPdf(inputPath, outputPath, settings, progressCallback, fileId, processRegistry, inputFormat);
         }
         Instant startTime = Instant.now();
         long inputSize = 0;
+        ToolProcess ownedProcess = null;
 
         try {
             inputSize = Files.size(inputPath);
@@ -195,21 +222,40 @@ public class PandocService {
         Path extractedResources = null;
         boolean successful = false;
         try {
+            if (inputFormat == FileFormat.TXT && detectFormat(outputPath) == FileFormat.TXT
+                    && settings.preserveFormatting() && settings.templatePath() == null
+                    && !settings.generateTableOfContents()) {
+                // Pandoc's plain writer indents code blocks and adds document
+                // spacing. A literal text round trip must retain the original bytes.
+                Files.copy(inputPath, outputPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                if (processRegistry != null) processRegistry.awaitRunning();
+                progressCallback.onProgress(100, inputSize, 0);
+                successful = true;
+                return ConversionResult.success(inputPath.toString(), outputPath, "Preserved literal text without reformatting",
+                        Duration.between(startTime, Instant.now()), inputSize, Files.size(outputPath), ConversionTool.PANDOC);
+            }
             Path preparedInput = inputPath.toAbsolutePath();
-            if (detectFormat(inputPath) == FileFormat.TXT) {
+            if (inputFormat == FileFormat.TXT) {
                 // A preformatted HTML block is a literal text reader for Pandoc:
                 // markup punctuation and whitespace remain text in every writer.
                 literalInput = Files.createTempFile("omc-literal-", ".html");
                 String text = Files.readString(inputPath).replace("&", "&amp;")
                         .replace("<", "&lt;").replace(">", "&gt;");
-                Files.writeString(literalInput, "<!doctype html><meta charset=\"utf-8\"><pre>" + text + "</pre>");
+                Files.writeString(literalInput, "<!doctype html><meta charset=\"utf-8\"><pre><code>" + text + "</code></pre>");
                 preparedInput = literalInput;
             }
             // Build Pandoc command
-            List<String> command = buildCommand(preparedInput, outputPath.toAbsolutePath(), settings);
+            List<String> command = buildCommand(preparedInput, outputPath.toAbsolutePath(), settings,
+                    literalInput == null ? inputFormat : FileFormat.HTML, inputPath.toAbsolutePath().getParent());
             command.add("--fail-if-warnings");
             command.add("--metadata=pagetitle:" + inputPath.getFileName());
             FileFormat outputFormat = detectFormat(outputPath);
+            if (literalInput != null && outputFormat == FileFormat.HTML) {
+                // LibreOffice's HTML reader does not resolve Pandoc's default
+                // font fallback list. A single generic family retains aligned
+                // plain-text columns in both HTML and the PDF intermediate.
+                command.add("--variable=monofont:monospace");
+            }
             if (java.util.Set.of(FileFormat.MARKDOWN, FileFormat.RST, FileFormat.ORG,
                     FileFormat.TEX, FileFormat.LATEX).contains(outputFormat)) {
                 Path directory = outputPath.toAbsolutePath().getParent();
@@ -233,12 +279,9 @@ public class PandocService {
             processBuilder.directory(outputPath.toAbsolutePath().getParent().toFile());
             processBuilder.redirectErrorStream(true);
 
-            Process process = processBuilder.start();
+            ToolProcess process = ToolProcess.start(processBuilder, fileId, processRegistry);
+            ownedProcess = process;
 
-            // Register process for cancellation support
-            if (fileId != null && processRegistry != null) {
-                processRegistry.registerProcess(fileId, process);
-            }
 
             // Read output in a separate daemon thread (named + handler so a
             // leak can never pin JVM shutdown)
@@ -289,32 +332,31 @@ public class PandocService {
 
             outputReader.start();
 
-            // Pandoc doesn't provide progress updates, so we simulate progress
-            Thread progressThread = simulateProgress(process, progressCallback, inputSize);
+            // The Pandoc CLI has no measurable completion fraction.
+            if (!process.isPaused()) progressCallback.onIndeterminate();
 
             // Wait for process to complete with timeout (1 hour default)
             // Check for interruption periodically so cancellation can work
             int exitCode = -1;
             boolean finished = false;
-            long startWaitTime = System.currentTimeMillis();
+            long startWaitTime = process.activeElapsed().toMillis();
 
-            while (!finished && (System.currentTimeMillis() - startWaitTime) < PROCESS_TIMEOUT_MILLIS) {
+            while (!finished && (process.activeElapsed().toMillis() - startWaitTime) < PROCESS_TIMEOUT_MILLIS) {
                 // Check for interruption (from cancel operation)
                 if (Thread.currentThread().isInterrupted()) {
                     logger.info("Pandoc process interrupted, destroying process");
                     process.destroyForcibly();
-                    progressThread.interrupt(); // Stop progress simulation
                     throw new InterruptedException("Conversion cancelled by user");
                 }
 
                 // Wait for process with short timeout to allow interruption checks
                 finished = process.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (!finished && !process.isPaused()) progressCallback.onIndeterminate();
             }
 
             if (!finished) {
                 logger.error("Pandoc process timed out after 1 hour");
                 process.destroyForcibly();
-                progressThread.interrupt(); // Stop progress simulation
                 throw new ToolExecutionException(
                         "Pandoc process timed out after 1 hour",
                         ErrorCode.TOOL_EXECUTION_FAILED,
@@ -326,9 +368,6 @@ public class PandocService {
 
             exitCode = process.exitValue();
 
-            // Wait for progress thread to complete its final 100% update before proceeding
-            // This ensures the completion status is set AFTER all progress updates
-            progressThread.join(1000); // Wait up to 1 second for progress thread
             // Bounded join: a grandchild inheriting the pipe would otherwise
             // block this join forever (pipe reads are not interruptible, but
             // the reader is a daemon so interrupting is best-effort).
@@ -361,6 +400,8 @@ public class PandocService {
             // Get output file size
             DocumentOutputOptions.apply(outputPath, detectFormat(outputPath), settings);
             long outputSize = Files.size(outputPath);
+            if (processRegistry != null) processRegistry.awaitRunning();
+            progressCallback.onProgress(100, inputSize, 0);
             successful = true;
 
             logger.info("Pandoc conversion successful: {} -> {} in {}ms ({} bytes -> {} bytes)",
@@ -408,6 +449,7 @@ public class PandocService {
                     "Process interrupted",
                     e);
         } finally {
+            if (ownedProcess != null && ownedProcess.isAlive()) ownedProcess.destroyForcibly();
             if (literalInput != null) {
                 try { Files.deleteIfExists(literalInput); }
                 catch (IOException e) { logger.warn("Could not remove literal document input", e); }
@@ -441,6 +483,11 @@ public class PandocService {
      *                                  use convertDocument for these preparation workflows
      */
     public List<String> buildCommand(Path input, Path output, DocumentSettings settings) {
+        return buildCommand(input, output, settings, detectFormat(input), input.toAbsolutePath().getParent());
+    }
+
+    private List<String> buildCommand(Path input, Path output, DocumentSettings settings,
+            FileFormat inputFormat, Path resourceDir) {
         Objects.requireNonNull(input, "input must not be null");
         Objects.requireNonNull(output, "output must not be null");
         Objects.requireNonNull(settings, "settings must not be null");
@@ -454,15 +501,13 @@ public class PandocService {
         // Input file (dash-prefixed basenames are absolutized so getopt
         // never parses them as flags)
         command.add(FFmpegService.safePathArg(input));
-        Path resourceDir = input.toAbsolutePath().getParent();
         command.add("--resource-path=" + (resourceDir != null ? resourceDir.toString() : "."));
 
         // Output file
         command.add("-o");
         command.add(FFmpegService.safePathArg(output));
 
-        // Detect input and output formats from extensions
-        FileFormat inputFormat = detectFormat(input);
+        // The output path belongs to our staging plan; input content was detected at admission.
         FileFormat outputFormat = detectFormat(output);
         if (outputFormat == FileFormat.PDF) {
             throw new IllegalArgumentException("PDF output uses convertDocument with a LibreOffice renderer.");
@@ -606,26 +651,39 @@ public class PandocService {
     }
 
     private ConversionResult convertPdf(Path input, Path output, DocumentSettings settings,
-            ProgressCallback callback, String fileId, ProcessRegistry registry) throws ToolExecutionException {
+            ProgressCallback callback, String fileId, ProcessRegistry registry, FileFormat inputFormat)
+            throws ToolExecutionException {
         if (pdfRenderer == null) {
             throw new ToolExecutionException("Install LibreOffice to render text documents as PDF.",
                     ErrorCode.TOOL_NOT_FOUND, "libreoffice");
         }
         Path html = null;
         Instant start = Instant.now();
+        // Neither stage exposes a completion fraction. Stage completion is not
+        // half of the total work, and must not end the overall activity indicator.
+        long[] lastActivity = {0};
+        ProgressCallback stageProgress = (percent, bytes, speed) -> {
+            long now = System.nanoTime();
+            if (percent == ProgressCallback.INDETERMINATE
+                    && (lastActivity[0] == 0 || now - lastActivity[0] >= 500_000_000L)) {
+                lastActivity[0] = now;
+                callback.onIndeterminate();
+            }
+        };
         try {
             // System temp dir (not the user output dir): inherits safe
             // permissions and avoids symlink games in world-writable parents.
             html = Files.createTempFile("omc-document-", ".html");
             ConversionResult textResult = convertDocument(input, html, settings.withOutputFormat(FileFormat.HTML),
-                    (percent, bytes, speed) -> callback.onProgress(percent * 0.5, bytes, speed), fileId, registry);
+                    stageProgress, fileId, registry, inputFormat);
             if (!textResult.success()) return textResult;
             if (Thread.currentThread().isInterrupted()) {
                 throw new ToolExecutionException("Conversion cancelled", ErrorCode.TOOL_EXECUTION_FAILED, "pandoc");
             }
             ConversionResult pdf = pdfRenderer.convertDocument(html, output, settings,
-                    (percent, bytes, speed) -> callback.onProgress(50 + percent * 0.5, bytes, speed), fileId, registry);
+                    stageProgress, fileId, registry);
             if (!pdf.success()) return pdf;
+            callback.onProgress(100, Files.size(input), 0);
             return ConversionResult.success(fileId == null ? input.toString() : fileId, output,
                     textResult.toolOutput().orElse("") + "\n" + pdf.toolOutput().orElse(""),
                     Duration.between(start, Instant.now()), Files.size(input), Files.size(output), ConversionTool.PANDOC);
@@ -638,52 +696,6 @@ public class PandocService {
                 catch (IOException e) { logger.warn("Could not remove intermediate document", e); }
             }
         }
-    }
-
-    /**
-     * Simulates progress updates for Pandoc conversion.
-     * Pandoc doesn't provide real-time progress, so we estimate based on file size
-     * and time.
-     * 
-     * @param process   running Pandoc process
-     * @param callback  progress callback
-     * @param inputSize input file size in bytes
-     * @return the progress thread (caller must join before checking exit code)
-     */
-    private Thread simulateProgress(Process process, ProgressCallback callback, long inputSize) {
-        Thread progressThread = org.omc.util.ThreadUtils.createThreadFactory("Pandoc-Progress")
-                .newThread(() -> {
-            try {
-                double progress = 0.0;
-                long startNanos = System.nanoTime();
-                while (process.isAlive() && progress < 100.0) {
-                    // Simulate progress: increment by 10% every 500ms
-                    progress = Math.min(progress + 10.0, 95.0); // Cap at 95% until done
-
-                    long bytesProcessed = (long) (inputSize * progress / 100.0);
-                    // Real bytes/second from elapsed wall time (was bytes, not B/s).
-                    double elapsedSeconds = Math.max((System.nanoTime() - startNanos) / 1_000_000_000.0, 0.001);
-                    double speed = bytesProcessed / elapsedSeconds;
-
-                    callback.onProgress(progress, bytesProcessed, speed);
-
-                    Thread.sleep(500);
-                }
-
-                // Final progress update (skipped when cancelled/timed out so a
-                // destroyed process is not reported as 100% complete)
-                if (!process.isAlive() && !Thread.currentThread().isInterrupted()) {
-                    callback.onProgress(100.0, inputSize, 0.0);
-                }
-
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                logger.trace("Progress simulation interrupted");
-            }
-        });
-
-        progressThread.start();
-        return progressThread;
     }
 
     /**

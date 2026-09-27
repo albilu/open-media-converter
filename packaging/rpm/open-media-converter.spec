@@ -14,6 +14,7 @@ AutoReqProv:    no
 Requires:       gtk4 >= 4.10
 Requires:       glib2 >= 2.66.0
 Requires:       gobject-introspection >= 1.66.0
+Requires:       hicolor-icon-theme
 Requires:       ImageMagick
 Requires:       libreoffice-core
 Recommends:     ffmpeg
@@ -47,9 +48,9 @@ cp -a %{stage}/. %{buildroot}/
 /opt/open-media-converter/runtime/*
 /usr/bin/open-media-converter
 /usr/share/applications/open-media-converter.desktop
+/usr/share/applications/org.omc.OpenMediaConverter.desktop
 /usr/share/metainfo/open-media-converter.metainfo.xml
 /usr/share/man/man1/open-media-converter.1*
-/usr/share/icons/hicolor/index.theme
 /usr/share/icons/hicolor/scalable/apps/open-media-converter.svg
 /usr/share/icons/hicolor/*x*/apps/open-media-converter.*
 %doc /usr/share/doc/open-media-converter/copyright

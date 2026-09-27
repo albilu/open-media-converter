@@ -11,6 +11,8 @@ import java.util.stream.Collectors;
 
 import org.gnome.gio.Menu;
 import org.gnome.gio.MenuItem;
+import org.gnome.gio.Notification;
+import org.gnome.gio.ThemedIcon;
 import org.gnome.gio.SimpleAction;
 import org.gnome.glib.GLib;
 import org.gnome.gtk.Application;
@@ -976,9 +978,14 @@ public class MainWindowJavaGi extends ApplicationWindow {
      */
     private void handlePause() {
         logger.debug("Pause button clicked");
-        controller.handlePauseConversion();
-        showResumeButton();
-        showStatus("Conversion Paused");
+        try {
+            controller.handlePauseConversion();
+            showResumeButton();
+            showStatus("Conversion Paused");
+        } catch (RuntimeException failure) {
+            logger.error("Could not pause conversion", failure);
+            showErrorDialog("Pause Error", failure.getMessage());
+        }
     }
 
     /**
@@ -986,9 +993,14 @@ public class MainWindowJavaGi extends ApplicationWindow {
      */
     private void handleResume() {
         logger.debug("Resume button clicked");
-        controller.handleResumeConversion();
-        showPauseButton();
-        showStatus("Conversion Resumed");
+        try {
+            controller.handleResumeConversion();
+            showPauseButton();
+            showStatus("Conversion Resumed");
+        } catch (RuntimeException failure) {
+            logger.error("Could not resume conversion", failure);
+            showErrorDialog("Resume Error", failure.getMessage());
+        }
     }
 
     /**
@@ -1609,31 +1621,16 @@ public class MainWindowJavaGi extends ApplicationWindow {
      * @param message the notification message
      */
     private void showCompletionNotification(String message) {
+        Application application = getApplication();
+        if (application == null) return;
         try {
-            // Use notify-send command to show desktop notification.
-            // DISCARD so the child never blocks on a full stdout/stderr pipe.
-            ProcessBuilder pb = new ProcessBuilder("notify-send", "Open Media Converter", message,
-                    "--icon=open-media-converter");
-            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
-            Process process = pb.start();
-            logger.info("Desktop notification sent via notify-send: {}", message);
-            // notify-send exits right after handing off to the notification
-            // daemon; reap it (bounded, on a daemon thread) so it never
-            // lingers as a zombie.
-            Thread reaper = new Thread(() -> {
-                try {
-                    if (!process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
-                        process.destroyForcibly();
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }, "notify-send-reaper");
-            reaper.setDaemon(true);
-            reaper.start();
-        } catch (Exception e) {
-            logger.error("Failed to show desktop notification", e);
+            Notification notification = new Notification("Open Media Converter");
+            notification.setBody(message);
+            notification.setIcon(new ThemedIcon("open-media-converter"));
+            application.sendNotification("conversion-complete", notification);
+            logger.debug("Completion notification submitted: {}", message);
+        } catch (RuntimeException e) {
+            logger.warn("Could not submit completion notification", e);
         }
     }
 

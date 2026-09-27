@@ -126,10 +126,16 @@ public class ProgressView {
             return;
         }
 
-        // Update progress bar with percentage
-        double fraction = batchProgress.overallPercentage() / 100.0;
-        progressBar.setFraction(fraction);
-        progressBar.setText(String.format("%d%%", batchProgress.overallPercentage()));
+        if (batchProgress.paused()) {
+            progressBar.setFraction(batchProgress.overallPercentage() / 100.0);
+            progressBar.setText("Paused");
+        } else if (batchProgress.indeterminate()) {
+            progressBar.pulse();
+            progressBar.setText("Converting...");
+        } else {
+            progressBar.setFraction(batchProgress.overallPercentage() / 100.0);
+            progressBar.setText(String.format("%d%%", batchProgress.overallPercentage()));
+        }
 
         // Update status label with file counts
         String status = batchProgress.formatStatusMessage();

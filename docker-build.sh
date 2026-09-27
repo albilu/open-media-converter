@@ -19,12 +19,6 @@ prepare_m2() {
     mkdir -p "$HOME/.m2"
 }
 
-# Persist the Flatpak user installation (GNOME runtime/sdk downloads) across
-# container runs; without this every package run re-downloads ~1GB.
-prepare_flatpak_cache() {
-    mkdir -p "$HOME/.omc-flatpak"
-}
-
 # X11 authentication forwarder. Wayland/Xwayland sessions gate the display
 # behind an Xauthority token (e.g. /run/user/*/.mutter-Xwaylandauth.*). Docker
 # containers must receive that token or the X server rejects the connection
@@ -120,20 +114,15 @@ compile() {
 # Create packages
 package() {
     prepare_m2
-    prepare_flatpak_cache
     local version="${1:-}"
     if [ -n "$version" ] && [[ ! "$version" =~ ^[0-9]+([.][0-9]+){1,3}$ ]]; then
         echo "Invalid package version: expected numeric dotted version" >&2
         return 2
     fi
     log "Creating packages${version:+ (version ${version})}..."
-    # --privileged: flatpak-builder's bwrap needs user namespaces and mount
-    # propagation control that Docker's default sandbox blocks
     docker run --init --rm \
-        --privileged \
         -v "$(pwd):/app" \
         -v "$HOME/.m2:/home/developer/.m2" \
-        -v "$HOME/.omc-flatpak:/home/developer/.local/share/flatpak" \
         $IMAGE_NAME \
         /app/packaging/build-packages.sh $version
 }

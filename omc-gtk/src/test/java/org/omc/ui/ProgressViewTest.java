@@ -100,6 +100,34 @@ class ProgressViewTest {
     }
 
     @Test
+    void unknownWorkPulsesWithoutPercentagesSpeedOrEtaAndCanReturnToKnownProgress() {
+        var unknown = BatchProgress.update(2, 0, 0, 2, 0, 2000, 500, Instant.now().minusSeconds(2), true);
+        progressView.updateOverallProgress(unknown);
+        verify(progressBar).pulse();
+        verify(progressBar).setText("Converting...");
+        verify(progressBar, never()).setFraction(anyDouble());
+        verify(timeRemainingLabel).setLabel("Time remaining: Unknown");
+        verify(conversionSpeedLabel).setLabel("Speed: Unknown");
+        assertFalse(unknown.formatStatusMessage().contains("%"));
+        clearInvocations(progressBar);
+        progressView.updateOverallProgress(sampleBatchProgress);
+        verify(progressBar, never()).pulse();
+        verify(progressBar).setFraction(sampleBatchProgress.overallPercentage() / 100.0);
+    }
+
+    @Test
+    void pausedUnknownWorkStopsPulsingAndDisplaysPaused() {
+        var unknown = BatchProgress.update(1, 0, 0, 1, 0, 1000, 0, Instant.now(), true)
+                .withTiming(java.time.Duration.ofSeconds(2), true);
+        progressView.updateOverallProgress(unknown);
+        verify(progressBar, never()).pulse();
+        verify(progressBar).setFraction(0);
+        verify(progressBar).setText("Paused");
+        verify(timeRemainingLabel).setLabel("Time remaining: Paused");
+        verify(conversionSpeedLabel).setLabel("Speed: Paused");
+    }
+
+    @Test
     void updateOverallProgress_withNullBatchProgress_shouldDoNothing() {
         // When
         progressView.updateOverallProgress(null);

@@ -14,6 +14,7 @@ import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 import org.omc.core.ProcessRegistry;
+import org.omc.core.ToolProcess;
 import org.omc.core.ProgressCallback;
 import org.omc.exception.ErrorCode;
 import org.omc.exception.ToolExecutionException;
@@ -166,6 +167,12 @@ public class ImageMagickService {
         // Add input file (absolutized when dash-prefixed)
         command.add(FFmpegService.safePathArg(inputPath));
 
+        // GIF frames may be offset partial rectangles. Reconstruct the logical
+        // canvases before applying transforms to preserve animation geometry.
+        if (FileFormat.fromExtension(getFileExtension(inputPath)) == FileFormat.GIF) {
+            command.add("-coalesce");
+        }
+
         // 1. ROTATION (FIRST) - REQ-IMG-1.2
         // Apply rotation before flip and resize operations
         if (settings.rotation() != null && !settings.rotation().isNone()) {
@@ -242,10 +249,9 @@ public class ImageMagickService {
             logger.debug("Added resize parameter: {}", resizeSpec);
         }
 
-        // 5. Compression parameter for PNG (0 = unset/default here; the
-        // int default is 0, so >= 0 would emit -define on every command).
+        // 5. PNG compression: zero is an explicit fastest setting, as in the UI.
         Integer compressionLevel = settings.compressionLevel();
-        if (compressionLevel != null && compressionLevel > 0 && compressionLevel <= 9) {
+        if (compressionLevel != null && compressionLevel >= 0 && compressionLevel <= 9) {
             String outputExt = getFileExtension(outputPath);
             FileFormat outputFormat = FileFormat.fromExtension(outputExt);
 
@@ -353,29 +359,23 @@ public class ImageMagickService {
 
         logger.info("Executing ImageMagick command: {}", String.join(" ", command));
 
-        Process process = null;
+        ToolProcess process = null;
         StringBuilder outputLog = new StringBuilder(4096);
         final boolean[] outputTruncated = { false };
 
         try {
             // Start process and track start time
-            process = processBuilder.start();
+            process = ToolProcess.start(processBuilder, fileId, processRegistry);
             logger.debug("ImageMagick process started with PID: {}", process.pid());
 
-            // Register process in ProcessRegistry with fileId
-            if (fileId != null) {
-                processRegistry.registerProcess(fileId, process);
-                logger.debug("Registered process for fileId: {}", fileId);
-            }
 
-            // Task 3.6: Report 0% progress when process starts
-            if (progressCallback != null) {
-                progressCallback.onProgress(0.0, 0, 0);
+            // Operation percentages restart per stage and cannot measure overall work.
+            if (progressCallback != null && !process.isPaused()) {
+                progressCallback.onIndeterminate();
             }
 
             // Effectively-final aliases so the reader lambda can capture them.
             final Process convertProcess = process;
-            final long inputSizeFinal = inputSize;
 
             // Task 3.5: Capture output with 1MB limit and parse progress on a
             // daemon reader thread - a hung convert holding its pipe open with
@@ -392,12 +392,6 @@ public class ImageMagickService {
                     StringBuilder currentLine = new StringBuilder(256);
                     int ch;
                     int segmentCount = 0;
-                    long lastProgressUpdate = 0; // Initialize to 0 to allow first callback immediately
-                    // -monitor restarts at 0% for every stage (Resize, then
-                    // Extent...); enforce monotonic progress so the UI never jumps
-                    // 100% -> 0%.
-                    double maxSeenProgress = 0.0;
-
                     while ((ch = reader.read()) != -1) {
                         if (ch == '\r' || ch == '\n') {
                             // Process the accumulated line/segment
@@ -413,24 +407,6 @@ public class ImageMagickService {
                                         logger.warn("Tool output exceeded 1MB limit, truncating further output");
                                     } else {
                                         outputLog.append(line).append('\n');
-                                    }
-                                }
-
-                                // Task 3.6: Parse real-time progress from -monitor output
-                                // Format: "Operation/Image//path[filename.ext]: current of total, percentage%
-                                // complete"
-                                // Example: "Resize/Image//home/xxx/Images[20250723_085451.png]: 874 of 875,
-                                // 100% complete"
-                                double parsedProgress = parseMonitorProgress(line);
-                                if (parsedProgress >= 0 && progressCallback != null) {
-                                    parsedProgress = Math.max(parsedProgress, maxSeenProgress);
-                                    maxSeenProgress = parsedProgress;
-                                    long currentTime = System.currentTimeMillis();
-                                    // Throttle to max 2 updates/second (500ms intervals)
-                                    if (currentTime - lastProgressUpdate >= 500) {
-                                        long estimatedBytes = (long) (inputSizeFinal * parsedProgress / 100.0);
-                                        progressCallback.onProgress(parsedProgress, estimatedBytes, 0);
-                                        lastProgressUpdate = currentTime;
                                     }
                                 }
 
@@ -480,9 +456,9 @@ public class ImageMagickService {
             // checked on a time cadence (every 500ms wait slice) so a silent
             // convert still observes cancellation.
             boolean completed = false;
-            long startWaitTime = System.currentTimeMillis();
+            long startWaitTime = process.activeElapsed().toMillis();
 
-            while (!completed && (System.currentTimeMillis() - startWaitTime) < PROCESS_TIMEOUT_MILLIS) {
+            while (!completed && (process.activeElapsed().toMillis() - startWaitTime) < PROCESS_TIMEOUT_MILLIS) {
                 if (Thread.currentThread().isInterrupted()) {
                     logger.info("Conversion interrupted by user");
                     process.destroyForcibly();
@@ -491,6 +467,7 @@ public class ImageMagickService {
                 }
 
                 completed = process.waitFor(500, TimeUnit.MILLISECONDS);
+                if (!completed && progressCallback != null && !process.isPaused()) progressCallback.onIndeterminate();
             }
 
             if (!completed) {
@@ -738,13 +715,18 @@ public class ImageMagickService {
             // System temp dir: the output parent may be missing (throws
             // NoSuchFileException) or world-writable.
             raster = Files.createTempFile("omc-svg-", ".png");
-            ConversionResult result = convertImage(input, raster, settings, callback, fileId, registry);
+            ConversionResult result = convertImage(input, raster, settings,
+                    (percentage, bytes, speed) -> {
+                        if (callback != null && percentage == ProgressCallback.INDETERMINATE) callback.onIndeterminate();
+                    }, fileId, registry);
             if (!result.success()) return result;
             if (Thread.currentThread().isInterrupted()) {
                 return ConversionResult.cancelled(fileId, result.toolOutput().orElse(null),
                         Duration.between(start, Instant.now()), Files.size(input), ConversionTool.IMAGEMAGICK);
             }
+            registry.awaitRunning();
             RasterSvgExporter.write(raster, output);
+            if (callback != null) callback.onProgress(100, Files.size(output), 0);
             return ConversionResult.success(fileId, output, result.toolOutput().orElse(null),
                     Duration.between(start, Instant.now()), Files.size(input), Files.size(output), ConversionTool.IMAGEMAGICK);
         } catch (IOException e) {

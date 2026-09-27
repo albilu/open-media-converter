@@ -204,8 +204,8 @@ public class ToolSelectionIntegrationTest {
         ConversionTool selectedTool = toolManager.selectTool(FileFormat.DOCX, FileFormat.PDF);
 
         // Then: LIBREOFFICE tool should be selected
-        assertEquals(ConversionTool.PANDOC, selectedTool,
-                "DOCX → PDF conversion should use PANDOC");
+        assertEquals(ConversionTool.LIBREOFFICE, selectedTool,
+                "DOCX → PDF conversion must retain native page content");
 
         // And: Tool should be available
         assertTrue(toolManager.isToolAvailable(ConversionTool.LIBREOFFICE),
@@ -222,7 +222,7 @@ public class ToolSelectionIntegrationTest {
         // Given: Pandoc-supported formats
         List<FileFormat> pandocFormats = List.of(
                 FileFormat.MARKDOWN, FileFormat.HTML,
-                FileFormat.RTF, FileFormat.TXT, FileFormat.EPUB,
+                FileFormat.TXT, FileFormat.EPUB,
                 FileFormat.TEX, FileFormat.LATEX, FileFormat.RST, FileFormat.ORG);
 
         // When/Then: Each Pandoc format should route to PANDOC
@@ -242,7 +242,7 @@ public class ToolSelectionIntegrationTest {
     public void testLibreOfficeDocumentFormats() throws Exception {
         // Given: LibreOffice-supported formats
         List<FileFormat> libreOfficeFormats = List.of(
-                FileFormat.DOCX, FileFormat.DOC, FileFormat.PDF,
+                FileFormat.DOCX, FileFormat.DOC, FileFormat.RTF, FileFormat.PDF,
                 FileFormat.XLSX, FileFormat.XLS, FileFormat.PPTX,
                 FileFormat.PPT, FileFormat.ODT, FileFormat.ODS, FileFormat.ODP);
 
@@ -250,8 +250,7 @@ public class ToolSelectionIntegrationTest {
         for (FileFormat format : libreOfficeFormats) {
             if (format != FileFormat.PDF) { // Skip PDF → PDF
                 ConversionTool tool = toolManager.selectTool(format, FileFormat.PDF);
-                assertEquals(format == FileFormat.DOCX || format == FileFormat.ODT
-                        ? ConversionTool.PANDOC : ConversionTool.LIBREOFFICE, tool);
+                assertEquals(ConversionTool.LIBREOFFICE, tool);
             }
         }
     }
@@ -360,7 +359,7 @@ public class ToolSelectionIntegrationTest {
         assertEquals(ConversionTool.PANDOC, docTool1, "Markdown should route to PANDOC");
 
         ConversionTool docTool2 = toolManager.selectTool(FileFormat.DOCX, FileFormat.PDF);
-        assertEquals(ConversionTool.PANDOC, docTool2, "DOCX should route to PANDOC");
+        assertEquals(ConversionTool.LIBREOFFICE, docTool2, "DOCX → PDF must retain native page content");
     }
 
     /**

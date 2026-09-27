@@ -86,13 +86,16 @@ EOF
 chmod 755 "$STAGE/usr/bin/open-media-converter"
 
 cp packaging/resources/open-media-converter.desktop "$STAGE/usr/share/applications/open-media-converter.desktop"
+# Gio notification backends resolve the application's desktop ID. Retain the
+# existing launcher and provide its application-ID alias without a second menu entry.
+sed '/^\[Desktop Entry\]$/a NoDisplay=true' packaging/resources/open-media-converter.desktop \
+    > "$STAGE/usr/share/applications/org.omc.OpenMediaConverter.desktop"
 cp packaging/resources/open-media-converter.metainfo.xml "$STAGE/usr/share/metainfo/open-media-converter.metainfo.xml"
 cp packaging/resources/open-media-converter.1 "$STAGE/usr/share/man/man1/open-media-converter.1"
 cp -a omc-gtk/src/main/resources/icons/hicolor/. "$STAGE/usr/share/icons/hicolor/"
 
-# Rasterize PNG icons from the SVG artwork: AppStream compose (flatpak export)
-# and several desktop theme consumers require raster icons, the repo ships
-# SVGs only. Kept in sync with render-icons.sh's size list.
+# Rasterize PNG icons from the SVG artwork for desktop themes that require
+# raster icons. Kept in sync with render-icons.sh's size list.
 if command -v rsvg-convert >/dev/null; then
     for size in 16 24 32 48 64 128 256 512; do
         icon_dest="$STAGE/usr/share/icons/hicolor/${size}x${size}/apps"
@@ -104,29 +107,6 @@ if command -v rsvg-convert >/dev/null; then
     done
 fi
 
-# The hicolor tree needs an index.theme to be a valid icon theme; without it
-# GLib-based icon lookups (including appstreamcli compose) find no icons.
-hicolor_dirs=$(cd "$STAGE/usr/share/icons/hicolor" && ls -d */apps | sed 's|/$||' | paste -sd,)
-{
-    echo "[Icon Theme]"
-    echo "Name=Hicolor"
-    echo "Comment=Fallback icon theme"
-    echo "Hidden=true"
-    echo "Directories=$hicolor_dirs"
-    for d in ${hicolor_dirs//,/ }; do
-        size="${d%%x*}"
-        echo ""
-        echo "[$d]"
-        echo "Size=$size"
-        if [ "$d" = "scalable/apps" ]; then
-            echo "MinSize=16"
-            echo "MaxSize=512"
-            echo "Type=Scalable"
-        else
-            echo "Type=Fixed"
-        fi
-    done
-} > "$STAGE/usr/share/icons/hicolor/index.theme"
 
 log "Stage complete:"
 du -sh "$STAGE" "$RUNTIME"
@@ -190,6 +170,7 @@ license = GPL-3.0-or-later
 depend = gtk4>=4.10
 depend = glib2>=2.66.0
 depend = gobject-introspection>=1.66.0
+depend = hicolor-icon-theme
 depend = imagemagick
 depend = libreoffice-fresh
 optdepend = ffmpeg: video/audio conversion (also embedded in the application jar)
@@ -335,8 +316,7 @@ build_appimage() {
         fi
     fi
 
-    # Use --appimage-extract-and-run when FUSE is unavailable (Docker/CI);
-    # a privileged container exposes /dev/fuse but still lacks libfuse.so.2
+    # Use --appimage-extract-and-run when FUSE is unavailable (Docker/CI).
     local extract_flag=""
     if [ ! -e /dev/fuse ] || [ ! -w /dev/fuse ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ -f /.dockerenv ]; then
         extract_flag="--appimage-extract-and-run"
@@ -358,48 +338,39 @@ build_appimage() {
     log "Built Open_Media_Converter-${VERSION}-x86_64.AppImage"
 }
 
-# ---- Flatpak bundle ----
-# GNOME runtime branch used by packaging/flatpak/io.github.albilu.OpenMediaConverter.yml
-FLATPAK_RUNTIME_VERSION="50"
-
-build_flatpak() {
-    log "Building .flatpak..."
-    if ! command -v flatpak-builder >/dev/null; then
-        echo "flatpak-builder not found; install flatpak-builder or use the omc-dev image" >&2
-        exit 1
-    fi
-    # Build under $HOME, not $ROOT: flatpak-builder reserves /app inside its
-    # sandbox and refuses to share a build directory that lives there.
-    local fb_dir="$HOME/.cache/omc-flatpak-build"
-    local repo="$fb_dir/repo"
-    local manifest="$ROOT/packaging/flatpak/io.github.albilu.OpenMediaConverter.yml"
-    local bundle="$ROOT/packaging/Open_Media_Converter-${VERSION}-x86_64.flatpak"
-    flatpak --user remote-add --if-not-exists flathub \
-        https://flathub.org/repo/flathub.flatpakrepo >/dev/null
-    flatpak --user install -y --noninteractive flathub \
-        "org.gnome.Platform//${FLATPAK_RUNTIME_VERSION}" \
-        "org.gnome.Sdk//${FLATPAK_RUNTIME_VERSION}" >/dev/null
-    rm -rf "$fb_dir/build" "$repo"
-    mkdir -p "$fb_dir"
-    # --disable-rofiles-fuse: containers usually lack a FUSE device.
-    # Run from $fb_dir: flatpak-builder reserves /app inside its sandbox and
-    # refuses to share a state directory that lives there.
-    (cd "$fb_dir" && flatpak-builder --user --force-clean --disable-rofiles-fuse \
-        --repo="$repo" "$fb_dir/build" "$manifest")
-    rm -f "$bundle"
-    flatpak build-bundle "$repo" "$bundle" io.github.albilu.OpenMediaConverter
-    rm -rf "$fb_dir/build" "$repo"
-    log "Built Open_Media_Converter-${VERSION}-x86_64.flatpak"
-}
-
 build_deb
 build_rpm
 build_arch
+
+# Portable bundles need a private theme index. Native packages use the system
+# hicolor-icon-theme package and must never claim ownership of its index.
+hicolor_dirs=$(cd "$STAGE/usr/share/icons/hicolor" && ls -d */apps | sed 's|/$||' | paste -sd,)
+{
+    echo "[Icon Theme]"
+    echo "Name=Hicolor"
+    echo "Comment=Fallback icon theme"
+    echo "Hidden=true"
+    echo "Directories=$hicolor_dirs"
+    for d in ${hicolor_dirs//,/ }; do
+        size="${d%%x*}"
+        echo ""
+        echo "[$d]"
+        if [ "$d" = "scalable/apps" ]; then
+            echo "Size=48"
+            echo "MinSize=16"
+            echo "MaxSize=512"
+            echo "Type=Scalable"
+        else
+            echo "Size=$size"
+            echo "Type=Fixed"
+        fi
+    done
+} > "$STAGE/usr/share/icons/hicolor/index.theme"
+
+
 build_appimage
-build_flatpak
 
 log "Artifacts:"
 ls -la "$ROOT/packaging/"*.deb "$ROOT/packaging/"*.rpm \
-    "$ROOT/packaging/"*.pkg.tar.zst "$ROOT/packaging/"*.AppImage \
-    "$ROOT/packaging/"*.flatpak 2>/dev/null || true
+    "$ROOT/packaging/"*.pkg.tar.zst "$ROOT/packaging/"*.AppImage 2>/dev/null || true
 log "Done."

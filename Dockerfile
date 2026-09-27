@@ -21,6 +21,8 @@ RUN apt-get update && apt-get install -y \
     imagemagick \
     pandoc \
     libreoffice \
+    # Independent PDF content inspection in real-tool regression tests
+    poppler-utils \
     # X11 for GUI testing
     xvfb \
     x11-utils \
@@ -32,9 +34,7 @@ RUN apt-get update && apt-get install -y \
     file \
     zstd \
     libarchive-tools \
-    # Flatpak bundle building and AppStream validation
-    flatpak \
-    flatpak-builder \
+    # Desktop metadata validation and icon rendering
     appstream \
     librsvg2-bin \
     # Utilities

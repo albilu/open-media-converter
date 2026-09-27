@@ -4,8 +4,8 @@ Section: utils
 Priority: optional
 Architecture: amd64
 Maintainer: Open Media Converter Team <maintainer@openmediaconverter.org>
-Depends: libgtk-4-1 (>= 4.10), libglib2.0-0 (>= 2.66.0), libgirepository-1.0-1 (>= 1.66.0), imagemagick, libreoffice-core, hicolor-icon-theme
-Recommends: ffmpeg, pandoc, libreoffice-writer, libreoffice-calc, libreoffice-impress
+Depends: libgtk-4-1 (>= 4.10), libglib2.0-0 (>= 2.66.0), libgirepository-1.0-1 (>= 1.66.0), ffmpeg (>= 6.1), pandoc (>= 3.1), imagemagick, libreoffice-core, hicolor-icon-theme
+Recommends: libreoffice-writer, libreoffice-calc, libreoffice-impress
 Description: Native Linux media and document converter
  Open Media Converter is a comprehensive media and document conversion tool
  for Linux desktop environments. It provides an integrated GTK 4-based
@@ -16,7 +16,7 @@ Description: Native Linux media and document converter
   - Multi-format conversion: video, audio, image, and document formats
   - Batch processing with parallel conversions and per-file progress
   - Native GTK 4 UI with file list, presets, and settings dialog
-  - Embedded and system binary support for conversion tools
+  - System-managed conversion tools
   - Conversion presets and advanced format-specific options
   - State persistence: window geometry, file lists, and settings
   - Progress parsing and detailed logs with error reporting

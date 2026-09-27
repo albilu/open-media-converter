@@ -11,12 +11,10 @@ depends=(
     'glib2>=2.66.0'
     'gobject-introspection>=1.66.0'
     'hicolor-icon-theme'
+    'ffmpeg>=6.1'
+    'pandoc>=3.1'
     'imagemagick'
     'libreoffice-fresh'
-)
-optdepends=(
-    'ffmpeg: video/audio conversion (also embedded in the application jar)'
-    'pandoc: document conversion (also embedded in the application jar)'
 )
 source=("opt-open-media-converter.tar")
 noextract=()
@@ -30,4 +28,4 @@ package() {
 }
 
 # The source tarball is assembled by packaging/build-packages.sh from the
-# staged install tree (bundled jlink runtime + shaded jar).
+# staged install tree (bundled jlink runtime + jar using system converters).

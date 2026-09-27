@@ -1,6 +1,6 @@
 #!/bin/bash
 # Package builder for Open Media Converter (GTK4).
-# Builds the shaded jar + a self-contained jlink runtime, then assembles
+# Builds system-tool and bundled-tool jars + a self-contained jlink runtime, then assembles
 # .deb / .rpm / .pkg.tar.zst / .AppImage installers. Run inside the omc-dev
 # Docker image (or any Linux with JDK 23, maven, dpkg-deb, rpmbuild, bsdtar).
 set -euo pipefail
@@ -40,11 +40,13 @@ mkdir -p "$DIST_DIR"
 # reported by jdeps. jdk.localedata ships non-English locale data.
 JDK_MODULES="java.base,java.desktop,java.sql,java.logging,java.net.http,jdk.crypto.ec,jdk.zipfs,jdk.unsupported,jdk.localedata,java.naming,java.management"
 
-log "Building shaded jar..."
+log "Building native-package jar (system conversion tools)..."
 # Packaging deliberately skips tests, so it must also skip JaCoCo's test
 # coverage gate. Otherwise stale jacoco.exec data from an earlier test run can
 # make a release build fail even though no tests execute here.
-mvn -q -pl omc-gtk -am package -DskipTests -Djacoco.skip=true
+# Clean first: resources from a previous bundled build must never leak into
+# native packages when the embedded-tools Maven profile is disabled.
+mvn -q -pl omc-gtk -am clean package -DskipTests -Djacoco.skip=true -Domc.skipEmbeddedTools=true
 
 log "Assembling application tree under $STAGE..."
 rm -rf "$STAGE"
@@ -174,10 +176,10 @@ depend = gtk4>=4.10
 depend = glib2>=2.66.0
 depend = gobject-introspection>=1.66.0
 depend = hicolor-icon-theme
+depend = ffmpeg>=6.1
+depend = pandoc>=3.1
 depend = imagemagick
 depend = libreoffice-fresh
-optdepend = ffmpeg: video/audio conversion (also embedded in the application jar)
-optdepend = pandoc: document conversion (also embedded in the application jar)
 packager = Open Media Converter Team <maintainer@openmediaconverter.org>
 size = $((size * 1024))
 builddate = ${builddate}
@@ -234,8 +236,12 @@ build_appimage() {
     rm -rf "$appdir"
     mkdir -p "$appdir" "$downloads"
 
-    # Reuse the staged tree: bundled jlink runtime + shaded jar + desktop data.
+    # Reuse the native stage's runtime and desktop data, then replace only its
+    # jar. Keep STAGE's system-tool jar intact for native package verification.
     cp -a "$STAGE/." "$appdir/"
+    log "Building AppImage jar (bundled FFmpeg, ffprobe and Pandoc)..."
+    mvn -q -pl omc-gtk -am package -DskipTests -Djacoco.skip=true -Domc.skipEmbeddedTools=false
+    cp "$JAR" "$appdir/opt/open-media-converter/omc.jar"
 
     # Bundle GTK 4 libraries for portability to systems without GTK 4.
     log "Bundling GTK 4 libraries..."

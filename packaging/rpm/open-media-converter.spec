@@ -15,10 +15,10 @@ Requires:       gtk4 >= 4.10
 Requires:       glib2 >= 2.66.0
 Requires:       gobject-introspection >= 1.66.0
 Requires:       hicolor-icon-theme
+Requires:       ffmpeg >= 6.1
+Requires:       pandoc >= 3.1
 Requires:       ImageMagick
 Requires:       libreoffice-core
-Recommends:     ffmpeg
-Recommends:     pandoc
 Recommends:     libreoffice-writer
 Recommends:     libreoffice-calc
 Recommends:     libreoffice-impress
@@ -30,7 +30,8 @@ interface and leverages powerful conversion tools (FFmpeg, ImageMagick,
 Pandoc, LibreOffice) to deliver reliable single-file and batch conversions:
 multi-format video/audio/image/document support, batch processing with
 per-file progress, conversion presets, state persistence, and
-pause/resume/cancel controls. Ships a bundled Java 23 runtime.
+pause/resume/cancel controls. Ships a bundled Java 23 runtime and uses
+system-managed conversion tools.
 
 %prep
 # nothing to compile — staged tree provided via %{stage}

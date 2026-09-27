@@ -71,9 +71,10 @@
     <mediatype>application/pdf</mediatype>
   </provides>
   <releases>
-    <release version="0.1.0" date="2026-09-18">
+    <release version="0.1.0" date="2026-09-27">
       <description>
-        <p>GTK 4 batch converter for video, audio, images and documents (FFmpeg, ImageMagick, Pandoc, LibreOffice) with AppImage and DEB packages.</p>
+        <p>Improved conversion correctness, process pause/resume, progress reporting and application logging.</p>
+        <p>DEB, RPM and Arch packages use system conversion tools. AppImage bundles FFmpeg, ffprobe and Pandoc. All packages include a Java runtime.</p>
       </description>
     </release>
   </releases>

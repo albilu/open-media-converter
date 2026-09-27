@@ -1,6 +1,8 @@
 # Embedded conversion tools
 
-Release JARs contain separate command-line executables. Versions, archive URLs,
+AppImage and default Maven JARs contain separate command-line executables.
+DEB, RPM and Arch packages use system converters and do not embed these tools.
+Versions, archive URLs,
 SHA-256 checksums, and source references are recorded in `bin/tools.json` and each
 tool's `SOURCE.json`. Open Media Converter runs these tools as external processes.
 

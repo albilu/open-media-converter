@@ -27,14 +27,15 @@ one desktop application with batch controls, reusable presets and persistent set
 - Per-file presets and custom settings alongside batch defaults
 - File and folder import, with per-file status and progress
 - Session restoration, including file records, settings and window state
-- Bundled FFmpeg, ffprobe and Pandoc, with support for installed tools
+- System-managed conversion tools in native packages; bundled FFmpeg, ffprobe
+  and Pandoc in AppImage
 
-| Content | Engine | Example formats |
+| Content | Engine | Supported formats |
 |---|---|---|
-| Video | FFmpeg | MP4, MKV, WebM, AVI, MOV |
-| Audio | FFmpeg | MP3, AAC, FLAC, WAV, Ogg, Opus, M4A |
-| Images | ImageMagick | JPEG, PNG, WebP, GIF, TIFF, BMP, SVG |
-| Documents | Pandoc / LibreOffice | DOCX, ODT, HTML, Markdown, RTF, TXT, EPUB, PDF export |
+| Video | FFmpeg | MP4 (.mp4, .m4v), AVI, MOV (.mov, .qt), MKV, WMV, FLV, WebM |
+| Audio | FFmpeg | MP3, WAV, FLAC, AAC, Ogg (.ogg, .oga), M4A |
+| Images | ImageMagick | JPEG (.jpg, .jpeg, .jpe), PNG, GIF, BMP (.bmp, .dib), TIFF (.tiff, .tif), WebP, SVG, PDF export |
+| Documents | Pandoc / LibreOffice | DOC, DOCX, ODT, RTF, TXT, HTML (.html, .htm), Markdown (.md, .markdown), EPUB, LaTeX (.tex, .latex), reStructuredText (.rst), Org (.org), CSV, XLS, XLSX, ODS, PPT, PPTX, ODP, PDF export |
 
 Available conversions depend on the input/output pair and installed tools.
 PDF-to-editable-document conversion is unsupported. SVG exports contain a raster
@@ -44,19 +45,26 @@ image; they do not trace vector paths.
 
 Download packages from [GitHub Releases](https://github.com/albilu/open-media-converter/releases).
 
-Packages target Linux x86_64 and include a trimmed Java 23 runtime, FFmpeg,
-ffprobe and Pandoc. A separate Java installation is not required.
+Packages target Linux x86_64 and include a trimmed Java 23 runtime. A separate
+Java installation is not required.
 
 <details>
 <summary>Requirements</summary>
 
 - GTK 4.10 or newer for native packages; the AppImage includes GTK libraries
+- FFmpeg 6.1 or newer (including ffprobe) and Pandoc 3.1 or newer for native packages
 - ImageMagick for image conversions
 - LibreOffice, including the relevant Writer, Calc or Impress components, for
   Office documents and PDF rendering
 
 Native package managers resolve the declared system dependencies. ImageMagick
 and LibreOffice remain host dependencies for the AppImage.
+
+Codec availability depends on the installed FFmpeg build. The RPM requires the
+full `ffmpeg` package for codecs such as H.264 (`libx264`); Fedora's
+[`ffmpeg-free`](https://packages.fedoraproject.org/pkgs/ffmpeg/ffmpeg-free/) has
+limited codec support. Enable a repository providing full FFmpeg, such as
+[RPM Fusion](https://rpmfusion.org/Configuration), before installing the RPM.
 
 </details>
 
@@ -106,12 +114,14 @@ mvn clean package
 omc-gtk/bin/open-media-converter
 ```
 
-The first build downloads checksum-verified FFmpeg and Pandoc archives for the
+The first default Maven build downloads checksum-verified FFmpeg and Pandoc archives for the
 host's Linux x86_64 or aarch64 architecture. Later builds reuse
 `omc-gtk/.tool-cache/`. See the [tool manifest](omc-gtk/scripts/tools.json) and
 [binary licenses](BINARY_LICENSES.md) for bundled versions and sources.
 Use `mvn clean package -Domc.skipEmbeddedTools=true` for a smaller build that
-requires installed converters. Distribution packaging targets x86_64.
+requires installed converters. `make package` automatically builds a clean,
+unbundled JAR for DEB/RPM/Arch, then a bundled JAR for AppImage; no extra flag is
+needed. Distribution packaging targets x86_64.
 
 ## Troubleshooting
 

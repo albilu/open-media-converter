@@ -2,14 +2,15 @@
 # Validate the artifacts that will be attached to a release. Run in omc-dev.
 set -euo pipefail
 PACKAGE_ROOT="$(cd "$(dirname "$0")" && pwd)"
+DIST_DIR="$PACKAGE_ROOT/dist"
 VERSION="${1:?Pass the package version}"
 [[ "$VERSION" =~ ^[0-9]+([.][0-9]+){1,3}$ ]] || exit 2
 CHECK_ROOT="$(mktemp -d)"
 trap 'rm -rf "$CHECK_ROOT"' EXIT
-DEB="$PACKAGE_ROOT/open-media-converter_${VERSION}_amd64.deb"
-RPM="$PACKAGE_ROOT/open-media-converter-${VERSION}-1.x86_64.rpm"
-ARCH="$PACKAGE_ROOT/open-media-converter-${VERSION}-1-x86_64.pkg.tar.zst"
-APPIMAGE="$PACKAGE_ROOT/Open_Media_Converter-${VERSION}-x86_64.AppImage"
+DEB="$DIST_DIR/open-media-converter_${VERSION}_amd64.deb"
+RPM="$DIST_DIR/open-media-converter-${VERSION}-1.x86_64.rpm"
+ARCH="$DIST_DIR/open-media-converter-${VERSION}-1-x86_64.pkg.tar.zst"
+APPIMAGE="$DIST_DIR/Open_Media_Converter-${VERSION}-x86_64.AppImage"
 for artifact in "$DEB" "$RPM" "$ARCH"; do test -s "$artifact"; done
 [[ "$(dpkg-deb -f "$DEB" Version)" == "$VERSION" ]]
 [[ "$(dpkg-deb -f "$DEB" Architecture)" == amd64 ]]

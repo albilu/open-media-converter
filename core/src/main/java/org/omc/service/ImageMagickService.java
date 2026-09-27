@@ -385,8 +385,7 @@ public class ImageMagickService {
             // NOTE: ImageMagick -monitor uses \r (carriage return) instead of \n
             // (newline) to update progress on the same line, so we must read
             // character-by-character.
-            Thread outputReader = org.omc.util.ThreadUtils.createThreadFactory("ImageMagick-Reader")
-                    .newThread(() -> {
+            Thread outputReader = org.omc.util.ThreadUtils.createContextThread("ImageMagick-Reader", () -> {
                 try (InputStreamReader reader = new InputStreamReader(convertProcess.getInputStream(),
                         java.nio.charset.StandardCharsets.UTF_8)) {
                     StringBuilder currentLine = new StringBuilder(256);

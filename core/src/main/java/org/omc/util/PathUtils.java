@@ -323,6 +323,28 @@ public final class PathUtils {
     }
 
     /**
+     * Resolves the application's log directory without initializing a logger.
+     * OMC_LOG_DIR, then LOG_DIR, supplies an exact directory; system properties
+     * take precedence over environment variables for each name. Otherwise
+     * logs live under XDG_STATE_HOME, falling back to ~/.local/state.
+     * Blank or invalid overrides and relative XDG paths are ignored.
+     *
+     * @return the absolute, normalized application log directory
+     */
+    public static Path applicationLogDirectory() {
+        for (String name : new String[] { "OMC_LOG_DIR", "LOG_DIR" }) {
+            for (String value : new String[] { System.getProperty(name), System.getenv(name) }) {
+                if (isValidPath(value)) {
+                    return Path.of(value).toAbsolutePath().normalize();
+                }
+            }
+        }
+        String state = System.getenv("XDG_STATE_HOME");
+        Path stateHome = xdgDir(isValidPath(state) ? state : null, ".local/state");
+        return stateHome.resolve("open-media-converter/logs").toAbsolutePath().normalize();
+    }
+
+    /**
      * Resolves an XDG base directory: the environment value wins when it is
      * set and absolute (relative values are invalid per the specification),
      * otherwise the named directory under the user's home is used.

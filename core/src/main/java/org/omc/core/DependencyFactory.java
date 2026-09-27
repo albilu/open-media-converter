@@ -167,7 +167,7 @@ public class DependencyFactory {
                 : PathUtils.xdgConfigHome().resolve("open-media-converter");
         Path dataDir = getDefaultDataDirectory();
         Path cacheDir = getDefaultCacheDirectory();
-        configManager = new ConfigurationManager(configDir, dataDir, cacheDir);
+        configManager = new ConfigurationManager(configDir, dataDir, cacheDir, PathUtils.applicationLogDirectory());
         logger.debug("Created ConfigurationManager with config dir: {}", configDir);
 
         // FileHandler - depends on ConfigurationManager

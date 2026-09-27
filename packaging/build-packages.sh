@@ -25,11 +25,14 @@ if [[ "$VERSION" != "$PROJECT_VERSION" && "$VERSION" != "$DEFAULT_VERSION" ]]; t
     exit 2
 fi
 STAGE="$ROOT/packaging/stage"
+DIST_DIR="$ROOT/packaging/dist"
 RUNTIME="$STAGE/opt/open-media-converter/runtime"
 APP="$STAGE/opt/open-media-converter"
 JAR="$ROOT/omc-gtk/target/open-media-converter-${PROJECT_VERSION}.jar"
 
 log() { echo "[omc-package] $*"; }
+
+mkdir -p "$DIST_DIR"
 
 # Modules from jdeps over the shaded jar (+ crypto/naming/management for
 # TLS and runtime introspection). java-gi extracts native libraries through
@@ -125,7 +128,7 @@ build_deb() {
     [ -f "$debroot/DEBIAN/prerm" ] && chmod 755 "$debroot/DEBIAN/prerm"
     sed -i "s/__VERSION__/${VERSION}/g" "$debroot/DEBIAN/control"
     dpkg-deb --root-owner-group --build -Zxz "$debroot" \
-        "$ROOT/packaging/open-media-converter_${VERSION}_amd64.deb"
+        "$DIST_DIR/open-media-converter_${VERSION}_amd64.deb"
     rm -rf "$debroot"
     log "Built open-media-converter_${VERSION}_amd64.deb"
 }
@@ -141,7 +144,7 @@ build_rpm() {
         > "$rpmtop/SPECS/open-media-converter.spec"
     (cd "$rpmtop" && rpmbuild --define "_topdir $rpmtop" --define "stage $STAGE" \
         --nodeps --nocheck -bb "$rpmtop/SPECS/open-media-converter.spec")
-    find "$rpmtop/RPMS" "$ROOT/rpmbuild/RPMS" -name "*.rpm" -exec mv {} "$ROOT/packaging/" \; 2>/dev/null || true
+    find "$rpmtop/RPMS" "$ROOT/rpmbuild/RPMS" -name "*.rpm" -exec mv {} "$DIST_DIR/" \; 2>/dev/null || true
     rm -rf "$rpmtop" "$ROOT/rpmbuild"
 }
 
@@ -214,7 +217,7 @@ EOF
     (cd "$archroot/pkg" && tar -C "$archroot/pkg" \
         --owner=0 --group=0 --numeric-owner \
         --use-compress-program="zstd -19 -T0" \
-        -cf "$ROOT/packaging/open-media-converter-${VERSION}-1-x86_64.pkg.tar.zst" \
+        -cf "$DIST_DIR/open-media-converter-${VERSION}-1-x86_64.pkg.tar.zst" \
         .PKGINFO .BUILDINFO .MTREE opt usr)
     rm -rf "$archroot"
     log "Built open-media-converter-${VERSION}-1-x86_64.pkg.tar.zst"
@@ -226,7 +229,7 @@ build_appimage() {
     local build_dir="$ROOT/packaging/appimage-build"
     local appdir="$build_dir/AppDir"
     local downloads="$build_dir/downloads"
-    local appimage="$ROOT/packaging/Open_Media_Converter-${VERSION}-x86_64.AppImage"
+    local appimage="$DIST_DIR/Open_Media_Converter-${VERSION}-x86_64.AppImage"
     local triplet="x86_64-linux-gnu"
     rm -rf "$appdir"
     mkdir -p "$appdir" "$downloads"
@@ -370,7 +373,7 @@ hicolor_dirs=$(cd "$STAGE/usr/share/icons/hicolor" && ls -d */apps | sed 's|/$||
 
 build_appimage
 
-log "Artifacts:"
-ls -la "$ROOT/packaging/"*.deb "$ROOT/packaging/"*.rpm \
-    "$ROOT/packaging/"*.pkg.tar.zst "$ROOT/packaging/"*.AppImage 2>/dev/null || true
+log "Artifacts in $DIST_DIR:"
+ls -la "$DIST_DIR/"*.deb "$DIST_DIR/"*.rpm \
+    "$DIST_DIR/"*.pkg.tar.zst "$DIST_DIR/"*.AppImage 2>/dev/null || true
 log "Done."

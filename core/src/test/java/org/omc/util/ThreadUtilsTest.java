@@ -1,9 +1,13 @@
 package org.omc.util;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -11,8 +15,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
 
 import org.junit.jupiter.api.Test;
+import org.slf4j.MDC;
 
 /**
  * Tests for {@link ThreadUtils} thread factory naming. Factory-created threads
@@ -20,6 +27,50 @@ import org.junit.jupiter.api.Test;
  * them concurrently (duplicate names break log forensics and JMX diagnostics).
  */
 class ThreadUtilsTest {
+
+    @Test
+    void dedicatedReadersCaptureIndependentContextBeforeStart() throws InterruptedException {
+        List<Map<String, String>> contexts = new CopyOnWriteArrayList<>();
+        try {
+            MDC.put("omcFile", "first-file");
+            MDC.put("omcTool", "ffmpeg");
+            Thread first = ThreadUtils.createContextThread("Reader",
+                    () -> contexts.add(MDC.getCopyOfContextMap()));
+            MDC.put("omcFile", "second-file");
+            MDC.put("omcTool", "pandoc");
+            Thread second = ThreadUtils.createContextThread("Reader",
+                    () -> contexts.add(MDC.getCopyOfContextMap()));
+            MDC.put("omcFile", "parent-file");
+
+            first.start();
+            second.start();
+            first.join(10_000);
+            second.join(10_000);
+
+            assertFalse(first.isAlive());
+            assertFalse(second.isAlive());
+            assertNotEquals(first.getName(), second.getName());
+            assertEquals(Set.of(Map.of("omcFile", "first-file", "omcTool", "ffmpeg"),
+                    Map.of("omcFile", "second-file", "omcTool", "pandoc")), Set.copyOf(contexts));
+            assertEquals("parent-file", MDC.get("omcFile"));
+        } finally {
+            MDC.clear();
+        }
+    }
+
+    @Test
+    void pooledWorkersDoNotInheritFirstSubmittersContext()
+            throws InterruptedException, ExecutionException, TimeoutException {
+        try (ExecutorService executor = ThreadUtils.createSingleThreadExecutor("Pooled")) {
+            MDC.put("omcFile", "first-file");
+            assertNull(executor.submit(() -> MDC.get("omcFile")).get(10, TimeUnit.SECONDS));
+            MDC.put("omcFile", "second-file");
+            assertNull(executor.submit(() -> MDC.get("omcFile")).get(10, TimeUnit.SECONDS));
+            assertEquals("second-file", MDC.get("omcFile"));
+        } finally {
+            MDC.clear();
+        }
+    }
 
     @Test
     void threadFactory_sequentialCreation_producesIndexedNames() {

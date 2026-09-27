@@ -205,7 +205,6 @@ build_java_args() {
     
     # GTK/GLib debugging (if debug mode enabled)
     if [[ "${OMC_DEBUG}" == "1" ]] || [[ "${DEBUG_MODE}" == "1" ]]; then
-        java_args+=("-Djava.util.logging.config.file=${APP_ROOT}/logging.properties")
         export G_MESSAGES_DEBUG=all
         log_debug "Enabled GLib debug messages"
     fi

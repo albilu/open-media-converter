@@ -291,8 +291,7 @@ public class PandocService {
             StringBuilder errorOutput = new StringBuilder();
             final int MAX_ERROR_OUTPUT_SIZE = 64 * 1024;
 
-            Thread outputReader = org.omc.util.ThreadUtils.createThreadFactory("Pandoc-Reader")
-                    .newThread(() -> {
+            Thread outputReader = org.omc.util.ThreadUtils.createContextThread("Pandoc-Reader", () -> {
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(process.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
                     String line;

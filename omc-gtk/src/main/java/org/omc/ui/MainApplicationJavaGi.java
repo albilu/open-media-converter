@@ -9,13 +9,12 @@ import java.util.List;
 
 import org.gnome.gio.ApplicationFlags;
 import org.gnome.gtk.Application;
-import org.omc.controller.ApplicationWorkflowController;
-import org.omc.core.DependencyFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import ch.qos.logback.classic.Level;
-import ch.qos.logback.classic.LoggerContext;
+import org.omc.controller.ApplicationWorkflowController;
+import org.omc.core.DependencyFactory;
+import org.omc.ui.logging.LoggingConfiguration;
 
 /**
  * Main GTK Application class for Open Media Converter.
@@ -353,6 +352,24 @@ public class MainApplicationJavaGi extends Application {
      * @param args command line arguments
      */
     public static void main(String[] args) {
+        int exitCode = 1;
+        try {
+            LoggingConfiguration.initialize();
+            if (Arrays.asList(args).contains("--debug")) {
+                LoggingConfiguration.enableDebugLogging();
+            }
+            exitCode = runApplication(args);
+        } catch (RuntimeException | Error failure) {
+            logger.error("Application terminated unexpectedly", failure);
+        } finally {
+            // Stop appenders and finish compression before System.exit. The
+            // JVM hook also covers exit paths outside the normal GTK lifecycle.
+            LoggingConfiguration.shutdown();
+        }
+        System.exit(exitCode);
+    }
+
+    private static int runApplication(String[] args) {
         logger.info("Starting Open Media Converter");
 
         // Parse command-line arguments before GTK initialization
@@ -362,7 +379,7 @@ public class MainApplicationJavaGi extends Application {
             for (String arg : args) {
                 if ("--help".equals(arg) || "-h".equals(arg)) {
                     printUsage();
-                    System.exit(0);
+                    return 0;
                 }
             }
 
@@ -370,7 +387,7 @@ public class MainApplicationJavaGi extends Application {
             for (String arg : args) {
                 if ("--version".equals(arg) || "-v".equals(arg)) {
                     printVersion();
-                    System.exit(0);
+                    return 0;
                 }
             }
         }
@@ -386,7 +403,7 @@ public class MainApplicationJavaGi extends Application {
         int exitCode = app.run(applicationArguments);
 
         logger.info("Application exited with code: {}", exitCode);
-        System.exit(exitCode);
+        return exitCode;
     }
 
     /**
@@ -502,9 +519,7 @@ public class MainApplicationJavaGi extends Application {
      * Requirement REQ-001.1: Debug logging support
      */
     private void enableDebugLogging() {
-        LoggerContext loggerContext = (LoggerContext) LoggerFactory.getILoggerFactory();
-        ch.qos.logback.classic.Logger rootLogger = loggerContext.getLogger(Logger.ROOT_LOGGER_NAME);
-        rootLogger.setLevel(Level.DEBUG);
+        LoggingConfiguration.enableDebugLogging();
         logger.debug("Root logger level set to DEBUG");
     }
 

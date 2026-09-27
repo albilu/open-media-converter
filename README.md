@@ -1,119 +1,154 @@
 # Open Media Converter
 
-[![CI/CD](https://github.com/albilu/open-media-converter/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/albilu/open-media-converter/actions/workflows/ci-cd.yml) [![CodeQL](https://github.com/albilu/open-media-converter/actions/workflows/codeql.yml/badge.svg)](https://github.com/albilu/open-media-converter/actions/workflows/codeql.yml)
+[![Test CI](https://github.com/albilu/open-media-converter/actions/workflows/test-ci.yml/badge.svg)](https://github.com/albilu/open-media-converter/actions/workflows/test-ci.yml)
+[![Release CI](https://github.com/albilu/open-media-converter/actions/workflows/release-ci.yml/badge.svg)](https://github.com/albilu/open-media-converter/actions/workflows/release-ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/albilu/open-media-converter)](https://github.com/albilu/open-media-converter/releases)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Java 23](https://img.shields.io/badge/Java-23-orange.svg)](pom.xml)
+[![Platform: Linux](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)](packaging/)
 
-A fully featured GUI (GTK 4 via java-gi) Linux app to convert video, audio, image and document formats using (FFmpeg, ImageMagick, Pandoc, LibreOffice).
+> A native GTK4 media converter for Linux, with one queue for video, audio, images and documents.
 
-![omc.png](resources/omc.png)
+Open Media Converter (OMC) brings FFmpeg, ImageMagick, Pandoc and LibreOffice into
+one desktop application with batch controls, reusable presets and persistent settings.
 
-## Quick highlights
+[Features](#features) · [Installation](#installation) · [Usage](#usage) · [Building from source](#building-from-source) · [Troubleshooting](#troubleshooting)
 
--   Multi-format conversions: video, audio, image, documents
--   Batch processing with per-file progress and presets
--   Portable AppImage or native DEB package
--   Bundles verified FFmpeg, ffprobe and Pandoc executables by default
+![Open Media Converter main window](resources/omc.png)
 
-## Get the app
+## Features
 
--   Releases: https://github.com/albilu/open-media-converter/releases
+- Video and audio conversion with format-compatible codecs and quality controls
+- Image resizing, rotation, flipping, resampling and compression
+- Document conversion and PDF export
+- Batch conversion with configurable parallelism
+- Pause and resume running conversion processes, or cancel a batch
+- Separate video, audio, image and document presets
+- Per-file presets and custom settings alongside batch defaults
+- File and folder import, with per-file status and progress
+- Session restoration, including file records, settings and window state
+- Bundled FFmpeg, ffprobe and Pandoc, with support for installed tools
 
-Quick examples:
+| Content | Engine | Example formats |
+|---|---|---|
+| Video | FFmpeg | MP4, MKV, WebM, AVI, MOV |
+| Audio | FFmpeg | MP3, AAC, FLAC, WAV, Ogg, Opus, M4A |
+| Images | ImageMagick | JPEG, PNG, WebP, GIF, TIFF, BMP, SVG |
+| Documents | Pandoc / LibreOffice | DOCX, ODT, HTML, Markdown, RTF, TXT, EPUB, PDF export |
 
--   Run the AppImage:
+Available conversions depend on the input/output pair and installed tools.
+PDF-to-editable-document conversion is unsupported. SVG exports contain a raster
+image; they do not trace vector paths.
 
-    ```bash
-    chmod +x Open_Media_Converter-*.AppImage
-    ./Open_Media_Converter-*.AppImage
-    ```
+## Installation
 
--   Install DEB on Debian/Ubuntu:
+Download packages from [GitHub Releases](https://github.com/albilu/open-media-converter/releases).
 
-    ```bash
-    sudo dpkg -i open-media-converter_*.deb
-    sudo apt-get install -f
-    ```
+Packages target Linux x86_64 and include a trimmed Java 23 runtime, FFmpeg,
+ffprobe and Pandoc. A separate Java installation is not required.
 
-## Build from source (short)
+<details>
+<summary>Requirements</summary>
 
-Prerequisites: Java 23+, Maven 3.8+, Python 3.11+, and GTK 4. Install ImageMagick
-for images and LibreOffice for native Office conversions and PDF rendering.
+- GTK 4.10 or newer for native packages; the AppImage includes GTK libraries
+- ImageMagick for image conversions
+- LibreOffice, including the relevant Writer, Calc or Impress components, for
+  Office documents and PDF rendering
 
-```bash
+Native package managers resolve the declared system dependencies. ImageMagick
+and LibreOffice remain host dependencies for the AppImage.
+
+</details>
+
+```sh
+# Debian / Ubuntu
+sudo apt install ./open-media-converter_*_amd64.deb
+
+# Fedora / RHEL
+sudo dnf install ./open-media-converter-*.x86_64.rpm
+
+# Arch Linux
+sudo pacman -U ./open-media-converter-*-x86_64.pkg.tar.zst
+
+# AppImage
+chmod +x Open_Media_Converter-*-x86_64.AppImage
+./Open_Media_Converter-*-x86_64.AppImage
+```
+
+## Usage
+
+1. Add files or folders to the queue.
+2. Open **Settings** to choose output formats, conversion options and presets.
+3. Right-click a file to apply a preset or custom settings to that file.
+4. Click **Convert**, then use **Pause**, **Resume** or **Cancel** as needed.
+5. Open the output folder when the batch finishes.
+
+
+## Building from source
+
+The supported development environment uses Docker. From the repository root:
+
+```sh
+make build     # Build the omc-dev image
+make compile   # Compile and package the application
+make test      # Run the test suite under Xvfb
+make package   # Build all four package formats into packaging/dist/
+make dev       # Open an interactive development container
+make run       # Launch with GUI forwarding
+make debug     # Launch with a suspended debugger on port 5005
+```
+
+For a host build, install JDK 23, Maven 3.8+, Python 3.11+, GTK4 and the required
+conversion tools:
+
+```sh
 mvn clean package
 omc-gtk/bin/open-media-converter
 ```
 
-The first build downloads pinned FFmpeg and Pandoc archives for Linux x86_64 or
-aarch64, verifies their SHA-256 checksums, and includes the executables and license
-information in the application JAR. Later offline builds can reuse
-`omc-gtk/.tool-cache/`. Versions and sources are recorded in
-[`omc-gtk/scripts/tools.json`](omc-gtk/scripts/tools.json) and
-[`BINARY_LICENSES.md`](BINARY_LICENSES.md).
+The first build downloads checksum-verified FFmpeg and Pandoc archives for the
+host's Linux x86_64 or aarch64 architecture. Later builds reuse
+`omc-gtk/.tool-cache/`. See the [tool manifest](omc-gtk/scripts/tools.json) and
+[binary licenses](BINARY_LICENSES.md) for bundled versions and sources.
+Use `mvn clean package -Domc.skipEmbeddedTools=true` for a smaller build that
+requires installed converters. Distribution packaging targets x86_64.
 
-For a smaller build that uses installed converters:
+## Troubleshooting
 
-```bash
-mvn clean package -Domc.skipEmbeddedTools=true
+If a converter is unavailable, OMC disables the corresponding settings section.
+Install or configure the missing tool; text-to-PDF export also needs LibreOffice.
+
+Enable detailed logging with either command:
+
+```sh
+open-media-converter --debug
+OMC_DEBUG=1 ./Open_Media_Converter-*-x86_64.AppImage
 ```
 
-Unavailable converters disable the corresponding settings sections; the
-application can still launch. Text-to-PDF conversion requires LibreOffice.
+Logs are saved under `${XDG_STATE_HOME:-$HOME/.local/state}/open-media-converter/logs/`:
+`app.log`, `conversion.log` and `error.log`. Use `OMC_LOG_DIR` for an exact directory
+override (`LOG_DIR` is also accepted). Logging defaults to INFO; `OMC_LOG_LEVEL`
+selects an explicit level such as TRACE or WARN, and `--debug` takes precedence.
+Direct JVM launches can use `-Domc.logging.level=LEVEL` to override `OMC_LOG_LEVEL`.
 
-Docker Build, test, dev, and run:
+Logs rotate daily or at 2 MB into gzip archives, kept for seven days with a 12 MB
+archive cap per log. Conversion logging is synchronous and closes on exit.
+Older logs in `~/.local/share/open-media-converter/logs/` remain in that directory.
 
-```bash
-make compile
-make test
-make dev
-make run
-```
+When [reporting a problem](https://github.com/albilu/open-media-converter/issues),
+include the app version, Linux distribution, conversion settings, steps to
+reproduce and relevant logs.
 
-See `packaging/` for the distribution package builder (`.deb`, `.rpm`,
-`.pkg.tar.zst`, `.AppImage`); `make package` runs it in Docker.
+## Powered by
 
-## Usage overview
-
-1. Add files or folders in the UI.
-2. Select or create a preset in **Settings**.
-3. Click **Convert** to start a batch.
-4. Monitor per-file progress and open the output folder when finished.
-
-Each Video, Audio, Image and Document section has its own output format, settings
-and saved presets. Right-click a file to apply a section preset or custom settings;
-the file list indicates the override. Window size, maximized/fullscreen state,
-file records, per-file settings and section settings are restored on restart.
-
-Video and audio use container-compatible FFmpeg codecs. Images support fit, fill,
-stretch, resampling filters, rotation, flipping and PNG compression. SVG exports
-contain the transformed raster image; they do not trace it into vector paths.
-
-Document routing considers both formats: Pandoc handles supported text/editable
-document pairs, while LibreOffice handles native word-processing, spreadsheet
-and presentation formats. PDF is an export format; PDF-to-editable-document
-conversion is unsupported. Applicable document exports support margins, templates,
-formatting removal, contents tables and PDF font embedding. Native Office paths
-preserve source layout and report unsupported custom text-layout options.
-
-See the [feature remediation report](docs/feature-remediation.md) for verified
-workflows, regression commands and platform coverage.
-
-## Troubleshooting & docs
-
-Short troubleshooting is in [`docs/troubleshooting.md`](docs/troubleshooting.md). For more details see the [`docs/`](docs/) folder.
-
-If you hit a problem, enable debug logging and check logs:
-
-```bash
-# GUI/AppImage
-OMC_DEBUG=1 ./Open_Media_Converter-*.AppImage
-# Logs
-~/.local/share/open-media-converter/logs/
-```
+- [FFmpeg](https://ffmpeg.org/) for video/audio conversion and media probing
+- [ImageMagick](https://imagemagick.org/) for image conversion and transformations
+- [Pandoc](https://pandoc.org/) for document format conversion
+- [LibreOffice](https://www.libreoffice.org/) for Office formats and PDF rendering
+- [GTK](https://www.gtk.org/) and [java-gi](https://github.com/jwharm/java-gi) for the native desktop interface
 
 ## Contributing
 
-Contributions are welcome. Please:
-
-1. Open an issue describing the change or bug.
-2. Fork the repo and create a branch for your work.
-3. Run tests: `mvn test` and keep changes small and focused.
+Open an [issue](https://github.com/albilu/open-media-converter/issues) or submit a
+focused pull request. Run `make test` before submitting changes; packaging changes
+should also pass the package verifier. OMC is licensed under the [GNU GPL v3](LICENSE).

@@ -49,11 +49,13 @@ public class ConfigurationManager {
      * @throws StateIOException if a required directory cannot be created
      */
     public ConfigurationManager() throws StateIOException {
-        this(getDefaultConfigDirectory(), getDefaultDataDirectory(), getDefaultCacheDirectory());
+        this(getDefaultConfigDirectory(), getDefaultDataDirectory(), getDefaultCacheDirectory(),
+                PathUtils.applicationLogDirectory());
     }
 
     /**
-     * Creates a ConfigurationManager with custom directories.
+     * Creates a ConfigurationManager with custom directories, keeping logs
+     * under the custom data directory for compatibility with isolated callers.
      *
      * @param configDirectory The configuration directory path
      * @param dataDirectory   The data directory path
@@ -65,10 +67,26 @@ public class ConfigurationManager {
      */
     public ConfigurationManager(Path configDirectory, Path dataDirectory, Path cacheDirectory)
             throws StateIOException {
+        this(configDirectory, dataDirectory, cacheDirectory,
+                Objects.requireNonNull(dataDirectory, "dataDirectory cannot be null").resolve(LOGS_SUBDIR));
+    }
+
+    /**
+     * Creates a ConfigurationManager with explicit storage and log directories.
+     *
+     * @param configDirectory the configuration directory
+     * @param dataDirectory the application data directory
+     * @param cacheDirectory the cache directory
+     * @param logDirectory the directory used by the logging backend
+     * @throws NullPointerException if any directory is null
+     * @throws StateIOException if a required directory cannot be created
+     */
+    public ConfigurationManager(Path configDirectory, Path dataDirectory, Path cacheDirectory, Path logDirectory)
+            throws StateIOException {
         this.configDirectory = Objects.requireNonNull(configDirectory, "configDirectory cannot be null");
         this.dataDirectory = Objects.requireNonNull(dataDirectory, "dataDirectory cannot be null");
         this.cacheDirectory = Objects.requireNonNull(cacheDirectory, "cacheDirectory cannot be null");
-        this.logDirectory = dataDirectory.resolve(LOGS_SUBDIR);
+        this.logDirectory = Objects.requireNonNull(logDirectory, "logDirectory cannot be null");
         this.tempDirectory = cacheDirectory.resolve(TEMP_SUBDIR);
         this.toolsDirectory = dataDirectory.resolve(TOOLS_SUBDIR);
 

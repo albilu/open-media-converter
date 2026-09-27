@@ -1,126 +1,82 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
-    <!-- Property for log directory - defaults to ~/.local/share/open-media-converter/logs/ -->
-    <property name="LOG_DIR" value="${user.home}/.local/share/open-media-converter/logs" />
-    
-    <!-- Property for log pattern -->
-    <property name="LOG_PATTERN" value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n" />
-    
-    <!-- Conversion pattern carries MDC correlation keys (omcFile, omcTool)
-         set by the tool services around each conversion -->
-    <property name="CONVERSION_PATTERN" value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [omcFile=%X{omcFile} omcTool=%X{omcTool}] - %msg%n" />
-    
-    <!-- Console Appender - INFO level for general output -->
+    <!-- Resolve environment/property overrides before any log files are opened. -->
+    <define name="LOG_DIR" class="org.omc.ui.logging.LogDirectoryDefiner" />
+    <define name="LOG_LEVEL" class="org.omc.ui.logging.LogLevelDefiner" />
+    <property name="LOG_PATTERN" value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [omcFile=%X{omcFile} omcTool=%X{omcTool}] - %msg%n" />
+
+    <!-- Console and files share the level, including runtime debug requests. -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
-            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+            <pattern>${LOG_PATTERN}</pattern>
         </encoder>
-        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
-            <level>INFO</level>
-        </filter>
     </appender>
-    
-    <!-- Main Application Log - INFO level by default with rotation.
-         Use the "debug" command-line flag to raise the root logger to DEBUG. -->
+
     <appender name="APP_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>${LOG_DIR}/app.log</file>
         <encoder>
             <pattern>${LOG_PATTERN}</pattern>
         </encoder>
-        
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <!-- Daily rollover -->
-            <fileNamePattern>${LOG_DIR}/app.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
-            <!-- Max 100MB per file -->
-            <maxFileSize>100MB</maxFileSize>
-            <!-- Keep 10 files -->
-            <maxHistory>10</maxHistory>
-            <!-- Total size cap of 1GB -->
-            <totalSizeCap>1GB</totalSizeCap>
+            <fileNamePattern>${LOG_DIR}/app.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>2MB</maxFileSize>
+            <maxHistory>7</maxHistory>
+            <totalSizeCap>12MB</totalSizeCap>
+            <cleanHistoryOnStart>true</cleanHistoryOnStart>
         </rollingPolicy>
-        
-        <!-- DEBUG threshold so the file captures debug output once the
-             root logger is raised by the debug command-line flag; with the
-             default INFO root no DEBUG events reach this filter anyway -->
-        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
-            <level>DEBUG</level>
-        </filter>
     </appender>
-    
-    <!-- Conversion Operations Log - tracks all conversion activities.
-         Emits on a background thread so chatty tool output never blocks
-         conversion worker threads. -->
+
+    <!-- Write conversion events synchronously: a full async queue must never
+         discard diagnostics. INFO is the default to limit disk I/O. -->
     <appender name="CONVERSION_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>${LOG_DIR}/conversion.log</file>
         <encoder>
-            <pattern>${CONVERSION_PATTERN}</pattern>
+            <pattern>${LOG_PATTERN}</pattern>
         </encoder>
-        
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>${LOG_DIR}/conversion.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
-            <maxFileSize>100MB</maxFileSize>
-            <maxHistory>10</maxHistory>
-            <totalSizeCap>1GB</totalSizeCap>
+            <fileNamePattern>${LOG_DIR}/conversion.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>2MB</maxFileSize>
+            <maxHistory>7</maxHistory>
+            <totalSizeCap>12MB</totalSizeCap>
+            <cleanHistoryOnStart>true</cleanHistoryOnStart>
         </rollingPolicy>
-        
-        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
-            <level>DEBUG</level>
-        </filter>
     </appender>
-    
-    <!-- Async wrapper for the conversion file appender: queue large enough
-         for bursty multi-file batches, never block the converter threads -->
-    <appender name="ASYNC_CONVERSION_FILE" class="ch.qos.logback.classic.AsyncAppender">
-        <queueSize>2048</queueSize>
-        <discardingThreshold>0</discardingThreshold>
-        <neverBlock>true</neverBlock>
-        <includeCallerData>false</includeCallerData>
-        <appender-ref ref="CONVERSION_FILE" />
-    </appender>
-    
-    <!-- Error Log - ERROR level only -->
+
     <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>${LOG_DIR}/error.log</file>
         <encoder>
-            <pattern>${CONVERSION_PATTERN}</pattern>
+            <pattern>${LOG_PATTERN}</pattern>
         </encoder>
-        
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>${LOG_DIR}/error.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
-            <maxFileSize>100MB</maxFileSize>
-            <maxHistory>10</maxHistory>
-            <totalSizeCap>500MB</totalSizeCap>
+            <fileNamePattern>${LOG_DIR}/error.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>2MB</maxFileSize>
+            <maxHistory>7</maxHistory>
+            <totalSizeCap>12MB</totalSizeCap>
+            <cleanHistoryOnStart>true</cleanHistoryOnStart>
         </rollingPolicy>
-        
         <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
             <level>ERROR</level>
         </filter>
     </appender>
-    
-    <!-- Conversion-specific loggers: dedicated conversion log stays at DEBUG
-         for diagnostics; console is protected by its INFO threshold -->
-    <logger name="org.omc.core.ConversionEngine" level="DEBUG" additivity="false">
-        <appender-ref ref="ASYNC_CONVERSION_FILE" />
+
+    <!-- Conversion loggers inherit the same level as the rest of the app. -->
+    <logger name="org.omc.core.ConversionEngine" additivity="false">
+        <appender-ref ref="CONVERSION_FILE" />
         <appender-ref ref="CONSOLE" />
         <appender-ref ref="ERROR_FILE" />
     </logger>
-    
-    <logger name="org.omc.service" level="DEBUG" additivity="false">
-        <appender-ref ref="ASYNC_CONVERSION_FILE" />
+    <logger name="org.omc.service" additivity="false">
+        <appender-ref ref="CONVERSION_FILE" />
         <appender-ref ref="CONSOLE" />
         <appender-ref ref="ERROR_FILE" />
     </logger>
-    
-    <!-- Logger for tool execution -->
-    <logger name="org.omc.core.ToolManager" level="DEBUG" additivity="false">
-        <appender-ref ref="ASYNC_CONVERSION_FILE" />
+    <logger name="org.omc.core.ToolManager" additivity="false">
+        <appender-ref ref="CONVERSION_FILE" />
         <appender-ref ref="CONSOLE" />
         <appender-ref ref="ERROR_FILE" />
     </logger>
-    
-    <!-- Root logger - INFO by default; the debug flag switches it to
-         DEBUG at startup (see MainApplicationJavaGi.enableDebugLogging) -->
-    <root level="INFO">
+
+    <root level="${LOG_LEVEL}">
         <appender-ref ref="CONSOLE" />
         <appender-ref ref="APP_FILE" />
         <appender-ref ref="ERROR_FILE" />

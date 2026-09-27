@@ -890,8 +890,7 @@ public class FFmpegService {
             // the join below (synchronized so a join timeout still sees a
             // consistent partial snapshot).
             List<String> lines = Collections.synchronizedList(new ArrayList<>());
-            Thread outputReader = org.omc.util.ThreadUtils.createThreadFactory("FFprobe-Reader")
-                    .newThread(() -> {
+            Thread outputReader = org.omc.util.ThreadUtils.createContextThread("FFprobe-Reader", () -> {
                         try (BufferedReader reader = new BufferedReader(
                                 new InputStreamReader(ffprobeProcess.getInputStream(), StandardCharsets.UTF_8))) {
                             String line;
@@ -1645,8 +1644,7 @@ public class FFmpegService {
             // would block an inline readLine-to-EOF loop forever, so the
             // bounded waitFor below would never fire (mirrors the
             // runFfprobeBounded gobbler pattern).
-            Thread outputReader = org.omc.util.ThreadUtils.createThreadFactory("FFmpeg-Reader")
-                    .newThread(() -> {
+            Thread outputReader = org.omc.util.ThreadUtils.createContextThread("FFmpeg-Reader", () -> {
                 // Progress throttling: max 2 updates per second (500ms minimum interval)
                 long lastProgressUpdateMillis = 0;
                 final long PROGRESS_THROTTLE_MS = 500;

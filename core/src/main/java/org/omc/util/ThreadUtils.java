@@ -1,7 +1,12 @@
 package org.omc.util;
 
+import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 /**
  * Utility class for thread pool creation and management.
@@ -11,6 +16,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class ThreadUtils {
 
+    private static final Logger logger = LoggerFactory.getLogger(ThreadUtils.class);
+    private static final AtomicInteger CONTEXT_THREAD_NUMBER = new AtomicInteger();
     private static final int DEFAULT_CORE_POOL_SIZE = Runtime.getRuntime().availableProcessors();
     private static final int DEFAULT_MAX_POOL_SIZE = DEFAULT_CORE_POOL_SIZE * 2;
     private static final long DEFAULT_KEEP_ALIVE_TIME = 60L;
@@ -140,13 +147,55 @@ public final class ThreadUtils {
                 Thread thread = new Thread(r);
                 thread.setName(threadNamePrefix + "-" + counter.getAndIncrement());
                 thread.setDaemon(true);
-                thread.setUncaughtExceptionHandler((t, e) -> {
-                    System.err.println("Uncaught exception in thread " + t.getName() + ": " + e.getMessage());
-                    e.printStackTrace();
-                });
+                thread.setUncaughtExceptionHandler(ThreadUtils::logUncaughtException);
                 return thread;
             }
         };
+    }
+
+    /**
+     * Creates a dedicated daemon thread carrying the caller's logging context.
+     * The context is captured now and restored after execution, including when
+     * an uncaught failure is reported. Executor worker factories intentionally
+     * do not inherit context from the first task that happens to create them.
+     *
+     * @param namePrefix the reader or helper thread's name prefix
+     * @param task the work to run on this thread
+     * @return an unstarted thread with an independent logging context
+     */
+    public static Thread createContextThread(String namePrefix, Runnable task) {
+        Map<String, String> captured = MDC.getCopyOfContextMap();
+        Thread thread = new Thread(() -> runWithContext(captured, task),
+                namePrefix + "-" + CONTEXT_THREAD_NUMBER.getAndIncrement());
+        thread.setDaemon(true);
+        thread.setUncaughtExceptionHandler((failedThread, failure) -> runWithContext(captured,
+                () -> logUncaughtException(failedThread, failure)));
+        return thread;
+    }
+
+    /**
+     * Records an uncaught worker or application-thread failure with its stack.
+     *
+     * @param thread the failed thread
+     * @param failure the uncaught failure
+     */
+    public static void logUncaughtException(Thread thread, Throwable failure) {
+        logger.error("Uncaught exception in thread {}", thread.getName(), failure);
+    }
+
+    private static void runWithContext(Map<String, String> captured, Runnable task) {
+        Map<String, String> previous = MDC.getCopyOfContextMap();
+        setContext(captured);
+        try {
+            task.run();
+        } finally {
+            setContext(previous);
+        }
+    }
+
+    private static void setContext(Map<String, String> context) {
+        if (context == null) MDC.clear();
+        else MDC.setContextMap(context);
     }
 
     /**

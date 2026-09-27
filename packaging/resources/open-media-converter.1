@@ -29,11 +29,28 @@ Select a Java 23 or newer installation.
 .B OMC_DEBUG
 Set to 1 to enable diagnostic logging.
 .TP
+.B OMC_LOG_LEVEL
+Select the console and file log level (INFO by default). Overrides OMC_DEBUG;
+the --debug option takes precedence over either variable.
+.TP
+.B OMC_LOG_DIR
+Use this exact directory for app.log, conversion.log and error.log.
+LOG_DIR is accepted when OMC_LOG_DIR is unset.
+.TP
+.B XDG_STATE_HOME
+Base directory for application logs; defaults to ~/.local/state.
+Must be an absolute path.
+.TP
 .B GTK_THEME
 Override the GTK theme.
 .SH FILES
 .I ~/.config/open-media-converter/
 stores settings, presets and session state.
+.TP
+.I ~/.local/state/open-media-converter/logs/
+stores logs unless XDG_STATE_HOME or a log directory override is set.
+Logs rotate daily or at 2 MB into gzip archives, kept for seven days with
+a 12 MB archive cap per log, in addition to each active log file.
 .SH SEE ALSO
 .BR ffmpeg (1),
 .BR pandoc (1),

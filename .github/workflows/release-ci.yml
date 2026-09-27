@@ -52,13 +52,14 @@ jobs:
             - name: Install test (.deb on clean Ubuntu)
               env:
                   VERSION: ${{ steps.version.outputs.version }}
-              run: docker run --rm -e VERSION -v "$(pwd)/packaging:/pkgs:ro" ubuntu:24.04 bash -c 'apt-get update -qq && apt-get install -y -qq "/pkgs/open-media-converter_${VERSION}_amd64.deb" && test -x /usr/bin/open-media-converter'
+              run: docker run --rm -e VERSION -v "$(pwd)/packaging/dist:/pkgs:ro" ubuntu:24.04 bash -c 'apt-get update -qq && apt-get install -y -qq "/pkgs/open-media-converter_${VERSION}_amd64.deb" && test -x /usr/bin/open-media-converter'
 
             - name: Create release and attach packages
               uses: softprops/action-gh-release@v2
               with:
                   tag_name: ${{ github.ref_name }}
                   name: ${{ github.ref_name }}
+                  fail_on_unmatched_files: true
                   body: |
                       Packages for ${{ github.ref_name }}:
 
@@ -67,7 +68,7 @@ jobs:
                       - `open-media-converter-${{ steps.version.outputs.version }}-1-x86_64.pkg.tar.zst` — Arch Linux
                       - `Open_Media_Converter-${{ steps.version.outputs.version }}-x86_64.AppImage` — Universal
                   files: |
-                      packaging/open-media-converter_${{ steps.version.outputs.version }}_amd64.deb
-                      packaging/open-media-converter-${{ steps.version.outputs.version }}-1.x86_64.rpm
-                      packaging/open-media-converter-${{ steps.version.outputs.version }}-1-x86_64.pkg.tar.zst
-                      packaging/Open_Media_Converter-${{ steps.version.outputs.version }}-x86_64.AppImage
+                      packaging/dist/open-media-converter_${{ steps.version.outputs.version }}_amd64.deb
+                      packaging/dist/open-media-converter-${{ steps.version.outputs.version }}-1.x86_64.rpm
+                      packaging/dist/open-media-converter-${{ steps.version.outputs.version }}-1-x86_64.pkg.tar.zst
+                      packaging/dist/Open_Media_Converter-${{ steps.version.outputs.version }}-x86_64.AppImage

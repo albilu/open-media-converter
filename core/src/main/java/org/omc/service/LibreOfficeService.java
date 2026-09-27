@@ -239,8 +239,7 @@ public class LibreOfficeService {
             final int MAX_ERROR_OUTPUT_SIZE = 64 * 1024;
             final boolean[] outputTruncated = { false };
 
-            Thread outputReader = org.omc.util.ThreadUtils.createThreadFactory("LibreOffice-Reader")
-                    .newThread(() -> {
+            Thread outputReader = org.omc.util.ThreadUtils.createContextThread("LibreOffice-Reader", () -> {
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(process.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
                     String line;

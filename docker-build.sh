@@ -119,7 +119,7 @@ package() {
         echo "Invalid package version: expected numeric dotted version" >&2
         return 2
     fi
-    log "Creating packages${version:+ (version ${version})}..."
+    log "Creating packages in packaging/dist/${version:+ (version ${version})}..."
     docker run --init --rm \
         -v "$(pwd):/app" \
         -v "$HOME/.m2:/home/developer/.m2" \
@@ -145,7 +145,7 @@ help() {
     echo "  compile   Build application"
     echo "  run       Run application with GUI support"
     echo "  debug     Run application in debug mode (port 5005)"
-    echo "  package   Create distribution packages (.deb/.rpm/.pkg.tar.zst/.AppImage)"
+    echo "  package   Create .deb/.rpm/.pkg.tar.zst/.AppImage in packaging/dist/"
     echo "  clean     Clean up Docker resources"
     echo "  help      Show this help"
 }

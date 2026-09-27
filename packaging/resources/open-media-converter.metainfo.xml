@@ -18,7 +18,7 @@
       <li>Documents via Pandoc and LibreOffice (PDF, DOCX, ODT, HTML, Markdown, EPUB)</li>
       <li>Batch processing with pause, resume and cancel controls</li>
       <li>Conversion presets plus per-file overrides</li>
-      <li>Portable AppImage or native DEB package with bundled converters</li>
+      <li>Portable AppImage with bundled converters, or native packages with system converters</li>
     </ul>
   </description>
   <developer id="org.omc">
@@ -71,6 +71,12 @@
     <mediatype>application/pdf</mediatype>
   </provides>
   <releases>
+    <release version="0.1.1" date="2026-09-27">
+      <description>
+        <p>Fixed AppImage startup on Ubuntu 22.04 and compatible systems with a complete GTK dependency bundle and a modern AppImage runtime.</p>
+        <p>Added clean-system portability checks and corrected desktop icons and AppStream metadata.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-09-27">
       <description>
         <p>Improved conversion correctness, process pause/resume, progress reporting and application logging.</p>

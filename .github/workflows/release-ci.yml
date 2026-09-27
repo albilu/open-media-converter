@@ -62,6 +62,18 @@ jobs:
                     /usr/bin/open-media-converter --version
                   '
 
+            - name: AppImage portability (clean Ubuntu 22.04 and 24.04)
+              env:
+                  VERSION: ${{ steps.version.outputs.version }}
+              run: |
+                  for distro in 22.04 24.04; do
+                    docker build -f packaging/appimage/smoke.Dockerfile \
+                      --build-arg "DISTRO=$distro" -t "omc-appimage-smoke:$distro" .
+                    docker run --init --rm --network none -v "$(pwd):/app:ro" \
+                      "omc-appimage-smoke:$distro" bash /app/packaging/verify-appimage.sh \
+                      "/app/packaging/dist/Open_Media_Converter-${VERSION}-x86_64.AppImage"
+                  done
+
             - name: Create release and attach packages
               uses: softprops/action-gh-release@v2
               with:

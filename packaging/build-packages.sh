@@ -2,7 +2,7 @@
 # Package builder for Open Media Converter (GTK4).
 # Builds system-tool and bundled-tool jars + a self-contained jlink runtime, then assembles
 # .deb / .rpm / .pkg.tar.zst / .AppImage installers. Run inside the omc-dev
-# Docker image (or any Linux with JDK 23, maven, dpkg-deb, rpmbuild, bsdtar).
+# Docker image, which supplies the portable GTK bundle and packaging tools.
 set -euo pipefail
 
 # Package metadata and the shaded native libraries target Linux amd64.
@@ -230,11 +230,9 @@ build_appimage() {
     log "Building .AppImage..."
     local build_dir="$ROOT/packaging/appimage-build"
     local appdir="$build_dir/AppDir"
-    local downloads="$build_dir/downloads"
     local appimage="$DIST_DIR/Open_Media_Converter-${VERSION}-x86_64.AppImage"
-    local triplet="x86_64-linux-gnu"
     rm -rf "$appdir"
-    mkdir -p "$appdir" "$downloads"
+    mkdir -p "$appdir"
 
     # Reuse the native stage's runtime and desktop data, then replace only its
     # jar. Keep STAGE's system-tool jar intact for native package verification.
@@ -243,105 +241,41 @@ build_appimage() {
     mvn -q -pl omc-gtk -am package -DskipTests -Djacoco.skip=true -Domc.skipEmbeddedTools=false
     cp "$JAR" "$appdir/opt/open-media-converter/omc.jar"
 
-    # Bundle GTK 4 libraries for portability to systems without GTK 4.
-    log "Bundling GTK 4 libraries..."
-    mkdir -p "$appdir/usr/lib/${triplet}/girepository-1.0" \
-        "$appdir/usr/lib/${triplet}/gdk-pixbuf-2.0/2.10.0/loaders"
-    local gtk_libs=(
-        "libgtk-4.so.1"
-        "libglib-2.0.so.0"
-        "libgobject-2.0.so.0"
-        "libgio-2.0.so.0"
-        "libgdk_pixbuf-2.0.so.0"
-        "libpango-1.0.so.0"
-        "libpangocairo-1.0.so.0"
-        "libcairo.so.2"
-        "libcairo-gobject.so.2"
-        "libharfbuzz.so.0"
-        "libgraphene-1.0.so.0"
-        "libepoxy.so.0"
-        "libfontconfig.so.1"
-        "libfreetype.so.6"
-        "libpng16.so.16"
-    )
-    local copied=0
-    for lib in "${gtk_libs[@]}"; do
-        local lib_path
-        lib_path=$(ldconfig -p | grep "$lib" | grep -i "x86-64" | awk '{print $NF}' | head -1)
-        if [ -n "$lib_path" ] && [ -f "$lib_path" ]; then
-            cp -P "$lib_path" "$appdir/usr/lib/${triplet}/"
-            local lib_dir lib_base
-            lib_dir=$(dirname "$lib_path")
-            lib_base=$(basename "$lib" | cut -d. -f1,2,3)
-            cp -P "$lib_dir/$lib_base"* "$appdir/usr/lib/${triplet}/" 2>/dev/null || true
-            copied=$((copied + 1))
-        else
-            log "  Library not found: $lib (will use system fallback)"
-        fi
-    done
-    log "  Bundled $copied GTK libraries"
-
-    local typelib_dir="/usr/lib/${triplet}/girepository-1.0"
-    if [ -d "$typelib_dir" ]; then
-        for typelib in Gtk-4.0 GLib-2.0 GObject-2.0 Gio-2.0 Gdk-4.0 GdkPixbuf-2.0 \
-                       Pango-1.0 cairo-1.0 HarfBuzz-0.0 Graphene-1.0; do
-            cp "$typelib_dir/$typelib.typelib" \
-                "$appdir/usr/lib/${triplet}/girepository-1.0/" 2>/dev/null || true
-        done
-    fi
-    local pixbuf_loaders="/usr/lib/${triplet}/gdk-pixbuf-2.0/2.10.0/loaders"
-    if [ -d "$pixbuf_loaders" ]; then
-        cp -r "$pixbuf_loaders"/* \
-            "$appdir/usr/lib/${triplet}/gdk-pixbuf-2.0/2.10.0/loaders/" 2>/dev/null || true
-        if command -v gdk-pixbuf-query-loaders >/dev/null; then
-            GDK_PIXBUF_MODULEDIR="$appdir/usr/lib/${triplet}/gdk-pixbuf-2.0/2.10.0/loaders" \
-                gdk-pixbuf-query-loaders \
-                > "$appdir/usr/lib/${triplet}/gdk-pixbuf-2.0/2.10.0/loaders.cache" 2>/dev/null || true
-        fi
-    fi
-
-    cp packaging/appimage/AppRun "$appdir/AppRun"
-    chmod 755 "$appdir/AppRun"
-    ln -sf "usr/share/applications/open-media-converter.desktop" \
-        "$appdir/open-media-converter.desktop"
-    ln -sf "usr/share/icons/hicolor/scalable/apps/open-media-converter.svg" \
-        "$appdir/open-media-converter.svg"
-
-    # appimagetool: download if not installed
-    local appimagetool_url="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
-    local appimagetool_cmd
-    if command -v appimagetool >/dev/null; then
-        appimagetool_cmd="appimagetool"
-    else
-        appimagetool_cmd="$downloads/appimagetool"
-        if [ ! -x "$appimagetool_cmd" ]; then
-            log "Downloading appimagetool..."
-            if command -v wget >/dev/null; then
-                wget -q -O "$appimagetool_cmd" "$appimagetool_url"
-            else
-                curl -L -s -o "$appimagetool_cmd" "$appimagetool_url"
-            fi
-            chmod +x "$appimagetool_cmd"
-        fi
-    fi
-
-    # Use --appimage-extract-and-run when FUSE is unavailable (Docker/CI).
-    local extract_flag=""
-    if [ ! -e /dev/fuse ] || [ ! -w /dev/fuse ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ -f /.dockerenv ]; then
-        extract_flag="--appimage-extract-and-run"
-    fi
+    # This dependency closure is built on Ubuntu 22.04, independently of the
+    # newer system libraries used by native packages and development tests.
+    cp -a /opt/omc-appimage/native/. "$appdir/"
+    install -m 755 packaging/appimage/AppRun "$appdir/AppRun"
+    # The portable desktop launcher must resolve through AppRun, not /usr/bin.
+    sed -e 's|/usr/bin/open-media-converter|open-media-converter|g' \
+        -e 's|^Categories=.*|Categories=AudioVideo;Audio;Video;GTK;|' \
+        packaging/resources/open-media-converter.desktop > "$appdir/open-media-converter.desktop"
+    cp "$appdir/open-media-converter.desktop" "$appdir/usr/share/applications/open-media-converter.desktop"
+    sed '/^\[Desktop Entry\]$/a NoDisplay=true' "$appdir/open-media-converter.desktop" \
+        > "$appdir/usr/share/applications/org.omc.OpenMediaConverter.desktop"
+    cat > "$appdir/usr/bin/open-media-converter" <<'EOF'
+#!/bin/sh
+APPDIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+exec "$APPDIR/AppRun" "$@"
+EOF
+    chmod 755 "$appdir/usr/bin/open-media-converter"
+    cp "$STAGE/usr/share/icons/hicolor/512x512/apps/open-media-converter.png" "$appdir/"
+    ln -s open-media-converter.png "$appdir/.DirIcon"
+    # The catalog's legacy lint needs *.appdata.xml; its name must match the ID.
+    mv "$appdir/usr/share/metainfo/open-media-converter.metainfo.xml" \
+        "$appdir/usr/share/metainfo/org.omc.open-media-converter.appdata.xml"
+    desktop-file-validate "$appdir/open-media-converter.desktop"
+    appstreamcli validate --no-net "$appdir/usr/share/metainfo/org.omc.open-media-converter.appdata.xml"
+    bash /opt/omc-appimage/appdir-lint.sh "$appdir"
+    python3 packaging/appimage/check-abi.py "$appdir"
 
     rm -f "$appimage"
-    set +e
-    ARCH=x86_64 "$appimagetool_cmd" $extract_flag "$appdir" "$appimage" \
-        > "$build_dir/appimagetool.log" 2>&1
-    local tool_exit=$?
-    set -e
-    if [ ! -f "$appimage" ]; then
-        echo "appimagetool failed (exit code: $tool_exit):" >&2
+    if ! ARCH=x86_64 /opt/omc-appimage/appimagetool --appimage-extract-and-run \
+        --runtime-file /opt/omc-appimage/runtime-x86_64 "$appdir" "$appimage" \
+        > "$build_dir/appimagetool.log" 2>&1; then
         cat "$build_dir/appimagetool.log" >&2
         exit 1
     fi
+    test -s "$appimage"
     chmod +x "$appimage"
     rm -rf "$appdir"
     log "Built Open_Media_Converter-${VERSION}-x86_64.AppImage"

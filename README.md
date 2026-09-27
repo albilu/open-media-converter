@@ -52,6 +52,7 @@ Java installation is not required.
 <summary>Requirements</summary>
 
 - GTK 4.10 or newer for native packages; the AppImage includes GTK libraries
+- Ubuntu 22.04 or newer, or a compatible Linux desktop with glibc 2.35+, for AppImage
 - FFmpeg 6.1 or newer (including ffprobe) and Pandoc 3.1 or newer for native packages
 - ImageMagick for image conversions
 - LibreOffice, including the relevant Writer, Calc or Impress components, for

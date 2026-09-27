@@ -102,6 +102,7 @@ PYNATIVES
 APPIMAGE_ROOT="$CHECK_ROOT/squashfs-root/opt/open-media-converter"
 test -x "$CHECK_ROOT/squashfs-root/AppRun"
 test -x "$APPIMAGE_ROOT/runtime/bin/java"
+python3 "$PACKAGE_ROOT/appimage/check-abi.py" "$CHECK_ROOT/squashfs-root"
 diff -qr "$APP_ROOT/runtime" "$APPIMAGE_ROOT/runtime"
 python3 - "$APP_ROOT/omc.jar" "$APPIMAGE_ROOT/omc.jar" <<'PYAPPIMAGE'
 import hashlib, sys, zipfile
@@ -287,8 +288,14 @@ export XDG_CONFIG_HOME="$CHECK_ROOT/config" XDG_DATA_HOME="$CHECK_ROOT/data"
 export XDG_CACHE_HOME="$CHECK_ROOT/cache" XDG_STATE_HOME="$CHECK_ROOT/state"
 for mode in native appimage native; do
     runtime_root="$APP_ROOT"
-    [[ "$mode" != appimage ]] || runtime_root="$APPIMAGE_ROOT"
+    library_options=()
+    if [[ "$mode" == appimage ]]; then
+        runtime_root="$APPIMAGE_ROOT"
+        library_options=("-Djavagi.path=$CHECK_ROOT/squashfs-root/usr/lib/omc"
+            "-Djava.library.path=$CHECK_ROOT/squashfs-root/usr/lib/omc")
+    fi
     xvfb-run -a timeout -k 10s 120s "$runtime_root/runtime/bin/java" --enable-native-access=ALL-UNNAMED \
+        "${library_options[@]}" \
         -cp "$CHECK_ROOT:$runtime_root/omc.jar" PackageRuntimeCheck "$mode" "$CHECK_ROOT/tool-work"
 done
 # Bound the real application's startup; its GTK entry point has no dedicated smoke switch.

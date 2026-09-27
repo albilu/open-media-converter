@@ -16,3 +16,8 @@ tool's `SOURCE.json`. Open Media Converter runs these tools as external processe
 
 The application's source license is in [LICENSE](LICENSE).
 ImageMagick and LibreOffice are discovered on the system and are not embedded in the JAR.
+
+AppImage also includes GTK 4.14.5, GLib 2.80.5 and their private native
+dependencies, built on Ubuntu 22.04. Their license notices, pinned source URLs
+and distribution package versions are included under
+`usr/share/doc/open-media-converter/native-libraries/` in the AppImage.

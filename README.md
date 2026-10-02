@@ -152,11 +152,13 @@ reproduce and relevant logs.
 
 ## Powered by
 
-- [FFmpeg](https://ffmpeg.org/) for video/audio conversion and media probing
-- [ImageMagick](https://imagemagick.org/) for image conversion and transformations
-- [Pandoc](https://pandoc.org/) for document format conversion
-- [LibreOffice](https://www.libreoffice.org/) for Office formats and PDF rendering
-- [GTK](https://www.gtk.org/) and [java-gi](https://github.com/jwharm/java-gi) for the native desktop interface
+OMC builds on the work of these outstanding open-source projects:
+
+- [FFmpeg](https://github.com/FFmpeg/FFmpeg) ![GitHub stars](https://img.shields.io/github/stars/FFmpeg/FFmpeg?style=social) — video/audio conversion and media probing
+- [Pandoc](https://github.com/jgm/pandoc) ![GitHub stars](https://img.shields.io/github/stars/jgm/pandoc?style=social) — document format conversion
+- [ImageMagick](https://github.com/ImageMagick/ImageMagick) ![GitHub stars](https://img.shields.io/github/stars/ImageMagick/ImageMagick?style=social) — image conversion and transformations
+- [LibreOffice](https://github.com/LibreOffice/core) ![GitHub stars](https://img.shields.io/github/stars/LibreOffice/core?style=social) — Office formats and PDF rendering
+- [java-gi](https://github.com/jwharm/java-gi) ![GitHub stars](https://img.shields.io/github/stars/jwharm/java-gi?style=social) — native desktop interface
 
 ## Contributing
 
